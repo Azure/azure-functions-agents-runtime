@@ -1,4 +1,4 @@
-"""Offline SDK create/resume worker using ordinary local SessionFs files."""
+"""SDK create/resume worker with a synthetic provider and local SessionFs."""
 
 from __future__ import annotations
 
@@ -6,10 +6,19 @@ import asyncio
 import json
 import os
 import sys
+from functools import partial
 from pathlib import Path
+from unittest.mock import patch
+
+import httpx
 
 
-async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> int:
+async def _run(
+    phase: int, session_dir: Path, storage_root: Path, out: Path, probe_path: str,
+) -> int:
+    from copilot import CopilotClient
+    from copilot.copilot_request_handler import CopilotRequestHandler
+
     from azure_functions_agents.harness import _harness_lifecycle
     from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
     from azure_functions_agents.harness.copilot_sdk import (
@@ -52,19 +61,42 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
     }
     storage = None
     session = None
+
+    class SyntheticProvider(CopilotRequestHandler):
+        async def send_request(self, request, options):
+            assert request.url.path == "/v1/chat/completions"
+            return httpx.Response(200, request=request, json={
+                "id": "offline-restore", "object": "chat.completion", "created": 0,
+                "model": "offline-model",
+                "choices": [{
+                    "index": 0, "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "OFFLINE_RESTORE_MARKER"},
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })
+
     try:
         storage = await fs.open_session_fs(
             harness.session_storage, "agent", "restore",
             workspace_path=str(owner.workspace),
             deadline=asyncio.get_running_loop().time() + 120,
         )
-        client = await owner.client()
+        with patch("copilot.CopilotClient", partial(
+            CopilotClient, request_handler=SyntheticProvider(),
+        )):
+            client = await owner.client()
         session = await _open_session(client, native_id, phase, storage)
+        if phase == 1:
+            response = await session.send_and_wait("Return the offline marker.", timeout=30)
+            assert response is not None
+            assert response.data.content == "OFFLINE_RESTORE_MARKER"
         result["event_count"] = len(await session.get_events())
         if phase == 1:
             await storage.write_file("/session-state/opaque.sdk", "\x00opaque\r\nfixture")
         else:
             assert await storage.read_file("/session-state/opaque.sdk") == "\x00opaque\r\nfixture"
+        if probe_path:
+            await storage.stat(probe_path)
         result["outcome"] = "ok"
     except Exception as error:
         result["outcome"] = "error"
@@ -130,13 +162,18 @@ async def _open_session(client, native_id, phase, storage):
 
 
 def main() -> None:
-    phase, session_dir, storage_root, out = sys.argv[1:5]
+    phase, session_dir, storage_root, out, probe_path = sys.argv[1:6]
     os.environ["COPILOT_SKIP_CLI_DOWNLOAD"] = "1"
     os.environ["COPILOT_CLI_EXTRACT_DIR"] = str(
-        Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.85"
+        Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.93-4"
     )
-    for name in ("COPILOT_CLI_PATH", "COPILOT_SDK_DEFAULT_CONNECTION"):
-        os.environ.pop(name, None)
+    from copilot._cli_version import get_runtime_platform
+
+    executable = "copilot-runtime.exe" if os.name == "nt" else "copilot-runtime"
+    os.environ["COPILOT_CLI_PATH"] = str(
+        Path(os.environ["COPILOT_CLI_EXTRACT_DIR"]) / "prebuilds" / get_runtime_platform() / executable
+    )
+    os.environ.pop("COPILOT_SDK_DEFAULT_CONNECTION", None)
     os.environ["OPENAI_API_KEY"] = "offline"
     os.environ["AZURE_FUNCTIONS_AGENTS_SESSION_DIR"] = session_dir
     for name in (
@@ -145,7 +182,7 @@ def main() -> None:
     ):
         os.environ.pop(name, None)
     raise SystemExit(asyncio.run(
-        _run(int(phase), Path(session_dir), Path(storage_root), Path(out))
+        _run(int(phase), Path(session_dir), Path(storage_root), Path(out), probe_path)
     ))
 
 

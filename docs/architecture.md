@@ -114,7 +114,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/_skill_policy.py` | SDK-free default-deny helper policy. Most-specific canonical discovered-root ownership permits only approved skill resources and narrow literal script invocations; excluded roots remain ownership metadata. Not an OS sandbox or skill-origin attestation. | `SkillPolicy` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_runtime.py` | Lazy app-owned SDK stdio client and shared credential owner, acquired once through the binding cell behind a startup lock. Registers its own stable close callback; explicit async shutdown clears cached handles after bounded cleanup so stopped or closing resources are never reused, without clearing standalone selection. No global runtime-owner map, deferred retry registry, or process-exit cleanup path. | `CopilotRuntime`, `get_runtime()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_fs.py` | Actual SDK `SessionFsProvider` implementation for opaque files, with one route-based backend factory selection, callback serialization/deadlines, text conversion, SDK-shaped errors, and read-only projection of approved physical skill files. | `CopilotSessionFs`, `SessionFileBackend`, `open_session_fs()` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_session_paths.py` | Selected Windows/POSIX callback path policies and independently selected physical-host policy; exact workspace mapping, lexical containment and local platform rules. | `SessionPathPolicy`, `select_session_path_policy()` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_session_paths.py` | Windows/POSIX callback path policies and a separate physical-host policy. Maps the exact workspace and the same-drive Windows session-state alias to virtual roots. Checks path containment and local platform rules. | `SessionPathPolicy`, `select_session_path_policy()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_local.py`, `_copilot_session_blob.py` | Ordinary byte filesystem operations and flat-Blob filesystem adaptation, structurally conforming to the shared backend Protocol. No native-file interpretation or storage format changes. | `LocalSessionFileBackend`, `BlobSessionFileBackend` |
 | `azure_functions_agents/__init__.py` | Public API exports and shutdown of acquired, harness-owned resources plus the active client manager, without importing unselected persistence implementations. | `shutdown_client_manager()` |
 | `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog (including allowed tools' decorator-owned retry and timeout declarations), per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
@@ -335,6 +335,17 @@ the virtual workspace. This is a read-only file projection, not a directory moun
 it preserves canonical-path ownership and excluded-root checks, never copies
 resources into session storage, and does not grant mutation or directory
 enumeration. All other paths retain the virtual workspace/session-state rules.
+
+The Copilot extra pins `github-copilot-sdk==1.0.17`. The host configures
+`/session-state` as a virtual root and uses the host's path conventions.
+With Windows conventions, native callbacks can use
+`<workspace-drive>:\session-state\temp`. The Windows path policy maps only
+that drive's exact `session-state` root and its descendants to `/session-state`.
+The exact physical workspace mapping takes precedence. All existing path
+checks still apply after translation. A wrong drive, UNC state alias,
+lookalike root, traversal, or reserved name is denied. The alias selects
+session storage, not a physical directory at the drive root. Approved skill
+files keep their separate read-only route.
 
 Lifecycle ownership is deliberately narrow: each app binding owns at most one
 lazy reusable Copilot client plus shared credential, and each request owns its

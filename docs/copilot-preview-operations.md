@@ -25,6 +25,28 @@ production qualification.
 The SDK owns continuation, recovery and compaction. The host does not promise
 transactional turns or exactly-once tool effects.
 
+The Copilot extra pins `github-copilot-sdk==1.0.17`. Windows checks use the
+unchanged Python release-tag source and cached native runtime `1.0.93-4`.
+The public wheel could not be downloaded in the test environment because of
+a TLS error. These checks do not establish the wheel's native runtime pin.
+The release notes list `1.0.93-4`, but the tag's `nodejs/package.json` lists
+`1.0.93`. Keep the exact tested source and native version in test reports.
+
+For offline native tests, first put an approved, complete native bundle in
+`.tmp-validation/runtime-1.0.93-4/prebuilds/<platform>/`. The bundle must include
+the runtime executable, `runtime.node`, and `.hostless-runtime-assets-v2`.
+The tests select that executable directly and never download it.
+Then run these commands from the repository root:
+
+```powershell
+$env:AZURE_FUNCTIONS_AGENTS_TEST_NATIVE_COPILOT = "1"
+python -m pytest tests\test_copilot_execution_native.py tests\test_copilot_execution_restore.py -q
+```
+
+The skill/view regression uses a handler that rejects model inference. Other
+native execution tests use a synthetic provider. Missing approved assets cause
+a skip, not a successful native check.
+
 ## Opt in and opt out
 
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only harness selector and is read
@@ -192,6 +214,17 @@ handling the SDK's declared host-path convention. The adapter does not parse
 file contents to resolve paths or restrict persistence to known filenames.
 Only the exact current host workspace is accepted. Unknown paths recorded by
 the SDK are denied; restoring after a workspace change is not qualified.
+These checks apply to filesystem callbacks. They are not a host resume gate:
+the SDK can resume without a callback for a previously recorded workspace.
+
+On Windows, the SDK can request `<workspace-drive>:\session-state\temp`.
+The host maps that exact same-drive root and its descendants to the virtual
+`/session-state` root. For example, a `Q:\app\workspace` workspace permits
+`Q:\session-state\temp` as a session-storage path. This does not permit access
+to the physical `Q:\session-state` directory. Wrong drives, UNC state aliases,
+sibling prefixes, traversal, and reserved names stay denied. The SDK's public
+documentation shows a POSIX virtual-root example; it does not settle ownership
+of this Windows path conversion. Confirm that contract before an upstream report.
 
 MAF history uses its own provider and `agent-sessions/` namespace. Neither
 harness imports, initializes, probes or cleans up the other's persistence.

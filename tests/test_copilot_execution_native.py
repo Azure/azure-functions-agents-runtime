@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
-CACHE = Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.85"
+CACHE = Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.93-4"
 SENTINEL = "not-a-credential-native-persistence-sentinel"
 AUTH_FAILURE_SENTINEL = "sentinel-private-native-provider-403"
 
@@ -44,7 +44,7 @@ async def test_native_skill_then_view_reads_approved_physical_reference(monkeypa
     from copilot import CopilotClient, RuntimeConnection
     from copilot._cli_version import get_runtime_platform
     from copilot.copilot_request_handler import CopilotRequestHandler
-    from copilot.generated.rpc import ToolResultType, ToolsExecuteRequest
+    from copilot.generated.rpc import ToolResultExpanded, ToolResultType, ToolsExecuteRequest
     from copilot.session import ProviderConfig
 
     from azure_functions_agents._skill_policy import SkillPolicy
@@ -65,7 +65,7 @@ async def test_native_skill_then_view_reads_approved_physical_reference(monkeypa
         pytest.skip("No approved cached native runtime bundle; never download during this test")
     monkeypatch.setenv("COPILOT_CLI_EXTRACT_DIR", str(CACHE))
     monkeypatch.setenv("COPILOT_SKIP_CLI_DOWNLOAD", "1")
-    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.setenv("COPILOT_CLI_PATH", str(assets / executable))
     monkeypatch.delenv("COPILOT_SDK_DEFAULT_CONNECTION", raising=False)
 
     class NoInference(CopilotRequestHandler):
@@ -118,21 +118,23 @@ async def test_native_skill_then_view_reads_approved_physical_reference(monkeypa
             on_permission_request=permission_handler(policy),
             create_session_fs_handler=lambda _request: storage,
         )
-        loaded = await session.rpc.tools.execute(
+        await session.rpc.tools.initialize_and_validate(timeout=30)
+        # This experimental RPC returns wire dictionaries; use the SDK decoder.
+        loaded = ToolResultExpanded.from_dict(await session.rpc.tools.execute(
             ToolsExecuteRequest(name="skill", arguments={"skill": "preview-check"}),
             timeout=30,
-        )
+        ))
         assert loaded.result_type == ToolResultType.SUCCESS, loaded
-        viewed = await session.rpc.tools.execute(
+        viewed = ToolResultExpanded.from_dict(await session.rpc.tools.execute(
             ToolsExecuteRequest(name="view", arguments={"path": str(reference)}),
             timeout=30,
-        )
+        ))
         assert viewed.result_type == ToolResultType.SUCCESS, viewed
         assert "NATIVE_REFERENCE_7C42A9" in viewed.text_result_for_llm
-        denied = await session.rpc.tools.execute(
+        denied = ToolResultExpanded.from_dict(await session.rpc.tools.execute(
             ToolsExecuteRequest(name="view", arguments={"path": str(unapproved)}),
             timeout=30,
-        )
+        ))
         assert denied.result_type != ToolResultType.SUCCESS, denied
     finally:
         if session is not None:
@@ -214,7 +216,7 @@ def native(monkeypatch, tmp_path, request):
         pytest.skip("Pinned native assets are not cached; never fetch them in tests.")
     monkeypatch.setenv("COPILOT_CLI_EXTRACT_DIR", str(CACHE))
     monkeypatch.setenv("COPILOT_SKIP_CLI_DOWNLOAD", "1")
-    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.setenv("COPILOT_CLI_PATH", str(bundle / wrapper))
     monkeypatch.delenv("COPILOT_SDK_DEFAULT_CONNECTION", raising=False)
 
     captured = []
@@ -590,6 +592,7 @@ async def test_native_startup_failure_preserves_completed_session(native, monkey
         await shutdown_client_manager()
         with monkeypatch.context() as patch:
             patch.setenv("COPILOT_CLI_EXTRACT_DIR", str(native.state / "missing-sdk-bundle"))
+            patch.setenv("COPILOT_CLI_PATH", str(native.state / "missing-sdk-bundle" / "missing-runtime"))
             failed = await chat(SimpleNamespace(
                 headers={"x-ms-session-id": public_id},
                 json=AsyncMock(return_value={"prompt": "Recall."}),

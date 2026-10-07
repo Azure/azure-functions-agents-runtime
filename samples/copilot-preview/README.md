@@ -13,8 +13,10 @@ and deployment, or a Foundry project and deployment. Azure Entra callers need
 the target data-plane role (for example, Cognitive Services OpenAI User for
 Azure OpenAI or the project role approved by your Foundry administrator).
 
-`requirements.txt` installs this checkout with `[copilot]`. The SDK downloads
-its native runtime on first use if uncached.
+`requirements.txt` installs this checkout with `[copilot]`, which pins
+`github-copilot-sdk==1.0.17`. The SDK downloads its native runtime on first
+use if uncached. On Windows, same-drive `session-state` callbacks use the
+configured session storage, not a physical directory at the drive root.
 
 For the local-file walkthrough, use a terminal without `AzureWebJobsStorage`
 or `AzureWebJobsStorage__blobServiceUri` configured and leave those settings

@@ -735,6 +735,47 @@ def test_recorded_unknown_workspaces_are_not_adopted_by_suffix(path, conventions
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["local", "blob"])
+async def test_windows_state_drive_alias_routes_only_to_session_storage(
+    backend, local_route, memory_blobs,
+):
+    route = local_route
+    if backend == "blob":
+        route = replace(
+            route,
+            blob=BlobStorageSettings(
+                container_name="container", blob_service_url="https://fixture.invalid",
+            ),
+        )
+    provider = await open_session_fs(
+        route, "agent", "session", conventions="windows", workspace_path=r"Q:\app\ws",
+    )
+    try:
+        await provider.mkdir(r"Q:\session-state\temp", recursive=True)
+        await provider.write_file(r"q:\SESSION-STATE\temp\file", "opaque")
+        assert await provider.read_file("/session-state/temp/file") == "opaque"
+        assert (await provider.stat(r"Q:\session-state\temp\file")).size == 6
+        await provider.rename(
+            r"Q:\session-state\temp\file", "/session-state/temp/renamed",
+        )
+        assert await provider.read_file(r"Q:\session-state\temp\renamed") == "opaque"
+        for denied in (r"C:\session-state\temp\file", r"Q:\session-statex\file"):
+            with pytest.raises(OSError) as error:
+                await provider.write_file(denied, "denied")
+            assert error.value.errno == errno.EACCES
+        prefix = session_prefix(route, "agent", "session")
+        if backend == "blob":
+            assert memory_blobs.files[prefix + "/session-state/temp/renamed"].content == b"opaque"
+            assert not any("\\" in name or ":" in name for name in memory_blobs.files)
+        else:
+            assert (route.local_dir / prefix / "session-state" / "temp" / "renamed").read_bytes() == b"opaque"
+        await provider.rm(r"Q:\session-state\temp", recursive=True, force=False)
+        assert not await provider.exists("/session-state/temp")
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_windows_callbacks_use_the_same_opaque_posix_blob_keys(local_route, memory_blobs):
     route = replace(
         local_route,
