@@ -196,7 +196,7 @@ async def test_workflow_management_uses_bound_policy_and_runtime_guidance(previe
 
 
 @pytest.mark.asyncio
-async def test_sse_orders_tools_and_waits_for_completed_turn_and_disconnect(preview, native):
+async def test_sse_orders_tools_and_disconnects_after_success(preview, native):
     from copilot.session_events import (
         AssistantMessageDeltaData,
         SessionEvent,
@@ -238,7 +238,6 @@ async def test_sse_orders_tools_and_waits_for_completed_turn_and_disconnect(prev
                 native.create_session.assert_awaited_once()
                 session.rpc.tools.get_current_metadata.assert_awaited_once()
             if event["type"] == "done":
-                session.get_events.assert_awaited_once()
                 session.disconnect.assert_awaited_once()
             events.append(event)
         assert [event["type"] for event in events] == [
@@ -251,29 +250,48 @@ async def test_sse_orders_tools_and_waits_for_completed_turn_and_disconnect(prev
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["create", "catalog", "completion", "resume"])
+@pytest.mark.parametrize("boundary", ["create", "catalog", "interrupt"])
 async def test_sse_failure_boundaries_never_advertise_success(preview, native, boundary):
+    from copilot.session_events import (
+        AbortData,
+        AbortReason,
+        AssistantMessageData,
+        SessionEvent,
+        SessionEventType,
+    )
+
     session = native.create_session.return_value
     if boundary == "create":
         native.create_session.side_effect = RuntimeError("private failure")
     elif boundary == "catalog":
         session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
     else:
-        session.get_events.return_value = []
+        async def interrupted(*_args, **_kwargs):
+            session.handlers[0](SessionEvent(
+                data=AbortData(reason=AbortReason.USER_ABORT),
+                type=SessionEventType.ABORT,
+                id=uuid4(),
+                timestamp=datetime.now(UTC),
+            ))
+            return SessionEvent(
+                data=AssistantMessageData(content="final reply", message_id="final"),
+                type=SessionEventType.ASSISTANT_MESSAGE,
+                id=uuid4(),
+                timestamp=datetime.now(UTC),
+            )
+
+        session.send_and_wait.side_effect = interrupted
     try:
         events = [
             json.loads(chunk.removeprefix("data: "))
             async for chunk in runner.run_agent_stream(
                 "hello", _harness=preview, tools=[], mcp_tools=[],
-                session_id="existing" if boundary == "resume" else None,
             )
         ]
         assert [event["type"] for event in events] == (
-            ["session", "error"] if boundary == "completion" else ["error"]
+            ["session", "error"] if boundary == "interrupt" else ["error"]
         )
-        if boundary == "resume":
-            session.send_and_wait.assert_not_awaited()
-        if boundary == "completion":
+        if boundary == "interrupt":
             session.abort.assert_awaited_once()
     finally:
         await _harness_lifecycle._shutdown_harnesses()
@@ -309,29 +327,3 @@ async def test_leaf_resume_is_rejected_without_creating_storage(preview, native)
         )
     native.start.assert_not_awaited()
     assert not preview.storage_root.exists()
-
-
-def test_completed_turn_barrier_rejects_interrupted_and_pending_history():
-    from copilot.session_events import (
-        AbortData,
-        SessionEvent,
-        SessionEventType,
-        SessionIdleData,
-    )
-
-    user, finished = _fake_client().create_session.return_value.get_events.return_value
-    aborted = SessionEvent(
-        data=AbortData(reason="user"), type=SessionEventType.ABORT,
-        id=uuid4(), timestamp=datetime.now(UTC),
-    )
-    idle = SessionEvent(
-        data=SessionIdleData(aborted=True), type=SessionEventType.SESSION_IDLE,
-        id=uuid4(), timestamp=datetime.now(UTC),
-    )
-    assert _copilot_execution._completed_turn([user, finished])
-    for events in (
-        [], [user], [user, finished, user], [user, aborted, finished],
-        [user, finished, aborted], [user, finished, idle],
-    ):
-        assert not _copilot_execution._completed_turn(events)
-    assert _copilot_execution._completed_turn([user, aborted, user, finished])

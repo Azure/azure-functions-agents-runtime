@@ -65,7 +65,7 @@ def _emit_event(event_sink: _EventSink | None, event: dict[str, Any]) -> None:
 
 
 def _copilot_session_id(agent_slug: str, session_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"af-copilot:{agent_slug}:{session_id}"))
+    return f"{agent_slug}.{session_id}"
 
 
 class _RequestTokenSource:
@@ -249,50 +249,6 @@ async def _open_session(
         session_id, on_permission_request=_deny_permission, continue_pending_work=False, **options
     )
 
-
-def _completed_turn(events: list[SessionEvent]) -> bool:
-    from copilot.session_events import SessionEventType, SessionIdleData
-
-    has_user_message = False
-    completed = False
-    interrupted = False
-    for event in events:
-        if event.type == SessionEventType.USER_MESSAGE:
-            has_user_message = True
-            completed = False
-            interrupted = False
-        elif event.type == SessionEventType.ASSISTANT_TURN_START and has_user_message:
-            completed = False
-        elif event.type in {
-            SessionEventType.ABORT,
-            SessionEventType.AGENT_INTERRUPTED,
-            SessionEventType.SESSION_ERROR,
-        }:
-            interrupted = True
-        elif event.type == SessionEventType.SESSION_IDLE:
-            match event.data:
-                case SessionIdleData(aborted=True):
-                    interrupted = True
-        elif event.type == SessionEventType.ASSISTANT_TURN_END and has_user_message:
-            completed = not interrupted
-    return has_user_message and completed and not interrupted
-
-
-async def _verify_completed_turn(session: CopilotSession) -> None:
-    try:
-        events = await session.get_events()
-    except Exception:
-        raise CopilotPreviewError(
-            "Copilot native session history is missing, corrupt, or unavailable; "
-            "no conversation was reset."
-        ) from None
-    if not _completed_turn(events):
-        raise CopilotPreviewError(
-            "Copilot native session has no verifiable completed turn. "
-            "Interrupted or empty history cannot be continued; start a new conversation."
-        )
-
-
 async def _acquire_client(owner: CopilotRuntime, deadline: float) -> CopilotClient:
     try:
         return await owner.client()
@@ -360,15 +316,31 @@ async def _run_session_turn(
     get_usage: Callable[[], tuple[int | None, int | None]],
     token_source: _RequestTokenSource,
 ) -> str:
-    with _event_subscription(session, on_event):
+    from copilot.session_events import AbortData, AgentInterruptedData, SessionIdleData
+
+    interrupted = False
+
+    def observe(event: SessionEvent) -> None:
+        nonlocal interrupted
+        match event.data:
+            case AbortData() | AgentInterruptedData():
+                interrupted = True
+            case SessionIdleData(aborted=True):
+                interrupted = True
+        on_event(event)
+
+    with _event_subscription(session, observe):
         try:
             response = await _send_turn(session, prompt=prompt, deadline=deadline)
             try:
                 token_error = token_source.take_error()
                 if token_error is not None:
                     raise token_error
+                if interrupted:
+                    raise CopilotPreviewError(
+                        "Copilot interrupted the turn before producing a usable final reply."
+                    )
                 content = _final_reply_content(response)
-                await _verify_completed_turn(session)
                 return content
             except BaseException:
                 await _abort(session)
@@ -479,8 +451,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 async with _bounded_cleanup(
                     session.disconnect, "Copilot native session could not be disconnected."
                 ):
-                    if not request.new_session:
-                        await _verify_completed_turn(session)
                     await _verify_tool_catalog(session, request.tools)
                     _emit_event(request.event_sink, {
                         "type": "session", "session_id": request.session_id,

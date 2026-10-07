@@ -5,12 +5,12 @@ import errno
 import shutil
 from contextlib import suppress
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock, Mock
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from azure.core.credentials import AccessToken
@@ -145,10 +145,13 @@ def _fake_client():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("new_session", [False, True])
-async def test_sdk_owns_create_and_resume_with_completed_turn_barrier(preview, monkeypatch, new_session):
+async def test_sdk_owns_create_and_resume_without_history_scans(preview, monkeypatch, new_session):
     import copilot
 
     client = _fake_client()
+    client.create_session.return_value.get_events.side_effect = AssertionError(
+        "Host must not load native history."
+    )
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         result = await _copilot.run(preview, _request(new_session=new_session))
@@ -162,7 +165,7 @@ async def test_sdk_owns_create_and_resume_with_completed_turn_barrier(preview, m
             client.create_session.assert_not_awaited()
             session = client.resume_session.return_value
         client.get_session_metadata.assert_not_awaited()
-        assert session.get_events.await_count == (1 if new_session else 2)
+        session.get_events.assert_not_awaited()
         if not new_session:
             assert client.resume_session.call_args.kwargs["continue_pending_work"] is False
         session.disconnect.assert_awaited_once()
@@ -215,10 +218,9 @@ async def test_sdk_factory_receives_the_open_opaque_filesystem(preview, monkeypa
         await _lifecycle._shutdown_harnesses()
 
 
-def test_native_sdk_identity_is_valid_stable_and_agent_scoped():
-    native_id = _copilot._copilot_session_id("main", "example")
-    assert str(UUID(native_id)) == native_id
-    assert _copilot._copilot_session_id("main", "example") == native_id
+def test_native_sdk_identity_uses_agent_and_session_string():
+    assert _copilot._copilot_session_id("main", "example") == "main.example"
+    assert _copilot._copilot_session_id("billing", "shared") == "billing.shared"
     assert _copilot._copilot_session_id("billing", "shared") != _copilot._copilot_session_id("support", "shared")
 
 
@@ -861,7 +863,7 @@ async def test_resume_retry_preserves_opaque_sdk_files(preview, monkeypatch):
         assert client.resume_session.await_count == 2
         client.create_session.assert_not_awaited()
         client.get_session_metadata.assert_not_awaited()
-        assert session.get_events.await_count == 2
+        session.get_events.assert_not_awaited()
         assert await _sdk_file(preview) == "\x00opaque\r\n"
     finally:
         await _lifecycle._shutdown_harnesses()
@@ -1285,6 +1287,64 @@ async def test_failed_adapter_close_is_reported_without_owner_retention(preview,
     await _lifecycle._shutdown_harnesses()
     client.stop.assert_awaited_once()
     assert preview._resources.runtime is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["abort", "agent_interrupted", "idle_aborted"])
+async def test_live_interruption_events_reject_successful_sdk_return(
+    preview, monkeypatch, event_type
+):
+    import copilot
+    from copilot.session_events import (
+        AbortData,
+        AbortReason,
+        AgentInterruptedActivity,
+        AgentInterruptedData,
+        AssistantMessageData,
+        SessionEvent,
+        SessionEventType,
+        SessionIdleData,
+    )
+
+    def event(kind, data):
+        return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=kind)
+
+    interruption = {
+        "abort": event(SessionEventType.ABORT, AbortData(reason=AbortReason.USER_ABORT)),
+        "agent_interrupted": event(
+            SessionEventType.AGENT_INTERRUPTED,
+            AgentInterruptedData(
+                activity=AgentInterruptedActivity.MODEL_CALL,
+                elapsed=timedelta(seconds=1),
+                turn=1,
+            ),
+        ),
+        "idle_aborted": event(
+            SessionEventType.SESSION_IDLE,
+            SessionIdleData(aborted=True),
+        ),
+    }[event_type]
+    client = _fake_client()
+    session = client.create_session.return_value
+
+    async def send(*_args, **_kwargs):
+        session.handlers[0](interruption)
+        final = event(
+            SessionEventType.ASSISTANT_MESSAGE,
+            AssistantMessageData(content="final reply", message_id="final"),
+        )
+        session.handlers[0](final)
+        return final
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="interrupted"):
+            await _copilot.run(preview, _request())
+        session.abort.assert_awaited_once()
+        session.disconnect.assert_awaited_once()
+    finally:
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio

@@ -424,8 +424,9 @@ Local HTTP SSE, declared delegates, Workflow Sub Agents, and Dynamic Workflow
 management use the existing host contracts. Leaves use disposable local
 SessionFs trees even when primary sessions select Blob, and never acquire a
 persistent session lock. SSE emits its session after native/catalog acceptance
-and `done` only after a verified completed turn and disconnect; resume disables
-pending native work and verifies completed history before sending another prompt.
+and `done` only after disconnect; resume disables pending native work without
+host-side history scans, and the host rejects live abort/interruption signals
+observed before returning a final reply.
 The SDK still owns opaque file formats, compaction, and recovery.
 Unsupported capabilities fail explicitly without fallback. Configured output caps
 are rejected because this path does not yet expose a verified provider generation
