@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 
@@ -309,6 +310,8 @@ def test_skills_disabled_grants_no_resource_or_script_access(scoped_skills):
 async def test_pinned_sdk_public_create_resume_wire_does_not_treat_empty_arrays_as_resets(
     tmp_path, monkeypatch, enable_skills, include_mcp
 ):
+    import copilot._cli_download as cli_download
+
     sent = []
 
     async def request(method, payload, **_options):
@@ -317,8 +320,13 @@ async def test_pinned_sdk_public_create_resume_wire_does_not_treat_empty_arrays_
             return {"sessionId": "main.example"}
         return {"success": True}
 
+    monkeypatch.setattr(
+        cli_download,
+        "ensure_runtime_wrapper",
+        Mock(side_effect=AssertionError("download should stay out of wire-serialization tests")),
+    )
     client = CopilotClient(
-        connection=RuntimeConnection.for_stdio(),
+        connection=RuntimeConnection.for_stdio(path=sys.executable),
         mode="empty",
         base_directory=str(tmp_path / "wire-only"),
         use_logged_in_user=False,
