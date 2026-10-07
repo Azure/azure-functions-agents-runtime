@@ -14,6 +14,7 @@ from copilot.generated.rpc import SessionFSReaddirWithTypesEntry
 from copilot.session import SessionFsConventions
 from copilot.session_fs_provider import SessionFsFileInfo, SessionFsProvider
 
+from ..._skill_policy import SkillPolicy
 from ._copilot_session_blob import _has_storage_code, open_blob_backend
 from ._copilot_session_identity import (
     CopilotSessionError,
@@ -22,7 +23,7 @@ from ._copilot_session_identity import (
     _path_error,
     session_prefix,
 )
-from ._copilot_session_local import open_local_backend
+from ._copilot_session_local import LocalSessionFileBackend, open_local_backend
 from ._copilot_session_paths import (
     HOST_PATH_CONVENTIONS,
     WORKSPACE_ROOT,
@@ -54,7 +55,7 @@ _BACKEND_FACTORIES: dict[StorageMode, BackendFactory] = {
 
 
 class CopilotSessionFs(SessionFsProvider):
-    """SDK callbacks serialized within this provider, without session policy."""
+    """Serialized native-file callbacks with read-only approved skill resources."""
 
     def __init__(
         self,
@@ -63,17 +64,27 @@ class CopilotSessionFs(SessionFsProvider):
         conventions: SessionFsConventions = HOST_PATH_CONVENTIONS,
         workspace_path: str = "",
         deadline: float | None = None,
+        skill_policy: SkillPolicy | None = None,
     ) -> None:
         self.backend = backend
         self.conventions = conventions
         self.workspace_path = workspace_path
         self.deadline = deadline
+        self._skill_policy = skill_policy
         self._policy = select_session_path_policy(conventions)
         self._lock = asyncio.Lock()
         self._closed = False
 
     def _path(self, path: str) -> str:
+        if self._skill_policy is not None and self._skill_policy.resolve_read(path) is not None:
+            raise _path_error(errno.EACCES)
         return self._policy.normalize(path, self.workspace_path).lstrip("/")
+
+    def _read_target(self, path: str) -> tuple[SessionFileBackend, str]:
+        resource = self._skill_policy.resolve_read(path) if self._skill_policy is not None else None
+        if resource is not None:
+            return LocalSessionFileBackend(resource.parent), resource.name
+        return self.backend, self._path(path)
 
     async def _call[T](self, operation: Callable[[], Awaitable[T]]) -> T:
         if self.deadline is not None and asyncio.get_running_loop().time() >= self.deadline:
@@ -115,10 +126,9 @@ class CopilotSessionFs(SessionFsProvider):
             raise _path_error(error.errno or errno.EIO) from None
 
     async def read_file(self, path: str) -> str:
-        relative = self._path(path)
-
         async def read() -> str:
-            return (await self.backend.read_file(relative)).decode("utf-8")
+            backend, relative = self._read_target(path)
+            return (await backend.read_file(relative)).decode("utf-8")
 
         return await self._call(read)
 
@@ -139,9 +149,8 @@ class CopilotSessionFs(SessionFsProvider):
         await self._call(append)
 
     async def exists(self, path: str) -> bool:
-        relative = self._path(path)
         try:
-            await self._call(lambda: self.backend.stat(relative))
+            await self.stat(path)
         except OSError as error:
             if error.errno in {errno.ENOENT, errno.ENOTDIR}:
                 return False
@@ -149,8 +158,11 @@ class CopilotSessionFs(SessionFsProvider):
         return True
 
     async def stat(self, path: str) -> SessionFsFileInfo:
-        relative = self._path(path)
-        return await self._call(lambda: self.backend.stat(relative))
+        async def stat() -> SessionFsFileInfo:
+            backend, relative = self._read_target(path)
+            return await backend.stat(relative)
+
+        return await self._call(stat)
 
     async def mkdir(self, path: str, recursive: bool, mode: int | None = None) -> None:
         relative = self._path(path)
@@ -188,13 +200,15 @@ async def open_session_fs(
     conventions: SessionFsConventions = HOST_PATH_CONVENTIONS,
     workspace_path: str = "",
     deadline: float | None = None,
+    skill_policy: SkillPolicy | None = None,
 ) -> CopilotSessionFs:
     """Open the frozen route once; configured failures never fall back to local."""
     prefix = session_prefix(route, agent_slug, session_id)
     async with AsyncExitStack() as cleanup:
         backend = await _BACKEND_FACTORIES[route.mode](route, prefix)
         provider = CopilotSessionFs(
-            backend, conventions=conventions, workspace_path=workspace_path, deadline=deadline
+            backend, conventions=conventions, workspace_path=workspace_path, deadline=deadline,
+            skill_policy=skill_policy,
         )
         cleanup.push_async_callback(provider.close)
         await provider._call(backend.initialize)

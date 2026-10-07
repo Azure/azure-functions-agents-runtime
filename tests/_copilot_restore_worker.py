@@ -90,13 +90,20 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
 
 
 async def _open_session(client, native_id, phase, storage):
+    from copilot.rpc import PermissionDecisionDeniedByRules
     from copilot.session import (
+        PermissionInvocation,
         ProviderConfig,
         SystemMessageReplaceConfig,
         ToolSearchConfig,
     )
+    from copilot.session_events import PermissionRequest
 
-    from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
+    def deny_permission(
+        _request: PermissionRequest, _invocation: PermissionInvocation
+    ) -> PermissionDecisionDeniedByRules:
+        return PermissionDecisionDeniedByRules(rules=[])
+
     options = {
         "model": "offline-model",
         "tools": [],
@@ -111,15 +118,14 @@ async def _open_session(client, native_id, phase, storage):
         "enable_session_telemetry": False,
         "request_extensions": False,
         "tool_search": ToolSearchConfig(enabled=False),
-        "on_event": lambda _event: None,
         "create_session_fs_handler": lambda _session: storage,
     }
     if phase == 1:
         return await client.create_session(
-            session_id=native_id, on_permission_request=_copilot._deny_permission, **options
+            session_id=native_id, on_permission_request=deny_permission, **options
         )
     return await client.resume_session(
-        native_id, on_permission_request=_copilot._deny_permission, **options,
+        native_id, on_permission_request=deny_permission, **options,
     )
 
 

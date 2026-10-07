@@ -260,7 +260,8 @@ Only the workflow tool runs as async code. The Durable orchestrator
 continues to use `yield` and does not run tool I/O.
 
 Normal tools keep their existing behavior: a plain public function or an
-`@tool`/`FunctionTool` in `tools/*.py` becomes a normal MAF tool. Use both
+The runtime's `@tool` in `tools/*.py` becomes a normal tool; direct SDK tools
+are ignored. Use both
 decorators when one callable should be available both directly in chat
 and inside workflows:
 

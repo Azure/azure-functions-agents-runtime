@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -23,6 +24,7 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents._agent_identity import agent_id
+from azure_functions_agents._function_tool import tool
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -30,14 +32,18 @@ from azure_functions_agents.config.schema import (
     AgentFrameworkConfiguration,
     SubagentRef,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.harness import _harness_execution as shared
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
+from azure_functions_agents.harness.agent_framework import _maf_mcp
 
 
 @pytest.fixture(autouse=True)
 def isolated_execution(monkeypatch):
     monkeypatch.setattr(shared, "_SESSION_LOCKS", {})
     monkeypatch.setattr(shared, "_SESSION_LOCKS_GUARD", asyncio.Lock())
+    monkeypatch.setattr(runner, "get_harness", lambda: AppHarness(HarnessKind.MAF, Path.cwd()))
     for name in (
         "WEBSITE_OWNER_NAME",
         "WEBSITE_DEPLOYMENT_ID",
@@ -66,31 +72,57 @@ def install_agent(monkeypatch, agent, *, tracker=None):
     return build
 
 
-@pytest.mark.parametrize("name", ["run_agent", "run_agent_stream", "run_leaf_agent_task"])
-def test_entrypoints_keep_explicit_public_parameters_and_defaults(name):
-    public = inspect.signature(getattr(runner, name))
-    selected = inspect.signature(getattr(maf, name))
-    binding_parameters = {
-        "run_agent": set(),
-        "run_agent_stream": {"_session_is_new"},
-        "run_leaf_agent_task": {"_harness"},
-    }[name]
-    expected_parameters = [
-        parameter for parameter in public.parameters if parameter not in binding_parameters
-    ]
-    if name != "run_leaf_agent_task":
-        expected_parameters.append("_deadline")
-        deadline = selected.parameters["_deadline"]
-        assert deadline.kind is inspect.Parameter.KEYWORD_ONLY
-        assert deadline.default is None
-    assert list(selected.parameters) == expected_parameters
-    for parameter_name, parameter in public.parameters.items():
-        if parameter_name in binding_parameters:
-            continue
-        extracted = selected.parameters[parameter_name]
-        assert extracted.kind == parameter.kind
-        assert extracted.default == parameter.default
-        assert extracted.kind not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+@pytest.mark.parametrize(
+    ("public_name", "adapter_name"),
+    [("run_agent", "run"), ("run_agent_stream", "run_stream")],
+)
+def test_public_entrypoints_keep_explicit_parameters_and_adapters_accept_neutral_requests(
+    public_name, adapter_name
+):
+    public = inspect.signature(getattr(runner, public_name))
+    selected = inspect.signature(getattr(maf, adapter_name))
+    assert list(selected.parameters)[:2] == ["harness", "request"]
+    assert selected.parameters["request"].annotation == "HarnessRequest"
+    assert public.parameters["tools"].default is None
+    assert public.parameters["skills"].default is None
+    assert public.parameters["skill_catalog"].default is None
+    for signature in (public, selected):
+        assert all(
+            parameter.kind not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+            for parameter in signature.parameters.values()
+        )
+
+
+def test_backend_uses_canonical_host_and_accounting_without_private_facade_exports():
+    assert maf._runner is runner
+    assert maf._harness_execution is shared
+    assert not hasattr(runner, "_assemble_agent_inputs")
+    for name in (
+        "_AgentExecutionRole",
+        "_AgentUsageRecorder",
+        "_get_session_lock",
+        "_session_lock_bounded_by",
+        "_model_publisher",
+        "_normalize_usage_details",
+        "_build_agent_session",
+        "_build_role_agent",
+        "_build_history_provider",
+        "_build_delegated_agent",
+        "_build_chat_options_from_environment",
+        "_response_usage_details",
+        "_stream_usage_details",
+        "_finalize_maf_stream",
+        "_FINAL_USAGE_TIMEOUT_SECONDS",
+        "_content_text",
+        "_content_type",
+        "_function_call_event",
+        "_function_result_event",
+        "_is_complete_json_argument",
+        "_max_context_window_tokens",
+        "_merge_tool_arguments",
+        "_resolve_sessions_dir",
+    ):
+        assert not hasattr(runner, name)
 
 
 def test_role_constructor_keeps_identity_options_compaction_and_skills(monkeypatch, tmp_path):
@@ -151,9 +183,14 @@ def test_role_constructor_keeps_identity_options_compaction_and_skills(monkeypat
 async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     monkeypatch, overrides
 ):
-    user_tool, mcp_tool, web_tool, delegate_tool = (object() for _ in range(4))
+    user_tool = tool(name="user")(lambda: "user")
+    web_tool = tool(name="web")(lambda: "web")
+    delegate_tool = tool(name="delegate_specialist")(lambda: "specialist")
+    mcp_tool = object()
+    server = MCPServerDescriptor.create(name="server", url="https://fixture.invalid/mcp")
     users = Mock(return_value=SimpleNamespace(tools=[user_tool]))
-    mcps = Mock(return_value=SimpleNamespace(servers={"server": mcp_tool}))
+    mcps = Mock(return_value=SimpleNamespace(servers={"server": server}))
+    monkeypatch.setattr(_maf_mcp, "build_maf_mcp_tools", lambda servers: [mcp_tool])
     monkeypatch.setattr(maf, "discover_user_tools", users)
     monkeypatch.setattr(maf, "discover_mcp_servers", mcps)
     tracker = runner._DelegateErrorTracker()
@@ -192,10 +229,16 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     assert session.session_id == session_id == "shared"
     assert returned_tracker is tracker
     manager.build_chat_client_with_target.assert_called_once_with(None)
-    delegates.assert_awaited_once_with(references, catalog, coordinator_deadline=123.0)
+    delegates.assert_awaited_once_with(
+        references, catalog, coordinator_deadline=123.0, _harness=None
+    )
     assemble.assert_called_once()
     expected = [web_tool, delegate_tool] if overrides else [user_tool, web_tool, mcp_tool, delegate_tool]
-    assert role.call_args.kwargs["tools"] == expected
+    actual = role.call_args.kwargs["tools"]
+    assert [item.name for item in actual if item is not mcp_tool] == [
+        item.name for item in expected if item is not mcp_tool
+    ]
+    assert (mcp_tool in actual) is (not overrides)
     assert role.call_args.kwargs["agent_instructions"] == "host instructions\naddendum"
     assert role.call_args.kwargs["history_provider"] is history
     assert users.call_count == mcps.call_count == (0 if overrides else 1)
@@ -226,10 +269,10 @@ async def test_real_maf_turns_reload_scoped_history_from_fresh_sessions(monkeypa
     )
     monkeypatch.setattr(maf, "get_client_manager", lambda: manager)
     monkeypatch.setattr(maf, "resolve_config_dir", lambda: tmp_path)
-    first = await maf.run_agent(
+    first = await runner.run_agent(
         "one", tools=[], mcp_tools=[], session_id="shared", agent_name="billing", timeout=5
     )
-    second = await maf.run_agent(
+    second = await runner.run_agent(
         "two", tools=[], mcp_tools=[], session_id="shared", agent_name="billing", timeout=5
     )
     assert type(first) is type(second) is runner.AgentResult
@@ -281,7 +324,7 @@ async def test_direct_result_and_usage_use_public_result_and_shared_recorder(mon
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", " low ")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", "auto")
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        result = await maf.run_agent("prompt", tools=[], mcp_tools=[], agent_name="billing")
+        result = await runner.run_agent("prompt", tools=[], mcp_tools=[], agent_name="billing")
     assert type(result) is runner.AgentResult
     assert result.content == "fallback"
     assert result.delegate_error_count == 2
@@ -293,7 +336,7 @@ async def test_direct_result_and_usage_use_public_result_and_shared_recorder(mon
     assert agent.run.call_args.kwargs["options"] == {
         "reasoning": {"effort": "low", "summary": "auto"}
     }
-    assert build.call_args.kwargs["tools"] == build.call_args.kwargs["mcp_tools"] == []
+    assert build.call_args.kwargs["tools"] == build.call_args.kwargs["mcp_tools"] == ()
     assert ("billing", "session") in shared._SESSION_LOCKS
     assert len(usage_records(caplog)) == 1
     assert usage_records(caplog)[0]["input_tokens"] == 3
@@ -311,12 +354,12 @@ async def test_lock_wait_exhaustion_emits_no_invocation_usage(monkeypatch, caplo
             if streaming:
                 events = [
                     json.loads(chunk.removeprefix("data: "))
-                    async for chunk in maf.run_agent_stream("prompt", timeout=0.01, agent_name="billing")
+                    async for chunk in runner.run_agent_stream("prompt", timeout=0.01, agent_name="billing")
                 ]
                 assert [event["type"] for event in events] == ["session", "error"]
             else:
                 with pytest.raises(RuntimeError, match="timed out"):
-                    await maf.run_agent("prompt", timeout=0.01, agent_name="billing")
+                    await runner.run_agent("prompt", timeout=0.01, agent_name="billing")
         assert usage_records(caplog) == []
         assert lock.locked()
         agent.run.assert_not_called()
@@ -405,7 +448,7 @@ async def test_stream_order_tool_fragments_reasoning_and_done_before_usage(monke
         [item("function_result", call_id="call", result='{"error":"fixture"}')],
     ])
     _, span = install_stream(monkeypatch, stream, tracker=SimpleNamespace(count=2))
-    generator = maf.run_agent_stream("prompt", agent_name="billing", display_name="Billing")
+    generator = runner.run_agent_stream("prompt", agent_name="billing", display_name="Billing")
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         events = []
         while True:
@@ -433,7 +476,7 @@ async def test_stream_terminal_errors_finalize_and_record_one_attempt(monkeypatc
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         events = [
             json.loads(chunk.removeprefix("data: "))
-            async for chunk in maf.run_agent_stream("prompt", timeout=1)
+            async for chunk in runner.run_agent_stream("prompt", timeout=1)
         ]
     assert [event["type"] for event in events] == ["session", "delta", "error"]
     assert len(stream.cleanup_errors) == 1
@@ -448,7 +491,7 @@ async def test_stream_close_at_yield_finalizes_chain_and_releases_lock(monkeypat
     inner = _Stream([])
     stream._inner_stream = inner
     install_stream(monkeypatch, stream)
-    generator = maf.run_agent_stream("prompt")
+    generator = runner.run_agent_stream("prompt")
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         await anext(generator)
         await anext(generator)
@@ -463,7 +506,7 @@ async def test_stream_close_at_yield_finalizes_chain_and_releases_lock(monkeypat
 async def test_stream_cancellation_while_waiting_preserves_cleanup_and_propagation(monkeypatch, caplog):
     stream = _Stream([], stall=True)
     install_stream(monkeypatch, stream)
-    generator = maf.run_agent_stream("prompt")
+    generator = runner.run_agent_stream("prompt")
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         await anext(generator)
         task = asyncio.create_task(anext(generator))

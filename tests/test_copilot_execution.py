@@ -61,6 +61,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import
     CopilotSessionError,
     resolve_route,
 )
+from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
@@ -93,22 +94,24 @@ def replace_client_manager():
 def _request(*, new_session=True):
     return HarnessRequest(
         prompt="hello", instructions="Be helpful.", agent_slug="main", session_id="example",
-        new_session=new_session, model="gpt-4.1-mini", tools=[], max_output_tokens=None,
+        new_session=new_session, model="gpt-4.1-mini", tools=(), max_output_tokens=None,
         deadline=asyncio.get_running_loop().time() + 10,
     )
+
+
+def _sdk_event(event_type, data):
+    from copilot.session_events import SessionEvent
+
+    return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=event_type)
 
 
 def _fake_client():
     from copilot.session_events import (
         AssistantMessageData,
         AssistantTurnEndData,
-        SessionEvent,
         SessionEventType,
         UserMessageData,
     )
-
-    def event(event_type, data):
-        return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=event_type)
 
     session = AsyncMock()
     session.unsubscribe = Mock()
@@ -127,13 +130,13 @@ def _fake_client():
     session.rpc = SimpleNamespace(tools=SimpleNamespace(
         get_current_metadata=AsyncMock(return_value=SimpleNamespace(tools=[]))
     ))
-    session.send_and_wait.return_value = event(
+    session.send_and_wait.return_value = _sdk_event(
         SessionEventType.ASSISTANT_MESSAGE,
         AssistantMessageData(content="synthetic reply", message_id="fixture"),
     )
     session.get_events.return_value = [
-        event(SessionEventType.USER_MESSAGE, UserMessageData(content="hello")),
-        event(SessionEventType.ASSISTANT_TURN_END, AssistantTurnEndData(turn_id="fixture")),
+        _sdk_event(SessionEventType.USER_MESSAGE, UserMessageData(content="hello")),
+        _sdk_event(SessionEventType.ASSISTANT_TURN_END, AssistantTurnEndData(turn_id="fixture")),
     ]
     return SimpleNamespace(
         start=AsyncMock(), stop=AsyncMock(), force_stop=AsyncMock(),
@@ -165,6 +168,7 @@ async def test_sdk_owns_create_and_resume_without_history_scans(preview, monkeyp
             client.create_session.assert_not_awaited()
             session = client.resume_session.return_value
         client.get_session_metadata.assert_not_awaited()
+        session.rpc.tools.get_current_metadata.assert_awaited_once()
         session.get_events.assert_not_awaited()
         if not new_session:
             assert client.resume_session.call_args.kwargs["continue_pending_work"] is False
@@ -218,36 +222,118 @@ async def test_sdk_factory_receives_the_open_opaque_filesystem(preview, monkeypa
         await _lifecycle._shutdown_harnesses()
 
 
-def test_native_sdk_identity_uses_agent_and_session_string():
-    assert _copilot._copilot_session_id("main", "example") == "main.example"
-    assert _copilot._copilot_session_id("billing", "shared") == "billing.shared"
+@pytest.mark.asyncio
+async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_turn(
+    preview, monkeypatch
+):
+    import copilot
+    from copilot.session_events import (
+        AssistantMessageData,
+        SessionEventType,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteResult,
+        ToolExecutionStartData,
+    )
+
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+    from azure_functions_agents.registration._handlers import _tool_error_count
+
+    client = _fake_client()
+    session = client.create_session.return_value
+    turn = 0
+
+    async def send(*args, **kwargs):
+        nonlocal turn
+        turn += 1
+        [observer] = session.handlers
+        assert observer(_sdk_event(
+            SessionEventType.TOOL_EXECUTION_START,
+            ToolExecutionStartData(
+                tool_call_id="reused-id", tool_name="lookup", arguments={"turn": turn}
+            ),
+        )) is None
+        observer(_sdk_event(
+            SessionEventType.TOOL_EXECUTION_COMPLETE,
+            ToolExecutionCompleteData(
+                tool_call_id="reused-id",
+                success=turn == 1,
+                result=ToolExecutionCompleteResult(
+                    content="first-result" if turn == 1 else "private denied output"
+                ),
+            ),
+        ))
+        final = _sdk_event(
+            SessionEventType.ASSISTANT_MESSAGE,
+            AssistantMessageData(content=f"reply-{turn}", message_id=f"reply-{turn}"),
+        )
+        observer(final)
+        return final
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    server = MCPServerDescriptor.create(name="selected", url="https://fixture.invalid/mcp")
+    request = replace(_request(), mcp_servers=(server,))
+    try:
+        first = await _copilot.run(preview, request)
+        assert session.handlers == []
+        second = await _copilot.run(preview, replace(request, new_session=False))
+
+        assert first.content == "reply-1"
+        assert second.content == "reply-2"
+        assert first.content_intermediate == second.content_intermediate == []
+        assert len(first.tool_calls) == len(second.tool_calls) == 1
+        assert first.tool_calls[0]["arguments"] == {"turn": 1}
+        assert second.tool_calls[0]["arguments"] == {"turn": 2}
+        assert first.tool_calls[0]["result"] == "first-result"
+        assert first.tool_calls[0]["success"] is True
+        assert second.tool_calls[0]["success"] is False
+        assert _tool_error_count(first.tool_calls) == 0
+        assert _tool_error_count(second.tool_calls) == 1
+        assert "first-result" not in repr(second.tool_calls)
+        assert "private denied output" not in repr(second.tool_calls)
+        assert client.create_session.call_args.kwargs["session_id"] == (
+            client.resume_session.call_args.args[0]
+        )
+        assert session.on.call_count == session.unsubscribe.call_count == 2
+        assert session.disconnect.await_count == 2
+        assert session.handlers == []
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+def test_native_sdk_identity_is_readable_and_agent_scoped():
+    assert _copilot._copilot_session_id("main", "example") == "main-example"
+    assert _copilot._copilot_session_id("main", "one.two-three") == "main-one.two-three"
+    assert _copilot._copilot_session_id("main", "one.two-three") == "main-one.two-three"
     assert _copilot._copilot_session_id("billing", "shared") != _copilot._copilot_session_id("support", "shared")
 
 
-def test_tool_result_text_flattens_typed_sdk_content():
+def test_tool_result_text_preserves_plain_text_and_rejects_sdk_content():
     from agent_framework import Content
 
-    assert _copilot._tool_result_text([
-        Content("text", text="first"),
-        Content("text", text="second"),
-    ]) == "first\nsecond"
+    assert _copilot.tool_result_text("first\nsecond") == "first\nsecond"
+    with pytest.raises(TypeError, match="SDK objects"):
+        _copilot.tool_result_text([
+            Content("text", text="first"),
+            Content("text", text="second"),
+        ])
 
 
 async def _invoke_native_tool(function, arguments, event_sink=None):
     from copilot.tools import ToolInvocation
 
-    calls = []
-    native_tool = _copilot._tool(function, calls, event_sink)
+    calls = CopilotToolCalls()
+    descriptor = function
+    native_tool = _copilot._tool(descriptor, calls, event_sink)
     assert native_tool.handler is not None
     result = await native_tool.handler(
         ToolInvocation(
             session_id="native-session",
             tool_call_id="call-1",
-            tool_name=function.name,
+            tool_name=descriptor.name,
             arguments=arguments,
         )
     )
-    return result, calls
+    return result, calls.calls
 
 
 @pytest.mark.asyncio
@@ -268,7 +354,7 @@ async def test_tool_adapter_runs_sync_and_async_callables(is_async):
             effects.append(value)
             return f"sync:{value}"
 
-    [function] = _preview.prepare_tools([candidate])
+    [function] = _preview.prepare_tools([tool(candidate)])
     result, calls = await _invoke_native_tool(function, {"value": "ok"})
 
     assert result.result_type == "success"
@@ -387,8 +473,9 @@ async def test_tool_adapter_propagates_cancellation():
 
     from copilot.tools import ToolInvocation
 
-    calls = []
-    native_tool = _copilot._tool(wait_forever, calls)
+    [descriptor] = _preview.prepare_tools([wait_forever])
+    calls = CopilotToolCalls()
+    native_tool = _copilot._tool(descriptor, calls)
     assert native_tool.handler is not None
     task = asyncio.create_task(
         native_tool.handler(
@@ -405,7 +492,7 @@ async def test_tool_adapter_propagates_cancellation():
 
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert calls == [
+    assert calls.calls == [
         {
             "type": "tool_start",
             "tool_call_id": "call-cancel",
@@ -418,20 +505,16 @@ async def test_tool_adapter_propagates_cancellation():
 @pytest.mark.asyncio
 async def test_sdk_receives_only_combined_custom_catalog(preview, monkeypatch):
     import copilot
-    from copilot.generated.rpc import CurrentToolMetadata
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
-    functions = [
+    functions = _preview.prepare_tools([
         tool(name="user_tool")(lambda: "user"),
         tool(name="execute_python")(lambda code: code),
         tool(name="web_request")(lambda url: url),
-    ]
+    ])
     client = _fake_client()
     client.create_session.return_value.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
-        tools=[
-            CurrentToolMetadata(description="", name=function.name)
-            for function in functions
-        ]
+        tools=[SimpleNamespace(name=function.name) for function in functions]
     )
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
@@ -454,12 +537,13 @@ async def test_sdk_receives_only_combined_custom_catalog(preview, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sdk_rejects_ambient_catalog_before_prompt(preview, monkeypatch):
+async def test_custom_only_catalog_mismatch_fails_before_observer_or_send(preview, monkeypatch):
     import copilot
-    from copilot.generated.rpc import CurrentToolMetadata
+    from copilot.rpc import CurrentToolMetadata
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     function = tool(name="allowed_tool")(lambda: "ok")
+    functions = _preview.prepare_tools([function])
     client = _fake_client()
     session = client.create_session.return_value
     session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
@@ -470,11 +554,461 @@ async def test_sdk_rejects_ambient_catalog_before_prompt(preview, monkeypatch):
     )
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="tool catalog differs"):
-            await _copilot.run(preview, replace(_request(), tools=[function]))
+        with pytest.raises(CopilotPreviewError, match="catalog differs"):
+            await _copilot.run(preview, replace(_request(), tools=functions))
+        options = client.create_session.call_args.kwargs
+        assert options["available_tools"] == ["custom:allowed_tool"]
+        assert options["enable_skills"] is False
+        assert options["enable_config_discovery"] is False
+        session.rpc.tools.get_current_metadata.assert_awaited_once()
+        session.on.assert_not_called()
         session.send_and_wait.assert_not_awaited()
+        session.disconnect.assert_awaited_once()
     finally:
         await _lifecycle._shutdown_harnesses()
+
+
+def _skill_inventory(root):
+    from azure_functions_agents.discovery.skills import SkillDescriptor
+
+    approved = root / "skills" / "approved"
+    excluded = approved / "nested"
+    excluded.mkdir(parents=True)
+    (approved / "SKILL.md").write_text(
+        "---\nname: approved\ndescription: Approved description.\n---\napproved content\n",
+        encoding="utf-8",
+    )
+    (approved / "reference.txt").write_text("approved resource", encoding="utf-8")
+    (excluded / "SKILL.md").write_text(
+        "---\nname: excluded\ndescription: Excluded description.\n---\nexcluded content\n",
+        encoding="utf-8",
+    )
+    return tuple(
+        SkillDescriptor.create(name=name, path=path)
+        for name, path in (
+            ("approved", approved),
+            ("excluded", excluded),
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_headers(
+    preview, monkeypatch,
+):
+    import copilot
+
+    from azure_functions_agents import _mcp_auth
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+
+    credential = SimpleNamespace(get_token=Mock(side_effect=[
+        AccessToken("first-token-sentinel", 9999999999),
+        AccessToken("second-token-sentinel", 9999999999),
+    ]))
+    monkeypatch.setattr(_mcp_auth, "build_credential", Mock(return_value=credential))
+    servers = tuple(
+        MCPServerDescriptor.create(name=name, url=f"https://{name}.example/mcp", **options)
+        for name, options in (
+            ("all", {
+                "auth_scope": "https://remote.example/.default",
+                "headers": {"Authorization": "static-sentinel", "X-Static": "unchanged"},
+            }),
+            ("none", {"tools": []}),
+            ("selected", {"tools": ["lookup"], "transport": "streamable-http"}),
+        )
+    )
+    host_tool = ToolDescriptor.create(name="host_tool", description="Host tool", func=lambda: "ok")
+    skills = _skill_inventory(preview.app_root)
+    request = replace(
+        _request(),
+        session_id="one.two-three",
+        tools=(host_tool,),
+        mcp_servers=servers,
+        skills=skills[:1],
+        skill_catalog=skills,
+    )
+    client = _fake_client()
+    client.resume_session.return_value = _fake_client().resume_session.return_value
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    try:
+        first = await _copilot.run(preview, request)
+        second = await _copilot.run(preview, replace(request, new_session=False))
+        assert first.session_id == second.session_id == "one.two-three"
+        created = client.create_session.call_args.kwargs
+        resumed = client.resume_session.call_args.kwargs
+        assert created["session_id"] == client.resume_session.call_args.args[0] == (
+            _copilot._copilot_session_id("main", "one.two-three")
+        )
+        for options in (created, resumed):
+            assert set(options["mcp_servers"]) == {"all", "none", "selected"}
+            assert options["mcp_servers"]["all"]["tools"] == ["*"]
+            assert options["mcp_servers"]["none"]["tools"] == []
+            assert options["mcp_servers"]["selected"]["tools"] == ["lookup"]
+            assert options["mcp_servers"]["selected"]["type"] == "http"
+            assert options["mcp_servers"]["selected"]["url"] == "https://selected.example/mcp"
+            assert options["skill_directories"] == [str(skills[0].path)]
+            assert options["disabled_skills"] == ["excluded"]
+            assert options["included_builtin_skills"] == []
+            assert options["enable_skills"] is True
+            assert options["available_tools"] == [
+                "custom:host_tool", "mcp:*", "builtin:skill", "builtin:view", "builtin:bash",
+            ]
+            assert options["working_directory"] == factory.call_args.kwargs[
+                "session_fs"
+            ]["initial_working_directory"]
+            assert options["enable_config_discovery"] is False
+            assert options["enable_session_telemetry"] is False
+            assert options["request_extensions"] is False
+            assert options["system_message"] == {"mode": "replace", "content": request.instructions}
+        created_all_headers = dict(created["mcp_servers"]["all"]["headers"])
+        resumed_all_headers = dict(resumed["mcp_servers"]["all"]["headers"])
+        assert created_all_headers["X-Static"] == "unchanged"
+        assert resumed_all_headers["X-Static"] == "unchanged"
+        assert created_all_headers["Authorization"] == "Bearer first-token-sentinel"
+        assert resumed_all_headers["Authorization"] == "Bearer second-token-sentinel"
+        assert created["mcp_servers"] is not resumed["mcp_servers"]
+        assert created["mcp_servers"]["all"]["headers"] is not resumed["mcp_servers"]["all"]["headers"]
+        assert servers[0].headers == (("Authorization", "static-sentinel"), ("X-Static", "unchanged"))
+        assert credential.get_token.call_count == 2
+        assert all(
+            args.args == ("https://remote.example/.default",)
+            for args in credential.get_token.call_args_list
+        )
+        client.create_session.assert_awaited_once()
+        client.resume_session.assert_awaited_once()
+        client.get_session_metadata.assert_not_awaited()
+        for session in (client.create_session.return_value, client.resume_session.return_value):
+            session.disconnect.assert_awaited_once()
+            session.get_events.assert_not_awaited()
+            session.rpc.tools.get_current_metadata.assert_not_awaited()
+        assert factory.call_args.kwargs["telemetry"] is None
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_native_skill_exposure_matches_approved_inventory_on_create_and_resume(
+    preview, monkeypatch, new_session, enabled,
+):
+    import copilot
+    from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionDeniedByRules
+    from copilot.session_events import PermissionRequestRead, PermissionRequestUrl
+
+    skills = _skill_inventory(preview.app_root)
+    read_text = Path.read_text
+
+    def forbid_skill_reads(path, *args, **kwargs):
+        if path.name == "SKILL.md":
+            raise AssertionError("The host must not read SDK-owned skill content")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", forbid_skill_reads)
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+
+    async def read_resource_during_turn(*_args, **_kwargs):
+        session_call = client.create_session.call_args if new_session else client.resume_session.call_args
+        storage = session_call.kwargs["create_session_fs_handler"](None)
+        resource = str(skills[0].path / "reference.txt")
+        if enabled:
+            assert await storage.exists(resource)
+            assert await storage.read_file(resource) == Path(resource).read_text(encoding="utf-8")
+        else:
+            with pytest.raises(OSError):
+                await storage.read_file(resource)
+        return client.create_session.return_value.send_and_wait.return_value
+
+    client.create_session.return_value.send_and_wait.side_effect = read_resource_during_turn
+    try:
+        await _copilot.run(preview, replace(
+            _request(new_session=new_session),
+            skills=skills[:1] if enabled else (),
+            skill_catalog=skills,
+        ))
+        session_call = client.create_session.call_args if new_session else client.resume_session.call_args
+        options = session_call.kwargs
+        assert options["enable_skills"] is enabled
+        assert options["skill_directories"] == ([str(skills[0].path)] if enabled else [])
+        assert options["disabled_skills"] == (["excluded"] if enabled else ["approved", "excluded"])
+        assert options["available_tools"] == (
+            ["builtin:skill", "builtin:view", "builtin:bash"] if enabled else []
+        )
+        assert options["included_builtin_skills"] == []
+        handler = options["on_permission_request"]
+        resource = str(skills[0].path / "reference.txt")
+        read = handler(
+            PermissionRequestRead(intention="resource", path=resource),
+            {"session_id": "main.example"},
+        )
+        assert read.kind == (
+            PermissionDecisionApproveOnce.kind if enabled else PermissionDecisionDeniedByRules.kind
+        )
+        denied = handler(
+            PermissionRequestUrl(intention="skill", url="https://remote.example/"),
+            {"session_id": "main.example"},
+        )
+        assert denied.kind == PermissionDecisionDeniedByRules.kind
+        assert options["system_message"] == {"mode": "replace", "content": "Be helpful."}
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [False, True])
+async def test_mcp_authentication_failure_stops_before_native_session_without_retry(
+    preview, monkeypatch, new_session,
+):
+    import copilot
+
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+    from azure_functions_agents.harness.copilot_sdk import _copilot_capabilities
+
+    materialize = Mock(side_effect=RuntimeError("private auth sentinel"))
+    monkeypatch.setattr(_copilot_capabilities, "materialize_mcp_headers", materialize)
+    factory = Mock(side_effect=AssertionError("no native process or fallback"))
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    providers = []
+    original_open = _copilot.open_session_fs
+
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
+    server = MCPServerDescriptor.create(
+        name="selected", url="https://remote.example/mcp", auth_scope="https://remote.example/.default"
+    )
+    try:
+        with pytest.raises(CopilotPreviewError, match="MCP authentication") as caught:
+            await _copilot.run(preview, replace(
+                _request(new_session=new_session), mcp_servers=(server,)
+            ))
+        assert "private auth sentinel" not in str(caught.value)
+        materialize.assert_called_once_with(server)
+        factory.assert_not_called()
+        assert len(providers) == 1
+        assert providers[0]._closed
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [False, True])
+async def test_mcp_session_failure_does_not_drop_capabilities_reset_or_retry(
+    preview, monkeypatch, new_session,
+):
+    import copilot
+
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+
+    server = MCPServerDescriptor.create(
+        name="selected", url="https://remote.example/mcp", tools=["lookup"]
+    )
+    client = _fake_client()
+    method = client.create_session if new_session else client.resume_session
+    method.side_effect = RuntimeError("private MCP connection detail")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="No fallback") as caught:
+            await _copilot.run(preview, replace(
+                _request(new_session=new_session), mcp_servers=(server,)
+            ))
+        assert "private MCP connection detail" not in str(caught.value)
+        method.assert_awaited_once()
+        other = client.resume_session if new_session else client.create_session
+        other.assert_not_awaited()
+        assert method.call_args.kwargs["mcp_servers"]["selected"]["tools"] == ["lookup"]
+        assert method.call_args.kwargs["available_tools"] == ["mcp:*"]
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_metrics(
+    preview, monkeypatch,
+):
+    import copilot
+    from copilot.rpc import PermissionDecisionDeniedByRules
+    from copilot.session_events import (
+        PermissionRequestRead,
+        SessionEventType,
+        SkillInvokedData,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteError,
+        ToolExecutionCompleteResult,
+        ToolExecutionStartData,
+    )
+    from copilot.tools import ToolInvocation
+
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+    from azure_functions_agents.registration._handlers import _set_run_result_attributes
+
+    skills = _skill_inventory(preview.app_root)
+    host_tool = ToolDescriptor.create(name="host_tool", description="Host tool", func=lambda: "host result")
+    server = MCPServerDescriptor.create(name="selected", url="https://remote.example/mcp")
+    client = _fake_client()
+    session = client.create_session.return_value
+
+    async def send(*_args, **_kwargs):
+        options = client.create_session.call_args.kwargs
+        [on_event] = session.handlers
+        assert "on_event" not in options
+
+        def emit(event_type, data):
+            on_event(_sdk_event(event_type, data))
+
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="skill", tool_name="skill", arguments={"name": "approved"},
+        ))
+        emit(SessionEventType.SKILL_INVOKED, SkillInvokedData(
+            content="private skill instructions", name="approved", path=str(skills[0].path),
+            allowed_tools=["bash", "edit", "*"],
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="skill", success=True,
+            result=ToolExecutionCompleteResult(content="Loaded approved."),
+        ))
+        denied = options["on_permission_request"](
+            PermissionRequestRead(
+                intention="claims an approved skill", path=str(skills[1].path / "SKILL.md"),
+                tool_call_id="denied-view",
+            ),
+            {"session_id": "main.example"},
+        )
+        assert denied.kind == PermissionDecisionDeniedByRules.kind
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="denied-view", tool_name="view", arguments={"path": "excluded"},
+        ))
+        for _duplicate in range(2):
+            emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+                tool_call_id="denied-view", success=False,
+                error=ToolExecutionCompleteError(message="private native denial detail"),
+            ))
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="mcp", tool_name="remote_lookup", arguments={"query": "safe"},
+            mcp_server_name="selected", mcp_tool_name="lookup",
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="mcp", success=True,
+            result=ToolExecutionCompleteResult(content='{"remote":"result"}'),
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="custom", tool_name="host_tool", arguments={},
+        ))
+        [native_tool] = options["tools"]
+        await native_tool.handler(ToolInvocation(
+            session_id=_copilot._copilot_session_id("main", "one.two-three"),
+            tool_call_id="custom",
+            tool_name="host_tool",
+            arguments={},
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="custom", success=True,
+            result=ToolExecutionCompleteResult(content="SDK wrapper duplicate"),
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="completion-only-bash", success=False,
+            error=ToolExecutionCompleteError(message="private shell detail"),
+        ))
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(preview, replace(
+            _request(), tools=(host_tool,), mcp_servers=(server,),
+            skills=skills[:1], skill_catalog=skills,
+        ))
+        assert [call["tool_call_id"] for call in result.tool_calls] == [
+            "skill", "denied-view", "mcp", "custom", "completion-only-bash",
+        ]
+        assert result.tool_calls[3]["result"] == "host result"
+        assert "private" not in repr(result.tool_calls)
+        span = Mock()
+        _set_run_result_attributes(span, result)
+        span.set_attribute.assert_any_call("af.agent.tool_call_count", 5)
+        span.set_attribute.assert_any_call("af.agent.tool_error_count", 2)
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission_callback", [False, True])
+async def test_prompt_refusal_or_permission_request_alone_does_not_invent_tool_execution(
+    preview, monkeypatch, permission_callback,
+):
+    import copilot
+    from copilot.rpc import PermissionDecisionDeniedByRules
+    from copilot.session_events import PermissionRequestRead
+
+    client = _fake_client()
+    session = client.create_session.return_value
+
+    async def send(*_args, **_kwargs):
+        if permission_callback:
+            options = client.create_session.call_args.kwargs
+            decision = options["on_permission_request"](
+                PermissionRequestRead(intention="a claim", path="unapproved.txt"),
+                {"session_id": "main.example"},
+            )
+            assert decision.kind == PermissionDecisionDeniedByRules.kind
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(preview, _request())
+        assert result.tool_calls == []
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_native_custom_tools_preserve_json_results_and_fresh_parameter_schemas():
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+
+    descriptor = ToolDescriptor.create(
+        name="json_tool",
+        description="A JSON result.",
+        func=lambda value: {"value": value, "items": [True, None]},
+    )
+    registered_parameters = descriptor.parameters()
+    first = _copilot._tool(descriptor, CopilotToolCalls())
+    second = _copilot._tool(descriptor, CopilotToolCalls())
+    first.parameters["properties"]["value"]["description"] = "SDK-side mutation"
+
+    assert second.parameters == registered_parameters
+    assert descriptor.parameters() == registered_parameters
+    result, calls = await _invoke_native_tool(descriptor, {"value": "ok"})
+    assert result.result_type == "success"
+    assert result.text_result_for_llm == '{"value": "ok", "items": [true, null]}'
+    assert calls[0]["result"] == result.text_result_for_llm
+
+
+@pytest.mark.asyncio
+async def test_native_custom_tool_sdk_result_is_a_sanitized_recoverable_failure():
+    from copilot.tools import ToolResult
+
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+
+    descriptor = ToolDescriptor.create(
+        name="unsupported_result",
+        description="Returns an unsupported SDK object.",
+        func=lambda: ToolResult(text_result_for_llm="private SDK result detail"),
+    )
+    result, calls = await _invoke_native_tool(descriptor, {})
+
+    assert result.result_type == "failure"
+    assert result.text_result_for_llm == '{"error":"Custom tool failed or returned unsupported content."}'
+    assert calls[0]["result"] == result.text_result_for_llm
+    assert "private SDK result detail" not in repr(calls)
 
 
 @pytest.mark.asyncio
@@ -1001,12 +1535,14 @@ async def test_filesystem_failure_stops_before_native_start_without_fallback(pre
 
 
 @pytest.mark.asyncio
-async def test_detach_failure_does_not_mask_the_original_failure(preview, monkeypatch):
+@pytest.mark.parametrize("boundary", ["send", "catalog"])
+async def test_detach_failure_does_not_mask_the_original_failure(preview, monkeypatch, boundary):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
     session = client.create_session.return_value
+    original_failure = CopilotPreviewError("original failure")
     providers = []
     original_open = _copilot.open_session_fs
 
@@ -1015,13 +1551,26 @@ async def test_detach_failure_does_not_mask_the_original_failure(preview, monkey
         providers.append(provider)
         return provider
 
-    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
+    if boundary == "send":
+        session.send_and_wait.side_effect = original_failure
+    else:
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
     session.disconnect.side_effect = RuntimeError("disconnect failed")
     monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="model-visible tool catalog"):
+        diagnostic = "original failure" if boundary == "send" else "model-visible tool catalog"
+        with pytest.raises(CopilotPreviewError, match=diagnostic) as caught:
             await _copilot.run(preview, _request())
+        if boundary == "send":
+            assert caught.value is original_failure
+            session.send_and_wait.assert_awaited_once()
+            session.abort.assert_awaited_once()
+            session.unsubscribe.assert_called_once()
+        else:
+            session.send_and_wait.assert_not_awaited()
+            session.abort.assert_not_awaited()
+            session.on.assert_not_called()
         session.disconnect.assert_awaited_once()
         assert providers[0]._closed
     finally:
@@ -1554,3 +2103,129 @@ async def test_real_sdk_wait_timeout_requires_the_host_abort():
     assert [call.args[0] for call in client.request.await_args_list] == [
         "session.send", "session.abort",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "send_failure", "setup_failure", "cancelled"])
+async def test_invocation_owned_cleanup_unsubscribes_before_disconnect_and_filesystem_close(
+    preview, monkeypatch, outcome
+):
+    import copilot
+    from copilot.session_events import (
+        AssistantUsageData,
+        SessionEventType,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteResult,
+        ToolExecutionStartData,
+    )
+
+    client = _fake_client()
+    session = client.create_session.return_value
+    order = []
+    opened = []
+    original_open = _copilot.open_session_fs
+    original_on = session.on.side_effect
+    final = session.send_and_wait.return_value
+    recorder = Mock()
+    original_failure = CopilotPreviewError("original send failure")
+    original_cancel = asyncio.CancelledError("original cancellation")
+
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        original_close = provider.close
+
+        async def close():
+            assert session.handlers == []
+            order.append("filesystem_close")
+            await original_close()
+
+        provider.close = close
+        opened.append(provider)
+        return provider
+
+    def subscribe(handler):
+        order.append("subscribe")
+        unsubscribe = original_on(handler)
+
+        def release():
+            order.append("unsubscribe")
+            unsubscribe()
+
+        return release
+
+    async def send(*args, **kwargs):
+        order.append("send")
+        [observer] = session.handlers
+        observer(_sdk_event(
+            SessionEventType.ASSISTANT_USAGE,
+            AssistantUsageData(model="fixture", input_tokens=2, output_tokens=3),
+        ))
+        observer(_sdk_event(
+            SessionEventType.TOOL_EXECUTION_START,
+            ToolExecutionStartData(
+                tool_call_id="denied-view", tool_name="view", arguments={"path": "denied"}
+            ),
+        ))
+        observer(_sdk_event(
+            SessionEventType.TOOL_EXECUTION_COMPLETE,
+            ToolExecutionCompleteData(
+                tool_call_id="denied-view", success=False,
+                result=ToolExecutionCompleteResult(content="private denied detail"),
+            ),
+        ))
+        if outcome == "send_failure":
+            raise original_failure
+        if outcome == "cancelled":
+            raise original_cancel
+        observer(final)
+        return final
+
+    async def abort():
+        order.append("abort")
+
+    async def disconnect():
+        assert session.handlers == []
+        assert not opened[0]._closed
+        order.append("disconnect")
+
+    session.on = Mock(side_effect=subscribe)
+    session.send_and_wait.side_effect = send
+    session.abort.side_effect = abort
+    session.disconnect.side_effect = disconnect
+    if outcome == "setup_failure":
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
+    monkeypatch.setattr(_execution, "_AgentUsageRecorder", Mock(return_value=recorder))
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        if outcome == "success":
+            result = await _copilot.run(preview, _request())
+            assert len(result.tool_calls) == 1
+            assert result.tool_calls[0]["tool_call_id"] == "denied-view"
+            assert result.tool_calls[0]["success"] is False
+            assert "private denied detail" not in repr(result.tool_calls)
+        else:
+            error = asyncio.CancelledError if outcome == "cancelled" else CopilotPreviewError
+            with pytest.raises(error) as caught:
+                await _copilot.run(preview, _request())
+            if outcome == "send_failure":
+                assert caught.value is original_failure
+            elif outcome == "cancelled":
+                assert caught.value is original_cancel
+        expected = (
+            ["disconnect", "filesystem_close"]
+            if outcome == "setup_failure"
+            else ["subscribe", "send"]
+            + (["abort"] if outcome in {"send_failure", "cancelled"} else [])
+            + ["unsubscribe", "disconnect", "filesystem_close"]
+        )
+        assert order == expected
+        assert opened[0]._closed
+        if outcome == "setup_failure":
+            recorder.emit_counts.assert_not_called()
+        else:
+            recorder.emit_counts.assert_called_once_with(input_tokens=2, output_tokens=3)
+        client.stop.assert_not_awaited()
+        assert preview._resources.runtime._client is client
+    finally:
+        await _lifecycle._shutdown_harnesses()

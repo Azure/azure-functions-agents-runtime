@@ -1,30 +1,50 @@
-"""Public execution facade and host tool/delegation policy."""
+"""SDK-independent agent requests, role policy, and lazy harness dispatch."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+import uuid
+from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
-from ._function_tool import FunctionTool, tool
+from ._function_tool import tool
 from ._logger import logger
-from ._observability import FaultDomain, RuntimeSpan, current_span, record_delegate_call
+from ._observability import (
+    FaultDomain,
+    RuntimeSpan,
+    current_span,
+    record_delegate_call,
+)
 from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
+from ._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
-from .discovery.mcp import MCPTool
+from .discovery.mcp import MCPServerDescriptor
+from .discovery.mcp import discover_mcp_servers as discover_mcp_servers
+from .discovery.skills import (
+    SkillDescriptor,
+    describe_skill_catalog,
+)
+from .discovery.tools import discover_user_tools as discover_user_tools
 from .harness._agent_runner import get_agent_runner
-from .harness._harness_binding import AppHarness, get_harness
+from .harness._harness_binding import (
+    AppHarness,
+    HarnessRequest,
+    get_harness,
+)
 from .harness._history_identity import validate_agent_slug
-from .registration.capabilities import AgentCapabilities
+from .registration.capabilities import (
+    AgentCapabilities,
+    _merge_skill_descriptors,
+)
 from .registration.catalog import AgentCatalog, CatalogEntry
 
 if TYPE_CHECKING:
@@ -32,8 +52,8 @@ if TYPE_CHECKING:
 
     from .workflows.schema import WorkflowPlanPolicy
 
-type AgentFunctionTool = FunctionTool | Callable[..., Any]
-type AgentTool = AgentFunctionTool | MCPTool
+type AgentFunctionTool = ToolInput
+type AgentTool = ToolDescriptor | MCPServerDescriptor
 
 
 class ToolCallEvidence(TypedDict):
@@ -81,7 +101,6 @@ class AgentResult:
 
 
 def _validate_session_id(session_id: str | None) -> str | None:
-    """Return ``session_id`` if it matches the safe pattern; raise on invalid input."""
     if session_id is None:
         return None
     if not isinstance(session_id, str) or not _SESSION_ID_PATTERN.match(session_id):
@@ -90,8 +109,7 @@ def _validate_session_id(session_id: str | None) -> str | None:
 
 
 def _resolve_history_agent_slug(
-    agent_name: str | None,
-    workflow_agent_slug: str | None,
+    agent_name: str | None, workflow_agent_slug: str | None
 ) -> str:
     if agent_name is not None:
         return agent_name
@@ -101,7 +119,7 @@ def _resolve_history_agent_slug(
 
 
 class _DelegateErrorTracker:
-    """Count recoverable specialist failures for one coordinator invocation."""
+    """Per-request counter of recoverable specialist failures."""
 
     __slots__ = ("count",)
 
@@ -110,43 +128,6 @@ class _DelegateErrorTracker:
 
     def record_error(self) -> None:
         self.count += 1
-
-
-def _assemble_agent_inputs(
-    *,
-    instructions: str | None,
-    tools: list[AgentFunctionTool] | None,
-    mcp_tools: list[MCPTool] | None,
-    sandbox_tools: list[FunctionTool] | None,
-    web_request_tools: list[FunctionTool] | None,
-    system_addendum: str | None,
-    workflow_enabled: bool,
-    workflow_durable_client: DurableFunctionsClient | None,
-    workflow_agent_slug: str | None,
-    agent_name: str | None,
-    resolved_id: str | None,
-    delegate_tools: list[FunctionTool] | None,
-    workflow_policy: WorkflowPlanPolicy | None,
-) -> tuple[list[AgentTool], str | None]:
-    """Compatibility shim for the MAF-local tool assembly helper."""
-    from .harness.agent_framework._maf_execution import assemble_agent_inputs
-
-    return assemble_agent_inputs(
-        instructions=instructions,
-        tools=tools,
-        mcp_tools=mcp_tools,
-        app_root=None,
-        sandbox_tools=sandbox_tools,
-        web_request_tools=web_request_tools,
-        system_addendum=system_addendum,
-        workflow_enabled=workflow_enabled,
-        workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
-        agent_name=agent_name,
-        resolved_id=resolved_id,
-        delegate_tools=delegate_tools,
-        workflow_policy=workflow_policy,
-    )
 
 
 async def run_leaf_agent_task(
@@ -158,7 +139,7 @@ async def run_leaf_agent_task(
     execution_role: Literal["delegate", "workflow_subagent"],
     _harness: AppHarness | None = None,
 ) -> str:
-    """Run one fresh stateless specialist and return its response text."""
+    """Run a fresh stateless specialist under its existing role contract."""
     harness = _harness or capabilities._harness or get_harness()
     return await get_agent_runner(harness).run_leaf_agent_task(
         resolved,
@@ -170,7 +151,6 @@ async def run_leaf_agent_task(
 
 
 def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
-    """Return a generic specialist failure without exposing internal details."""
     return (
         f"The '{slug}' specialist could not complete this task. "
         "Consider trying again, rephrasing the request, or proceeding without it."
@@ -180,7 +160,6 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
 def _record_generic_delegate_failure(
     span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
 ) -> str:
-    """Record a recoverable delegate failure and return the sanitized model-facing string."""
     tracker.record_error()
     record_delegate_call(error=True)
     span.set_attribute("af.delegate.outcome", "error")
@@ -189,9 +168,12 @@ def _record_generic_delegate_failure(
 
 
 def _record_delegate_timeout(
-    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, effective_timeout: float, exc: BaseException
+    span: RuntimeSpan,
+    tracker: _DelegateErrorTracker,
+    slug: str,
+    effective_timeout: float,
+    exc: BaseException,
 ) -> str:
-    """Record a recoverable delegate timeout and return the model-facing string."""
     tracker.record_error()
     record_delegate_call(error=True)
     span.set_attribute("af.delegate.outcome", "timeout")
@@ -199,8 +181,7 @@ def _record_delegate_timeout(
     span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return (
         f"The '{slug}' specialist did not respond in time and was "
-        "stopped. Consider a narrower request, trying again, or "
-        "proceeding without it."
+        "stopped. Consider a narrower request, trying again, or proceeding without it."
     )
 
 
@@ -223,55 +204,50 @@ def _build_delegate_tool(
     *,
     coordinator_deadline: float,
     tracker: _DelegateErrorTracker,
-    harness: AppHarness | None = None,
-) -> FunctionTool:
+    _harness: AppHarness | None = None,
+) -> ToolDescriptor:
     """Build one host-authorized specialist tool with its coordinator's deadline."""
     resolved = entry.resolved
-    capabilities = entry.capabilities
+    capabilities = (
+        entry.capabilities
+        if _harness is None
+        else replace(entry.capabilities, _harness=_harness)
+    )
     slug = ref.agent
-    tool_name = delegate_tool_name(slug)
-    description = ref.when or resolved.description
-    specialist_timeout = resolved.timeout
 
     @tool(
-        name=tool_name,
-        description=description,
+        name=delegate_tool_name(slug),
+        description=ref.when or resolved.description,
         schema=_DelegateTaskParams,
         approval_mode="never_require",
     )
     async def delegate(params: _DelegateTaskParams) -> str:
-        loop = asyncio.get_running_loop()
-        task_text = params.task
-
+        task = params.task
         span = current_span()
         span.set_attribute("af.delegate.specialist", slug)
-        span.set_attribute("af.delegate.task_bytes", len(task_text))
-        span.set_content("af.delegate.task", task_text)
-
-        remaining = max(0.0, coordinator_deadline - loop.time())
-        effective_timeout = min(specialist_timeout, remaining)
-        if effective_timeout <= 0:
+        span.set_attribute("af.delegate.task_bytes", len(task))
+        span.set_content("af.delegate.task", task)
+        remaining = max(0.0, coordinator_deadline - asyncio.get_running_loop().time())
+        timeout = min(resolved.timeout, remaining)
+        if timeout <= 0:
             exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
-            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
-
+            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
         try:
             result = await run_leaf_agent_task(
                 resolved,
                 capabilities,
-                task_text,
-                timeout=effective_timeout,
+                task,
+                timeout=timeout,
                 execution_role="delegate",
-                _harness=harness,
             )
         except asyncio.CancelledError:
             record_delegate_call(error=False)
             span.set_attribute("af.delegate.outcome", "cancelled")
             raise
         except TimeoutError as exc:
-            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
+            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
         except Exception as exc:
             return _record_generic_delegate_failure(span, tracker, slug, exc)
-
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", "success")
         span.set_attribute("af.delegate.response_bytes", len(result))
@@ -286,28 +262,89 @@ async def build_subagent_tools(
     catalog: AgentCatalog | None,
     *,
     coordinator_deadline: float,
+    _harness: AppHarness | None = None,
     harness: AppHarness | None = None,
-) -> tuple[list[FunctionTool], _DelegateErrorTracker]:
-    """Build specialist tools whose calls each execute a fresh isolated leaf."""
+) -> tuple[list[ToolDescriptor], _DelegateErrorTracker]:
+    """Build neutral delegate tools; each invocation creates an independent leaf."""
     tracker = _DelegateErrorTracker()
-    tools: list[FunctionTool] = []
     if not subagents:
-        return tools, tracker
+        return [], tracker
     assert catalog is not None, "subagents declared but no AgentCatalog was provided"
-
+    bound_harness = harness or _harness
+    delegates: list[ToolDescriptor] = []
     for ref in subagents:
         entry = catalog.get(ref.agent)
         assert entry is not None, f"subagents reference `{ref.agent}` was not found in the AgentCatalog"
-        tools.append(
+        delegates.append(
             _build_delegate_tool(
-                ref,
-                entry,
-                coordinator_deadline=coordinator_deadline,
-                tracker=tracker,
-                harness=harness,
+                ref, entry, coordinator_deadline=coordinator_deadline, tracker=tracker,
+                _harness=bound_harness,
             )
         )
-    return tools, tracker
+    return delegates, tracker
+
+
+def _request(
+    harness: AppHarness,
+    prompt: str,
+    *,
+    instructions: str | None,
+    session_id: str | None,
+    session_is_new: bool,
+    tools: Sequence[ToolInput] | None,
+    mcp_tools: Sequence[MCPServerDescriptor] | None,
+    skill_paths: Sequence[Path] | None,
+    skills: Sequence[SkillDescriptor] | None,
+    skill_catalog: Sequence[SkillDescriptor] | None,
+    sandbox_tools: Sequence[ToolInput] | None,
+    web_request_tools: Sequence[ToolInput] | None,
+    system_addendum: str | None,
+    model: str | None,
+    agent_name: str | None,
+    workflow_agent_slug: str | None,
+    agent_configuration: AgentConfiguration | None,
+    deadline: float,
+) -> HarnessRequest:
+    descriptors = describe_tools(
+        (
+            *(discover_user_tools(harness.app_root).tools if tools is None else tools),
+            *(sandbox_tools or ()),
+            *(web_request_tools or ()),
+        )
+    )
+    servers = (
+        tuple(discover_mcp_servers(harness.app_root).servers.values())
+        if mcp_tools is None
+        else tuple(mcp_tools)
+    )
+    if skills is not None:
+        approved = tuple(skills)
+    elif skill_paths is not None:
+        approved = describe_skill_catalog(skill_paths)
+    else:
+        approved = ()
+    discovered = tuple(skill_catalog) if skill_catalog is not None else approved
+    validated_id = _validate_session_id(session_id)
+    effective = instructions.strip() if instructions and instructions.strip() else None
+    if system_addendum:
+        effective = (effective or "") + system_addendum
+    configuration = agent_configuration or AgentConfiguration()
+    return HarnessRequest(
+        prompt=prompt,
+        instructions=effective,
+        agent_slug=validate_agent_slug(
+            _resolve_history_agent_slug(agent_name, workflow_agent_slug)
+        ),
+        session_id=validated_id or uuid.uuid4().hex,
+        new_session=validated_id is None or session_is_new,
+        model=model or harness.default_model or "",
+        tools=descriptors,
+        mcp_servers=servers,
+        skills=approved,
+        skill_catalog=_merge_skill_descriptors(discovered, approved),
+        max_output_tokens=configuration.max_output_tokens,
+        deadline=deadline,
+    )
 
 
 async def run_agent(
@@ -315,26 +352,29 @@ async def run_agent(
     *,
     instructions: str | None = None,
     timeout: float | None = None,
-    tools: list[AgentFunctionTool] | None = None,
-    mcp_tools: list[MCPTool] | None = None,
-    skill_paths: list[Path] | None = None,
+    tools: Sequence[AgentFunctionTool] | None = None,
+    mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+    skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: list[FunctionTool] | None = None,
+    sandbox_tools: Sequence[ToolInput] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
-    web_request_tools: list[FunctionTool] | None = None,
+    web_request_tools: Sequence[ToolInput] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    skills: Sequence[SkillDescriptor] | None = None,
+    skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
 ) -> AgentResult:
-    """Execute through the bound harness; ``None`` tools discover and ``[]`` disables."""
+    """Execute a prompt; None inventories discover, explicit empty inventories disable."""
+    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     coordinator_deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
@@ -346,16 +386,18 @@ async def run_agent(
         tools=tools,
         mcp_tools=mcp_tools,
         skill_paths=skill_paths,
+        skills=skills,
+        skill_catalog=skill_catalog,
+        sandbox_tools=sandbox_tools,
+        web_request_tools=web_request_tools,
+        system_addendum=system_addendum,
         model=model,
         session_id=session_id,
-        sandbox_tools=sandbox_tools,
-        system_addendum=system_addendum,
+        agent_name=agent_name,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_configuration=agent_configuration,
         workflow_enabled=workflow_enabled,
         workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
-        agent_name=agent_name,
-        web_request_tools=web_request_tools,
-        agent_configuration=agent_configuration,
         subagents=subagents,
         catalog=catalog,
         workflow_policy=workflow_policy,
@@ -368,29 +410,32 @@ async def run_agent_stream(
     *,
     instructions: str | None = None,
     timeout: float | None = None,
-    tools: list[AgentFunctionTool] | None = None,
-    mcp_tools: list[MCPTool] | None = None,
-    skill_paths: list[Path] | None = None,
+    tools: Sequence[AgentFunctionTool] | None = None,
+    mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+    skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: list[FunctionTool] | None = None,
+    sandbox_tools: Sequence[ToolInput] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
-    web_request_tools: list[FunctionTool] | None = None,
+    web_request_tools: Sequence[ToolInput] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    skills: Sequence[SkillDescriptor] | None = None,
+    skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
 ) -> AsyncIterator[str]:
-    """Yield existing SSE events; selection failures emit one terminal error."""
+    """Yield the existing SSE vocabulary under the selected app context."""
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
+    deadline = asyncio.get_running_loop().time() + timeout
     try:
         harness = _harness or get_harness()
         selected = get_agent_runner(harness)
@@ -398,9 +443,12 @@ async def run_agent_stream(
             prompt,
             instructions=instructions,
             timeout=timeout,
+            deadline=deadline,
             tools=tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
+            skills=skills,
+            skill_catalog=skill_catalog,
             model=model,
             session_id=session_id,
             sandbox_tools=sandbox_tools,
@@ -417,11 +465,10 @@ async def run_agent_stream(
             workflow_policy=workflow_policy,
             session_is_new=_session_is_new,
         )
-    except (ValueError, RuntimeError) as exc:
+    except Exception as exc:
         logger.error("Agent harness selection failed: %s", exc)
         yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
         return
-
     async with aclosing(stream) as stream:
         async for event in stream:
             yield event

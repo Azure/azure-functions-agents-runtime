@@ -24,6 +24,8 @@ from azure.core.exceptions import (
 from azure.core.pipeline.transport import AsyncHttpResponse, HttpRequest
 from azure.storage.blob import BlobProperties, StorageErrorCode
 
+from azure_functions_agents._skill_policy import SkillPolicy
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._session_storage import BlobStorageSettings, OwnedBlobService
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_session_blob as blob_backend,
@@ -241,6 +243,175 @@ async def file_case(request, local_route, memory_blobs):
         yield provider, route, memory_blobs
     finally:
         await provider.close()
+
+
+@pytest_asyncio.fixture(params=["local", "blob"])
+async def skill_file_case(request, local_route, memory_blobs, tmp_path):
+    parent = tmp_path / "skills" / "approved"
+    reference = parent / "references" / "check.txt"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("REFERENCE_READ_7C42A9", encoding="utf-8")
+    excluded = parent / "excluded"
+    excluded.mkdir()
+    (excluded / "hidden.txt").write_text("excluded", encoding="utf-8")
+    approved = SkillDescriptor.create(name="approved", path=parent)
+    denied = SkillDescriptor.create(name="excluded", path=excluded)
+    workspace = tmp_path / "native-workspace"
+    policy = SkillPolicy.create(
+        approved=(approved,), discovered=(approved, denied), working_directory=workspace
+    )
+    route = local_route
+    if request.param == "blob":
+        route = replace(
+            route,
+            blob=BlobStorageSettings(
+                container_name="container", blob_service_url="https://fixture.invalid"
+            ),
+        )
+    provider = await open_session_fs(
+        route, "agent", "resources", workspace_path=str(workspace), skill_policy=policy
+    )
+    try:
+        yield provider, policy, reference, excluded, memory_blobs
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_approved_skill_file_reads_use_physical_resource_not_session_storage(skill_file_case):
+    provider, policy, reference, _excluded, store = skill_file_case
+    assert policy.allows_read(str(reference))
+    assert await provider.exists(str(reference))
+    assert await provider.read_file(str(reference)) == "REFERENCE_READ_7C42A9"
+    info = await provider.stat(str(reference))
+    assert info.is_file
+    assert not info.is_directory
+    assert info.size == reference.stat().st_size
+    assert info.mtime.timestamp() == pytest.approx(reference.stat().st_mtime)
+    assert not any("check.txt" in name for name in store.files)
+    await provider.write_file("/workspace/opaque-sdk-file", "native state")
+    assert await provider.read_file("/workspace/opaque-sdk-file") == "native state"
+
+
+@pytest.mark.asyncio
+async def test_skill_projection_preserves_denials_and_never_mutates_resources(skill_file_case):
+    provider, _policy, reference, excluded, _store = skill_file_case
+    outside = reference.parents[3] / "project-file.txt"
+    outside.write_text("not approved", encoding="utf-8")
+    traversal = reference.parent / ".." / "references" / reference.name
+    for path in (excluded / "hidden.txt", outside, traversal, reference.parent):
+        for operation in (provider.read_file, provider.exists, provider.stat):
+            with pytest.raises(OSError) as caught:
+                await operation(str(path))
+            assert caught.value.errno == errno.EACCES
+    for operation in (
+        lambda: provider.write_file(str(reference), "overwrite"),
+        lambda: provider.append_file(str(reference), "append"),
+        lambda: provider.rm(str(reference), recursive=False, force=True),
+        lambda: provider.rename(str(reference), "/workspace/moved"),
+        lambda: provider.rename("/workspace/moved", str(reference)),
+        lambda: provider.mkdir(str(reference.parent), recursive=True),
+        lambda: provider.readdir(str(reference.parent)),
+        lambda: provider.readdir_with_types(str(reference.parent)),
+    ):
+        with pytest.raises(OSError) as caught:
+            await operation()
+        assert caught.value.errno == errno.EACCES
+    assert reference.read_text(encoding="utf-8") == "REFERENCE_READ_7C42A9"
+
+
+@pytest.mark.asyncio
+async def test_skill_projection_rechecks_policy_after_symlink_escape(skill_file_case):
+    provider, policy, reference, _excluded, _store = skill_file_case
+    outside = reference.parents[3] / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not approved", encoding="utf-8")
+    link = reference.parent / "linked"
+    directory_link(link, outside)
+    escaped = link / "secret.txt"
+    assert not policy.allows_read(str(escaped))
+    for operation in (provider.read_file, provider.exists, provider.stat):
+        with pytest.raises(OSError) as caught:
+            await operation(str(escaped))
+        assert caught.value.errno == errno.EACCES
+
+
+@pytest.mark.asyncio
+async def test_skill_projection_preserves_independent_child_and_ambiguous_root_rules(
+    local_route, tmp_path,
+):
+    parent = tmp_path / "excluded"
+    child = parent / "approved"
+    child.mkdir(parents=True)
+    resource = child / "check.txt"
+    resource.write_text("child marker", encoding="utf-8")
+    parent_skill = SkillDescriptor.create(name="excluded", path=parent)
+    child_skill = SkillDescriptor.create(name="approved", path=child)
+    for catalog, allowed in (
+        ((parent_skill, child_skill), True),
+        ((parent_skill, child_skill, SkillDescriptor.create(name="alias", path=child)), False),
+    ):
+        policy = SkillPolicy.create(
+            approved=(child_skill,), discovered=catalog,
+            working_directory=tmp_path / "workspace",
+        )
+        provider = await open_session_fs(local_route, "agent", "child", skill_policy=policy)
+        try:
+            assert policy.allows_read(str(resource)) is allowed
+            if allowed:
+                assert await provider.read_file(str(resource)) == "child marker"
+            else:
+                with pytest.raises(OSError) as caught:
+                    await provider.read_file(str(resource))
+                assert caught.value.errno == errno.EACCES
+        finally:
+            await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_skill_projection_does_not_mutate_physical_files_inside_workspace(
+    local_route, tmp_path,
+):
+    root = tmp_path / "workspace"
+    skill = root / "approved"
+    skill.mkdir(parents=True)
+    resource = skill / "check.txt"
+    resource.write_text("physical marker", encoding="utf-8")
+    descriptor = SkillDescriptor.create(name="approved", path=skill)
+    policy = SkillPolicy.create(
+        approved=(descriptor,), discovered=(descriptor,), working_directory=root
+    )
+    provider = await open_session_fs(
+        local_route, "agent", "inside", workspace_path=str(root), skill_policy=policy
+    )
+    try:
+        assert await provider.read_file(str(resource)) == "physical marker"
+        with pytest.raises(OSError) as caught:
+            await provider.write_file(str(resource), "overwrite")
+        assert caught.value.errno == errno.EACCES
+        assert resource.read_text(encoding="utf-8") == "physical marker"
+        provider.deadline = asyncio.get_running_loop().time() - 1
+        with pytest.raises(CopilotSessionError) as caught:
+            await provider.read_file(str(resource))
+        assert caught.value.errno == errno.ETIMEDOUT
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_skill_projection_keeps_binary_stat_and_closed_provider_semantics(skill_file_case):
+    provider, _policy, reference, _excluded, _store = skill_file_case
+    reference.write_bytes(b"\xff\x00")
+    assert (await provider.stat(str(reference))).size == 2
+    assert await provider.exists(str(reference))
+    with pytest.raises(OSError) as caught:
+        await provider.read_file(str(reference))
+    assert caught.value.errno == errno.EILSEQ
+    await provider.close()
+    for operation in (provider.read_file, provider.exists, provider.stat):
+        with pytest.raises(OSError) as caught:
+            await operation(str(reference))
+        assert caught.value.errno == errno.EBADF
 
 
 @pytest.mark.asyncio

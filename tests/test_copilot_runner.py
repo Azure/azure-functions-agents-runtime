@@ -160,10 +160,10 @@ async def test_delegate_tool_retains_parent_binding_and_counts_sanitized_failure
         coordinator_deadline=asyncio.get_running_loop().time() + 5,
         harness=preview,
     )
-    [content] = await function.invoke(arguments={"task": "check"}, tool_call_id="call")
-    assert "private failure" not in content.text
+    content = await function.invoke(arguments={"task": "check"}, tool_call_id="call")
+    assert "private failure" not in content
     assert tracker.count == 1
-    assert leaf.call_args.kwargs["_harness"] is preview
+    assert leaf.call_args.args[1]._harness is preview
 
 
 @pytest.mark.asyncio

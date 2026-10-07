@@ -154,11 +154,16 @@ $web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
 $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
+Optional outbound MCP servers and project skills use the existing authoring
+and per-agent filters; see the [MCP and scoped skills guide](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills)
+before enabling them. This walkthrough requires neither and keeps the receipt
+and `web_request` behavior unchanged.
+
 The local adapter also supports SSE chat, declared chat delegates, Workflow
 Sub Agents, and Dynamic Workflow management when authored in an agent app.
-This sample remains a single-agent tool demonstration. MCP, general scoped
-skills, debug chat UI, non-HTTP triggers, and deployed hosting remain unsupported.
-Custom `ClientManager`
+This sample remains a single-agent tool demonstration and does not configure
+those optional capabilities. Deployed hosting and debug chat UI remain
+unsupported in this preview. Custom `ClientManager`
 instances are MAF-only and are rejected when Copilot is on. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.

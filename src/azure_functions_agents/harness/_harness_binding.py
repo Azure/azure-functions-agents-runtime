@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from .._logger import logger
+from .._tool_descriptor import ToolDescriptor
 from ..client_manager import ProviderKind as ProviderKind
 from ..config.env import EnvVar, raw_env_value
 from ..config.paths import get_app_root
+from ..discovery.mcp import MCPServerDescriptor
+from ..discovery.skills import SkillDescriptor
 
 if TYPE_CHECKING:
-    from .._function_tool import FunctionTool
     from ..config.schema import ResolvedAgent
     from ..registration.capabilities import AgentCapabilities
     from ._agent_runner import AgentRunner
@@ -59,7 +61,7 @@ class AppHarness:
 
 @dataclass(frozen=True)
 class HarnessRequest:
-    """Normalized inputs for one SDK invocation."""
+    """SDK-free capability and execution inputs for direct and streaming turns."""
 
     prompt: str
     instructions: str | None
@@ -67,9 +69,12 @@ class HarnessRequest:
     session_id: str
     new_session: bool
     model: str
-    tools: list[FunctionTool]
+    tools: tuple[ToolDescriptor, ...]
     max_output_tokens: int | None
     deadline: float
+    mcp_servers: tuple[MCPServerDescriptor, ...] = ()
+    skills: tuple[SkillDescriptor, ...] = ()
+    skill_catalog: tuple[SkillDescriptor, ...] = ()
     execution_role: ExecutionRole = "primary"
     event_sink: Callable[[dict[str, Any]], None] | None = None
 
@@ -125,5 +130,4 @@ def bind_harness(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Ap
         return capabilities._harness
     harness = get_harness()
     validate_agent(harness, resolved, capabilities)
-    capabilities._harness = harness
     return harness

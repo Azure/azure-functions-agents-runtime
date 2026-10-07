@@ -494,7 +494,7 @@ MCP_FILTER_DESCRIPTIONS: dict[str, str] = {
 }
 
 SKILLS_FILTER_DESCRIPTIONS: dict[str, str] = {
-    "exclude": "Skill names to exclude. Matched against `SKILL.md` `name` field.",
+    "exclude": "Skill directory slugs to exclude. Matched against the directory containing `SKILL.md`, without reading its contents.",
 }
 
 AGENT_TOOLS_FILTER_DESCRIPTIONS: dict[str, str] = {
