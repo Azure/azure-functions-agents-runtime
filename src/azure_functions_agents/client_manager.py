@@ -119,6 +119,8 @@ class MAFClientManager(ClientManager):
 
     def validate_provider_settings(self, model: str | None) -> None:
         """Validate built-in MAF provider settings without constructing a client."""
+        if self._has_custom_chat_client_builder():
+            return
         provider = self._provider()
         self._resolve_model(model, provider)
         if provider == ProviderKind.OPENAI and not self._env(EnvVar.OPENAI_API_KEY):

@@ -14,6 +14,7 @@ from azure_functions_agents._hosted_skill_app import (
     HostedSkillDFApp,
     HostedSkillFunctionApp,
 )
+from azure_functions_agents.client_manager import MAFClientManager
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     BuiltinEndpointsConfig,
@@ -75,6 +76,31 @@ def _app(
     catalog = build_catalog({"internal": entry or _entry(tmp_path)})
     harness = AppHarness(harness_kind, tmp_path)
     return HostedSkillFunctionApp(catalog=catalog, harness=harness), validated_models
+
+
+def test_decorator_preflight_skips_builtin_provider_for_custom_maf_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class CustomMAFClientManager(MAFClientManager):
+        def build_chat_client(self, model: str | None) -> Any:
+            return object()
+
+    manager = CustomMAFClientManager()
+
+    def unexpected_provider_resolution() -> str:
+        raise AssertionError("Custom builders must not resolve a built-in provider")
+
+    monkeypatch.setattr(manager, "_provider", unexpected_provider_resolution)
+    monkeypatch.setattr(hosted_app_module, "get_client_manager", lambda: manager)
+    app = HostedSkillFunctionApp(
+        catalog=build_catalog({"internal": _entry(tmp_path)}),
+        harness=AppHarness(HarnessKind.MAF, tmp_path),
+    )
+
+    decorator = app.hosted_skill(arg_name="skill", agent_name="internal")
+
+    assert callable(decorator)
 
 
 @pytest.mark.asyncio
