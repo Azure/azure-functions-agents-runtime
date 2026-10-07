@@ -56,6 +56,14 @@ class _SessionOptions(TypedDict):
     infinite_sessions: NotRequired[InfiniteSessionConfig]
 
 
+type _EventSink = Callable[[dict[str, Any]], None]
+
+
+def _emit_event(event_sink: _EventSink | None, event: dict[str, Any]) -> None:
+    if event_sink is not None:
+        event_sink(event)
+
+
 def _copilot_session_id(agent_slug: str, session_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"af-copilot:{agent_slug}:{session_id}"))
 
@@ -96,7 +104,7 @@ def _deny_permission(
 def _tool(
     function: FunctionTool,
     calls: list[ToolCallEvidence],
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
+    event_sink: _EventSink | None = None,
 ) -> Tool:
     from copilot.tools import Tool, ToolResult
 
@@ -108,8 +116,7 @@ def _tool(
             "arguments": invocation.arguments,
         }
         calls.append(record)
-        if event_sink is not None:
-            event_sink(dict(record))
+        _emit_event(event_sink, dict(record))
         try:
             contents = await function.invoke(
                 arguments=invocation.arguments,
@@ -121,19 +128,17 @@ def _tool(
             text = '{"error":"Custom tool failed or returned unsupported content."}'
             record["result"] = text
             record["success"] = False
-            if event_sink is not None:
-                event_sink({
-                    "type": "tool_end", "tool_call_id": invocation.tool_call_id,
-                    "tool_name": function.name, "result": text,
-                })
-            return ToolResult(text_result_for_llm=text, result_type="failure")
-        record["result"] = text
-        record["success"] = True
-        if event_sink is not None:
-            event_sink({
+            _emit_event(event_sink, {
                 "type": "tool_end", "tool_call_id": invocation.tool_call_id,
                 "tool_name": function.name, "result": text,
             })
+            return ToolResult(text_result_for_llm=text, result_type="failure")
+        record["result"] = text
+        record["success"] = True
+        _emit_event(event_sink, {
+            "type": "tool_end", "tool_call_id": invocation.tool_call_id,
+            "tool_name": function.name, "result": text,
+        })
         return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
@@ -410,12 +415,11 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
 
     def on_event(event: SessionEvent) -> None:
         nonlocal input_tokens, output_tokens
-        if request.event_sink is not None:
-            match event.data:
-                case AssistantMessageDeltaData(delta_content=delta, parent_tool_call_id=None) if delta:
-                    request.event_sink({"type": "delta", "content": delta})
-                case AssistantReasoningDeltaData(delta_content=delta) if delta:
-                    request.event_sink({"type": "intermediate", "content": delta})
+        match event.data:
+            case AssistantMessageDeltaData(delta_content=delta, parent_tool_call_id=None) if delta:
+                _emit_event(request.event_sink, {"type": "delta", "content": delta})
+            case AssistantReasoningDeltaData(delta_content=delta) if delta:
+                _emit_event(request.event_sink, {"type": "intermediate", "content": delta})
         match event.data:
             case AssistantMessageData(content=content, parent_tool_call_id=None) if content:
                 messages.append(content)
@@ -478,8 +482,9 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     if not request.new_session:
                         await _verify_completed_turn(session)
                     await _verify_tool_catalog(session, request.tools)
-                    if request.event_sink is not None:
-                        request.event_sink({"type": "session", "session_id": request.session_id})
+                    _emit_event(request.event_sink, {
+                        "type": "session", "session_id": request.session_id,
+                    })
                     logger.info(
                         "Copilot request target: provider=%s model=%s",
                         harness.provider.kind if harness.provider is not None else None,

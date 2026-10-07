@@ -231,11 +231,11 @@ def test_tool_result_text_flattens_typed_sdk_content():
     ]) == "first\nsecond"
 
 
-async def _invoke_native_tool(function, arguments):
+async def _invoke_native_tool(function, arguments, event_sink=None):
     from copilot.tools import ToolInvocation
 
     calls = []
-    native_tool = _copilot._tool(function, calls)
+    native_tool = _copilot._tool(function, calls, event_sink)
     assert native_tool.handler is not None
     result = await native_tool.handler(
         ToolInvocation(
@@ -328,6 +328,49 @@ async def test_tool_adapter_returns_recoverable_failure():
     assert "private tool detail" not in result.text_result_for_llm
     assert calls[0]["result"] == result.text_result_for_llm
     assert calls[0]["success"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raises", "expected_result", "expected_type"),
+    [
+        (False, "done", "success"),
+        (True, '{"error":"Custom tool failed or returned unsupported content."}', "failure"),
+    ],
+)
+async def test_tool_adapter_emits_sink_events_in_start_end_order(raises, expected_result, expected_type):
+    events = []
+
+    if raises:
+
+        @tool(name="broken")
+        def candidate() -> str:
+            raise RuntimeError("private tool detail")
+
+    else:
+
+        @tool(name="ok")
+        def candidate() -> str:
+            return "done"
+
+    result, calls = await _invoke_native_tool(candidate, {}, events.append)
+
+    assert result.result_type == expected_type
+    assert events == [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-1",
+            "tool_name": candidate.name,
+            "arguments": {},
+        },
+        {
+            "type": "tool_end",
+            "tool_call_id": "call-1",
+            "tool_name": candidate.name,
+            "result": expected_result,
+        },
+    ]
+    assert calls[0]["result"] == expected_result
 
 
 @pytest.mark.asyncio
