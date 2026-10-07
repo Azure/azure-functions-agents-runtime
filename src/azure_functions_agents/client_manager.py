@@ -171,7 +171,11 @@ class MAFClientManager(ClientManager):
 
     def _has_custom_chat_client_builder(self) -> bool:
         """Return whether a subclass overrides the existing public builder hook."""
-        return type(self).build_chat_client is not MAFClientManager.build_chat_client
+        return (
+            type(self).build_chat_client is not MAFClientManager.build_chat_client
+            or type(self).build_chat_client_with_target
+            is not MAFClientManager.build_chat_client_with_target
+        )
 
     def _build_maf_chat_client_with_target(
         self, model: str | None

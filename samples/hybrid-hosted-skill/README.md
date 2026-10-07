@@ -20,7 +20,7 @@ invokes it explicitly with `skill.run()`.
 2. Start Azurite with `azurite --skipApiVersionCheck`. This compatibility flag
    lets Azurite accept the API version used by the current Azure Storage SDK.
 3. Set `FOUNDRY_PROJECT_ENDPOINT` in `local.settings.json`.
-4. Optionally set `FOUNDRY_MODEL` to override the provider default.
+4. Optionally set `FOUNDRY_MODEL` to override the runtime's `gpt-4o-mini` fallback.
 5. Start the host with `func start`.
 6. Send a request:
 

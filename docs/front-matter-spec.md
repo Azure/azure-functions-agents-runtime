@@ -531,7 +531,7 @@ builtin_endpoints: false  # Equivalent to debug_chat_ui: false, chat_api: false,
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Specifies which LLM to use for the agent. Valid model identifiers depend on the active provider.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `AZURE_FUNCTIONS_AGENTS_MODEL` env var. If no model is resolved by configuration, the active client manager falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default.
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → `AZURE_FUNCTIONS_AGENTS_MODEL` env var. If no model is resolved by configuration, the active client manager falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the runtime's `gpt-4o-mini` fallback.
 
 **Global default:**
 ```yaml
@@ -1309,7 +1309,7 @@ builtin_endpoints:
 Help the user explore resources in subscription $SUBSCRIPTION_ID.
 ```
 
-This uses explicit built-in chat UI and chat APIs, inherited capabilities, and model resolution from environment/provider defaults.
+This uses explicit built-in chat UI and chat APIs, inherited capabilities, and model resolution from environment settings or the runtime fallback.
 
 ### Example 6: Coordinator with Delegated Specialists
 

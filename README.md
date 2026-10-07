@@ -71,13 +71,13 @@ The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Az
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
-| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`; optional `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. If no model is configured, the provider default is used. |
+| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`; optional `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. If no model is configured, the runtime uses `gpt-4o-mini`. |
 | Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION` | Alternative Azure-hosted provider. `AZURE_OPENAI_DEPLOYMENT` takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD). |
 | OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` (default `gpt-4o-mini`) | Alternative non-Azure provider. `AZURE_FUNCTIONS_AGENTS_MODEL` applies directly for OpenAI. |
 
 If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
 
-Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
+Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > runtime fallback (`gpt-4o-mini`).
 
 ## Quick Start
 

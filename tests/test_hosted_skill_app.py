@@ -14,7 +14,7 @@ from azure_functions_agents._hosted_skill_app import (
     HostedSkillDFApp,
     HostedSkillFunctionApp,
 )
-from azure_functions_agents.client_manager import MAFClientManager
+from azure_functions_agents.client_manager import InferenceTarget, MAFClientManager
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     BuiltinEndpointsConfig,
@@ -90,6 +90,33 @@ def test_decorator_preflight_skips_builtin_provider_for_custom_maf_builder(
 
     def unexpected_provider_resolution() -> str:
         raise AssertionError("Custom builders must not resolve a built-in provider")
+
+    monkeypatch.setattr(manager, "_provider", unexpected_provider_resolution)
+    monkeypatch.setattr(hosted_app_module, "get_client_manager", lambda: manager)
+    app = HostedSkillFunctionApp(
+        catalog=build_catalog({"internal": _entry(tmp_path)}),
+        harness=AppHarness(HarnessKind.MAF, tmp_path),
+    )
+
+    decorator = app.hosted_skill(arg_name="skill", agent_name="internal")
+
+    assert callable(decorator)
+
+
+def test_decorator_preflight_skips_builtin_provider_for_target_aware_maf_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class TargetAwareMAFClientManager(MAFClientManager):
+        def build_chat_client_with_target(
+            self, model: str | None
+        ) -> tuple[Any, InferenceTarget]:
+            return object(), InferenceTarget(provider="custom", model=model)
+
+    manager = TargetAwareMAFClientManager()
+
+    def unexpected_provider_resolution() -> str:
+        raise AssertionError("Target-aware builders must not resolve a built-in provider")
 
     monkeypatch.setattr(manager, "_provider", unexpected_provider_resolution)
     monkeypatch.setattr(hosted_app_module, "get_client_manager", lambda: manager)
