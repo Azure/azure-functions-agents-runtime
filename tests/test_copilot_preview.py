@@ -333,6 +333,16 @@ def test_direct_preview_accepts_explicit_host_system_tools(preview):
     _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
+def test_workflow_management_delegate_namespace_is_not_a_collision(preview):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(update={
+        "subagents": [SubagentRef(agent="billing")],
+        "workflows": WorkflowConfig(enabled=True),
+    })
+
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+
 @pytest.mark.parametrize(
     ("configuration", "expected_names"),
     [

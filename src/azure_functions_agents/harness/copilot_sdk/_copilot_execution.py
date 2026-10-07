@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager, nullcontext
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 from ..._logger import logger
@@ -72,8 +73,8 @@ class _SessionOptions(TypedDict):
 type _EventSink = Callable[[dict[str, Any]], None]
 
 
-def _emit_event(event_sink: _EventSink | None, event: dict[str, Any]) -> None:
-    if event_sink is not None:
+def _emit_event(event_sink: _EventSink | None, event: dict[str, Any] | None) -> None:
+    if event_sink is not None and event is not None:
         event_sink(event)
 
 
@@ -106,15 +107,71 @@ class _RequestTokenSource:
         return error
 
 
-def _public_tool_call(
-    calls: CopilotToolCalls, tool_call_id: str | None
+def _tool_call_evidence(
+    calls: CopilotToolCalls, tool_call_id: str
 ) -> ToolCallEvidence | None:
-    if tool_call_id is None:
-        return None
+    """Return the public evidence record tracked for one SDK tool call id."""
     for record in calls.calls:
         if record["tool_call_id"] == tool_call_id:
             return record
     return None
+
+
+@dataclass(frozen=True)
+class _ExecutionLifecycle:
+    copilot_id: str
+    session_storage: StorageRoute | None
+    session_storage_id: str
+    leaf: bool
+
+    @classmethod
+    def create(
+        cls, harness: AppHarness, owner: CopilotRuntime, request: HarnessRequest
+    ) -> _ExecutionLifecycle:
+        leaf = request.execution_role != "primary"
+        if leaf and not request.new_session:
+            raise CopilotPreviewError("Copilot specialist sessions cannot be resumed.")
+        copilot_id = (
+            str(uuid.uuid4())
+            if leaf
+            else _copilot_session_id(request.agent_slug, request.session_id)
+        )
+        return cls(
+            copilot_id=copilot_id,
+            session_storage=StorageRoute(owner.native_root / "ephemeral")
+            if leaf
+            else harness.session_storage,
+            session_storage_id=copilot_id if leaf else request.session_id,
+            leaf=leaf,
+        )
+
+    def session_lock(self, request: HarnessRequest) -> AbstractAsyncContextManager[None]:
+        if self.leaf:
+            return nullcontext()
+        return _harness_execution._session_lock_bounded_by(
+            request.session_id, request.deadline, agent_slug=request.agent_slug
+        )
+
+    def leaf_cleanup(
+        self, owner: CopilotRuntime, route: StorageRoute, agent_slug: str
+    ) -> AbstractAsyncContextManager[None]:
+        if not self.leaf:
+            return nullcontext()
+        return _bounded_cleanup(
+            lambda: _delete_leaf(owner, self.copilot_id, route, agent_slug),
+            "Copilot could not delete ephemeral specialist state.",
+        )
+
+    def apply_session_options(self, options: _SessionOptions) -> None:
+        if self.leaf:
+            from copilot.session import InfiniteSessionConfig
+
+            options["infinite_sessions"] = InfiniteSessionConfig(enabled=False)
+
+    def timeout_error(self) -> TimeoutError | CopilotPreviewError:
+        if self.leaf:
+            return TimeoutError("Copilot specialist timed out.")
+        return CopilotPreviewError("Copilot request exceeded its deadline.")
 
 
 def _tool(
@@ -126,9 +183,8 @@ def _tool(
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
         calls.start_custom(invocation)
-        started = _public_tool_call(calls, invocation.tool_call_id)
-        if started is not None:
-            _emit_event(event_sink, dict(started))
+        started = _tool_call_evidence(calls, invocation.tool_call_id)
+        _emit_event(event_sink, dict(started) if started is not None else None)
         try:
             result = await function.invoke(
                 arguments=invocation.arguments,
@@ -329,6 +385,27 @@ def _final_reply_content(response: SessionEvent | None) -> str:
             )
 
 
+async def _finalize_turn_response(
+    session: CopilotSession,
+    response: SessionEvent | None,
+    *,
+    interrupted: bool,
+    token_source: _RequestTokenSource,
+) -> str:
+    try:
+        token_error = token_source.take_error()
+        if token_error is not None:
+            raise token_error
+        if interrupted:
+            raise CopilotPreviewError(
+                "Copilot interrupted the turn before producing a usable final reply."
+            )
+        return _final_reply_content(response)
+    except BaseException:
+        await _abort(session)
+        raise
+
+
 async def _run_session_turn(
     session: CopilotSession,
     *,
@@ -355,18 +432,12 @@ async def _run_session_turn(
     with _event_subscription(session, observe):
         try:
             response = await _send_turn(session, prompt=prompt, deadline=deadline)
-            try:
-                token_error = token_source.take_error()
-                if token_error is not None:
-                    raise token_error
-                if interrupted:
-                    raise CopilotPreviewError(
-                        "Copilot interrupted the turn before producing a usable final reply."
-                    )
-                return _final_reply_content(response)
-            except BaseException:
-                await _abort(session)
-                raise
+            return await _finalize_turn_response(
+                session,
+                response,
+                interrupted=interrupted,
+                token_source=token_source,
+            )
         finally:
             input_tokens, output_tokens = get_usage()
             recorder.emit_counts(input_tokens=input_tokens, output_tokens=output_tokens)
@@ -379,7 +450,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
             "Remove the cap or use the MAF harness."
         )
-    from copilot.session import InfiniteSessionConfig, SystemMessageReplaceConfig, ToolSearchConfig
+    from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
     from copilot.session_events import (
         AssistantMessageData,
         AssistantMessageDeltaData,
@@ -392,10 +463,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from ...runner import AgentResult
 
     owner = get_runtime(harness)
-    leaf = request.execution_role != "primary"
-    if leaf and not request.new_session:
-        raise CopilotPreviewError("Copilot specialist sessions cannot be resumed.")
-    copilot_id = str(uuid.uuid4()) if leaf else _copilot_session_id(request.agent_slug, request.session_id)
+    lifecycle = _ExecutionLifecycle.create(harness, owner, request)
     custom_tool_names = {function.name for function in request.tools}
     calls = CopilotToolCalls()
     messages: list[str] = []
@@ -428,12 +496,11 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             case ToolExecutionStartData() as started:
                 calls.start_native(started)
                 if started.tool_name not in custom_tool_names:
-                    record = _public_tool_call(calls, started.tool_call_id)
-                    if record is not None:
-                        _emit_event(request.event_sink, dict(record))
+                    record = _tool_call_evidence(calls, started.tool_call_id)
+                    _emit_event(request.event_sink, dict(record) if record is not None else None)
             case ToolExecutionCompleteData() as completed:
                 calls.complete_native(completed)
-                record = _public_tool_call(calls, completed.tool_call_id)
+                record = _tool_call_evidence(calls, completed.tool_call_id)
                 if record is not None and record.get("tool_name") not in custom_tool_names:
                     _emit_event(
                         request.event_sink,
@@ -448,11 +515,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     token_source = _RequestTokenSource(owner)
     try:
         provider = _provider(harness, token_source, request.model)
-        session_lock = nullcontext() if leaf else _harness_execution._session_lock_bounded_by(
-            request.session_id, request.deadline, agent_slug=request.agent_slug
-        )
-        async with session_lock, asyncio.timeout_at(request.deadline):
-            route = StorageRoute(owner.native_root / "ephemeral") if leaf else harness.session_storage
+        async with lifecycle.session_lock(request), asyncio.timeout_at(request.deadline):
+            route = lifecycle.session_storage
             if route is None:
                 raise CopilotPreviewError("Native session storage is not configured.")
             skill_policy = SkillPolicy.create(
@@ -463,7 +527,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             storage = await open_session_fs(
                 route,
                 request.agent_slug,
-                copilot_id if leaf else request.session_id,
+                lifecycle.session_storage_id,
                 workspace_path=str(owner.workspace),
                 deadline=request.deadline,
                 skill_policy=skill_policy,
@@ -472,14 +536,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 lambda: _close_storage(storage),
                 "Copilot session storage could not be closed.",
             )
-            leaf_cleanup = (
-                _bounded_cleanup(
-                    lambda: _delete_leaf(owner, copilot_id, route, request.agent_slug),
-                    "Copilot could not delete ephemeral specialist state.",
-                )
-                if leaf
-                else nullcontext()
-            )
+            leaf_cleanup = lifecycle.leaf_cleanup(owner, route, request.agent_slug)
             async with storage_cleanup, leaf_cleanup:
                 mcp_servers = await mcp_configuration(
                     request.mcp_servers, protect_headers=calls.protect_headers
@@ -507,11 +564,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     disabled_skills=list(skill_policy.disabled_names),
                     create_session_fs_handler=lambda _session: storage,
                 )
-                if leaf:
-                    options["infinite_sessions"] = InfiniteSessionConfig(enabled=False)
+                lifecycle.apply_session_options(options)
                 session = await _open_session(
                     client,
-                    copilot_id,
+                    lifecycle.copilot_id,
                     new_session=request.new_session,
                     options=options,
                     on_permission_request=on_permission_request,
@@ -549,9 +605,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         token_error = token_source.take_error()
         if token_error is not None:
             raise token_error from None
-        if leaf:
-            raise TimeoutError("Copilot specialist timed out.") from None
-        raise CopilotPreviewError("Copilot request exceeded its deadline.") from None
+        raise lifecycle.timeout_error() from None
     except (CopilotPreviewError, CopilotSessionError):
         raise
     except Exception:

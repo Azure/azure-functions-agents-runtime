@@ -23,6 +23,10 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   intentionally dynamic extension points (e.g. `ClientManager.build_chat_client`,
   which returns `Any` because the underlying SDK is pluggable) — narrow
   runtime inspection is expected there.
+- Validate external or SDK-owned inputs once at the trust boundary, then pass
+  a normalized internal shape downstream so ordinary code can use non-optional
+  fields directly. Keep `None` / optional handling where the upstream contract
+  genuinely permits absence.
 - For fixed-shape data, reuse an SDK-provided schema when available; otherwise
   define a `TypedDict` or dataclass for trusted internal payloads and use
   Pydantic for untrusted documents. Avoid ad hoc string-keyed dictionaries and
@@ -38,6 +42,9 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 - Prefer guard clauses, early returns, and helpers over deeply nested control
   flow, but keep justified nesting when it preserves cleanup, cancellation, or
   error-precedence invariants such as `try`/`finally`.
+- Before adding another nested `try` / `except`, prefer a small helper that
+  isolates the inner failure policy. Keep the nesting only when it is the
+  clearest way to preserve cleanup, cancellation, or exception precedence.
 - When callers share validation, normalization, or identity rules, extend one
   existing helper and use it at every relevant surface. Do not duplicate its
   logic or force distinct contracts through a helper that does not fit them.
@@ -52,6 +59,9 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   and blank values have different behavior.
 - Avoid duplicated logic: when two code paths share the same validation or parsing
   shape, extract a shared helper and keep only caller-specific policy separate.
+- Reuse an existing import in the same module rather than re-importing the same
+  symbol later. Keep a local import when it avoids a cycle or intentionally
+  defers an optional or heavyweight dependency.
 - When behavior varies by a provider/backend/kind enum, prefer an interface with
   one implementation per kind plus a registry over repeated `if`/`elif` chains
   across modules.

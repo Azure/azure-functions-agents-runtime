@@ -239,13 +239,17 @@ Dynamic Workflow management, configured MCP servers, and approved project
 skills use the existing host contracts. Leaves use disposable local SessionFs
 trees even when primary sessions select Blob, and never acquire a persistent
 session lock. SSE emits its session after native/catalog acceptance and `done`
-only after a successful, non-interrupted SDK result plus disconnect; resume
-uses SDK-owned continuation without host-side history scans and rejects live
-abort/interruption signals observed before returning a final reply. The SDK
-still owns opaque file formats, compaction, and recovery. Unsupported
-capabilities fail explicitly without fallback. Configured output caps are
-rejected because this path does not yet expose a verified provider generation
-cap mapping.
+only after a successful, non-interrupted SDK result plus disconnect. If the
+SDK reports an interruption or abort during the turn, the host aborts that turn
+and returns an error instead of synthesizing success or `done`; the final
+disconnect/adapter cleanup still runs. An HTTP client disconnect likewise
+cancels only the in-flight turn, aborts it, and leaves the shared native client
+usable for later requests. Resume uses SDK-owned continuation without host-side
+history scans and rejects live abort/interruption signals observed before
+returning a final reply. The SDK still owns opaque file formats, compaction,
+and recovery. Unsupported capabilities fail explicitly without fallback.
+Configured output caps are rejected because this path does not yet expose a
+verified provider generation cap mapping.
 
 **Ownership**
 

@@ -204,14 +204,14 @@ def _build_delegate_tool(
     *,
     coordinator_deadline: float,
     tracker: _DelegateErrorTracker,
-    _harness: AppHarness | None = None,
+    harness: AppHarness | None = None,
 ) -> ToolDescriptor:
     """Build one host-authorized specialist tool with its coordinator's deadline."""
     resolved = entry.resolved
     capabilities = (
         entry.capabilities
-        if _harness is None
-        else replace(entry.capabilities, _harness=_harness)
+        if harness is None
+        else replace(entry.capabilities, _harness=harness)
     )
     slug = ref.agent
 
@@ -262,7 +262,6 @@ async def build_subagent_tools(
     catalog: AgentCatalog | None,
     *,
     coordinator_deadline: float,
-    _harness: AppHarness | None = None,
     harness: AppHarness | None = None,
 ) -> tuple[list[ToolDescriptor], _DelegateErrorTracker]:
     """Build neutral delegate tools; each invocation creates an independent leaf."""
@@ -270,7 +269,6 @@ async def build_subagent_tools(
     if not subagents:
         return [], tracker
     assert catalog is not None, "subagents declared but no AgentCatalog was provided"
-    bound_harness = harness or _harness
     delegates: list[ToolDescriptor] = []
     for ref in subagents:
         entry = catalog.get(ref.agent)
@@ -278,7 +276,7 @@ async def build_subagent_tools(
         delegates.append(
             _build_delegate_tool(
                 ref, entry, coordinator_deadline=coordinator_deadline, tracker=tracker,
-                _harness=bound_harness,
+                harness=harness,
             )
         )
     return delegates, tracker

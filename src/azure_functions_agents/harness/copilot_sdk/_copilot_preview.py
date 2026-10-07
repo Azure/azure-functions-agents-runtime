@@ -16,6 +16,7 @@ from ...client_manager import (
 )
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import HTTP_TRIGGER_TYPE, AgentConfiguration, ResolvedAgent
+from ...workflows.tools import build_workflow_tools
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 
 if TYPE_CHECKING:
@@ -153,16 +154,10 @@ def validate_copilot_agent(
         ]
     )
     if resolved.workflows is not None and resolved.workflows.enabled:
-        from ...workflows.tools import build_workflow_tools
-
         management_names = {function.name for function in build_workflow_tools()}
         if management_names.intersection(function.name for function in prepared):
             raise UnsupportedCapabilityError(
                 "Copilot preview workflow management tool names must not collide with authored tools."
-            )
-        if management_names.intersection(f"delegate_{ref.agent}" for ref in resolved.subagents):
-            raise UnsupportedCapabilityError(
-                "Copilot preview workflow management tool names must not collide with delegates."
             )
     if (
         resolved.sandbox_config is not None
