@@ -66,7 +66,7 @@ class _SessionOptions(TypedDict):
 
 
 def _copilot_session_id(agent_slug: str, session_id: str) -> str:
-    return f"{agent_slug}.{session_id}"
+    return f"{agent_slug}-{session_id}"
 
 
 class _RequestTokenSource:

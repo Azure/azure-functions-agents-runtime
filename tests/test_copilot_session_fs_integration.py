@@ -23,6 +23,9 @@ from azure_functions_agents.harness._session_storage import (
     open_blob_service,
 )
 from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_execution as _copilot,
+)
+from azure_functions_agents.harness.copilot_sdk import (
     _copilot_session_blob as blob_backend,
 )
 from azure_functions_agents.harness.copilot_sdk import (
@@ -150,7 +153,7 @@ async def test_real_sdk_create_resume_factory_registers_callbacks_before_rpc(fil
     )
     methods, factory_sessions = [], []
     content = "\x00opaque\r\nSDK callback"
-    native_id = "main.sdk-session"
+    native_id = _copilot._copilot_session_id("main", SDK_SESSION)
 
     def factory(session):
         factory_sessions.append(session.session_id)

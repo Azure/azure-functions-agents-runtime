@@ -297,7 +297,8 @@ async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_tur
 
 
 def test_native_sdk_identity_is_readable_and_agent_scoped():
-    assert _copilot._copilot_session_id("main", "example") == "main.example"
+    assert _copilot._copilot_session_id("main", "example") == "main-example"
+    assert _copilot._copilot_session_id("main", "one.two-three") == "main-one.two-three"
     assert _copilot._copilot_session_id("billing", "shared") != _copilot._copilot_session_id("support", "shared")
 
 
@@ -573,7 +574,12 @@ async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_h
     host_tool = ToolDescriptor.create(name="host_tool", description="Host tool", func=lambda: "ok")
     skills = _skill_inventory(preview.app_root)
     request = replace(
-        _request(), tools=(host_tool,), mcp_servers=servers, skills=skills[:1], skill_catalog=skills
+        _request(),
+        session_id="one.two-three",
+        tools=(host_tool,),
+        mcp_servers=servers,
+        skills=skills[:1],
+        skill_catalog=skills,
     )
     client = _fake_client()
     client.resume_session.return_value = _fake_client().resume_session.return_value
@@ -582,10 +588,12 @@ async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_h
     try:
         first = await _copilot.run(preview, request)
         second = await _copilot.run(preview, replace(request, new_session=False))
-        assert first.session_id == second.session_id == "example"
+        assert first.session_id == second.session_id == "one.two-three"
         created = client.create_session.call_args.kwargs
         resumed = client.resume_session.call_args.kwargs
-        assert created["session_id"] == client.resume_session.call_args.args[0] == "main.example"
+        assert created["session_id"] == client.resume_session.call_args.args[0] == (
+            _copilot._copilot_session_id("main", "one.two-three")
+        )
         for options in (created, resumed):
             assert set(options["mcp_servers"]) == {"all", "none", "selected"}
             assert options["mcp_servers"]["all"]["tools"] == ["*"]
@@ -833,7 +841,10 @@ async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_me
         ))
         [native_tool] = options["tools"]
         await native_tool.handler(ToolInvocation(
-            session_id="main.example", tool_call_id="custom", tool_name="host_tool", arguments={},
+            session_id=_copilot._copilot_session_id("main", "one.two-three"),
+            tool_call_id="custom",
+            tool_name="host_tool",
+            arguments={},
         ))
         emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
             tool_call_id="custom", success=True,
@@ -1653,7 +1664,7 @@ async def test_same_session_wait_is_bounded_while_other_sessions_remain_concurre
         assert (await _copilot.run(preview, _request(new_session=False))).content == "synthetic reply"
         assert client.resume_session.await_count == 4
         assert {call.args[0] for call in client.resume_session.await_args_list} == {
-            "main.example", "main.other", "billing.example",
+            "main-example", "main-other", "billing-example",
         }
     finally:
         release.set()
