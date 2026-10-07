@@ -365,11 +365,15 @@ body cancellation or deadline failures; deletion failure after success is an err
 
 SSE advertises the public session only after native creation/resume and catalog
 verification, emits host `tool_start`/`tool_end` in invocation order, filters child
-assistant deltas, and emits `done` only after completed-turn verification and
-disconnect. Closing the stream cancels and aborts the active turn without stopping
-the app's shared client. Resume disables pending-work continuation and requires
-a verifiable completed native turn; this is an event-level acceptance barrier,
-not file parsing, rollback, recovery, or exactly-once execution.
+assistant deltas, and emits `done` only after a successful, non-interrupted SDK
+result and session disconnect. Closing the stream cancels and aborts the active
+turn, then re-raises cancellation without stopping the app's shared client.
+Resume still disables pending-work continuation via `continue_pending_work=False`,
+but the host no longer scans native history. Instead, it trusts the SDK
+`send_and_wait(...)` wait/error contract and rejects final results when the
+request-local live stream reports `AbortData`, `AgentInterruptedData`, or
+`idle(aborted=True)`. This remains an event-level acceptance barrier, not file
+parsing, rollback, recovery, or exactly-once execution.
 
 Automated ACA evidence for the Copilot path stops at the adapter boundary: unit
 tests prove catalog order and that the per-request `execute_python` closure is
