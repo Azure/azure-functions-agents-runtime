@@ -2,7 +2,8 @@
 
 This **default-off** Functions sample exercises non-streaming Copilot chat and
 the authored `/preview` HTTP route with `make_receipt` and `web_request`
-(limited to `example.com`). The SDK owns sessions and their opaque files;
+(limited to `example.com`). It also includes the public Microsoft Learn MCP
+server and a `preview-check` skill with a reference file. The SDK owns sessions and their opaque files;
 the host supplies filesystem callbacks backed by local files or Blob.
 Run locally with one worker only. ACA `execute_python` is disabled in the
 checked-in configuration.
@@ -17,6 +18,8 @@ Azure OpenAI or the project role approved by your Foundry administrator).
 `github-copilot-sdk==1.0.17`. The SDK downloads its native runtime on first
 use if uncached. On Windows, same-drive `session-state` callbacks use the
 configured session storage, not a physical directory at the drive root.
+The sample needs outbound HTTPS access to `learn.microsoft.com`. This public
+MCP server needs no API key. The skill check reads a local file and runs no script.
 
 For the local-file walkthrough, use a terminal without `AzureWebJobsStorage`
 or `AzureWebJobsStorage__blobServiceUri` configured and leave those settings
@@ -114,6 +117,9 @@ Push-Location samples\copilot-preview\src
 func start --port 7071
 ```
 
+If port 7071 is in use, choose a free port and use it in every test URL.
+Do not stop another host to free the port.
+
 Startup logs `harness=copilot`. Invalid provider settings fail startup, and
 request-time credential failures return a sanitized `error` response; neither
 prints credentials.
@@ -156,10 +162,57 @@ $web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
 $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
-Optional outbound MCP servers and project skills use the existing authoring
-and per-agent filters; see the [MCP and scoped skills guide](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills)
-before enabling them. This walkthrough requires neither and keeps the receipt
-and `web_request` behavior unchanged.
+### Check the skill and MCP
+
+The checked-in agent enables both capabilities. No extra fixture or frontmatter
+edit is needed. Each check creates a separate conversation. Model calls incur
+charges; the MCP check also calls the public Microsoft Learn service.
+
+In the second terminal at the repository root, use the same Python environment:
+
+```powershell
+python samples\copilot-preview\verify.py --base-url http://127.0.0.1:7071 --phase capabilities
+```
+
+The verifier requires successful tool evidence, not only a model response:
+
+- **Skill:** native `skill` and `view` both succeed. `view` reads this checkout's
+  `skills/preview-check/references/check.txt` and returns `REFERENCE_READ_7C42A9`.
+  The response contains that marker and `SKILL_LOADED_PREVIEW_CHECK`.
+- **MCP:** `microsoft_docs_search` succeeds and returns a Microsoft Learn link.
+  The response includes a link from the search result.
+
+Use `--phase skill` or `--phase mcp` to run one check. The existing `--phase all`
+still runs the receipt, follow-up, and negative checks.
+
+For direct HTTP inspection:
+
+```powershell
+$body = @{
+  prompt = "Run the preview-check skill test. Load the skill, then use view to read its references/check.txt. Return the skill marker and the exact file marker. Do not guess or use other tools."
+} | ConvertTo-Json
+$skill = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
+  -ContentType application/json -Body $body -TimeoutSec 180
+$skill | ConvertTo-Json -Depth 12
+
+$body = @{
+  prompt = "For an MCP check, use microsoft_docs_search on microsoft-learn to search for the Azure Functions Python programming model. Include a Microsoft Learn link from the result. Do not use other tools."
+} | ConvertTo-Json
+$mcp = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
+  -ContentType application/json -Body $body -TimeoutSec 180
+$mcp | ConvertTo-Json -Depth 12
+```
+
+The reference marker appears only in the file, not in the test prompt or skill
+instructions. Do not accept a guessed marker or missing/failed tool evidence.
+Keep MCP queries limited to public documentation. Do not send local files,
+conversation content, or credentials to the public server.
+
+The receipt and `web_request` behavior remains unchanged. To run without the
+public MCP service, set the top-level `mcp: false` in `src/main.agent.md` and
+restart the host. Set `skills: false` to disable the skill check. Do not change
+the nested `builtin_endpoints.mcp` field: that field controls an inbound endpoint,
+not the outbound server. See the [MCP and scoped skills guide](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills).
 
 This local preview does not support streaming, delegation,
 workflows or deployed hosting. Custom `ClientManager`

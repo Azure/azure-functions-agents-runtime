@@ -74,7 +74,10 @@ shared configuration does not initialize or probe the other implementation.
 These are outbound capabilities of the existing direct, non-streaming HTTP
 preview, not new triggers or endpoint support. Keep the local, single-worker
 hosting limit and the same `SessionFs`, lock, and create/resume/disconnect
-lifecycle. The checked-in sample does not require MCP credentials or skills.
+lifecycle. The checked-in sample enables a public Microsoft Learn MCP server
+without MCP credentials and a local reference-reading skill. Its
+`verify.py --phase capabilities` check requires successful MCP and native
+skill/view evidence. See the sample README for setup and opt-out steps.
 
 ### MCP configuration and auth
 

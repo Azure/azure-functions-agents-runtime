@@ -13,7 +13,142 @@ from typing import Any
 import pytest
 
 from azure_functions_agents.config import paths
+from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
+from azure_functions_agents.discovery.mcp import discover_mcp_servers
+from azure_functions_agents.discovery.skills import discover_skills
+from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.harness import _harness_binding as _harness
+from azure_functions_agents.registration.capabilities import build_capabilities
+
+SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
+
+
+def test_sample_exposes_learn_mcp_and_scoped_reference_skill():
+    [spec] = load_agent_specs(SAMPLE, strict=True)
+    servers = discover_mcp_servers(SAMPLE)
+    skills = discover_skills(SAMPLE)
+    resolved = compose(
+        spec, load_global_config(SAMPLE),
+        discovered_mcp_names=list(servers.servers), discovered_skill_names=list(skills.skills),
+    )
+    capabilities = build_capabilities(
+        resolved,
+        discovered_user_tools=discover_user_tools(SAMPLE).tools,
+        discovered_mcp_tools=servers.servers,
+        discovered_skills=skills.skills,
+        discovered_skill_descriptors=skills.descriptors,
+    )
+    assert servers.failed_loads == skills.failed_loads == []
+    assert capabilities.filtered_mcp_tools is not None
+    [server] = capabilities.filtered_mcp_tools
+    assert server.name == "microsoft-learn"
+    assert server.url == "https://learn.microsoft.com/api/mcp"
+    assert server.tools == ("microsoft_docs_search", "microsoft_docs_fetch")
+    assert server.headers == ()
+    assert server.auth_scope is None
+    [skill] = capabilities.skills
+    assert skill.name == "preview-check"
+    assert skill.path == (SAMPLE / "skills" / "preview-check").resolve()
+    assert (skill.path / "references" / "check.txt").read_text(
+        encoding="utf-8",
+    ).strip() == "REFERENCE_READ_7C42A9"
+    assert "REFERENCE_READ_7C42A9" not in (skill.path / "SKILL.md").read_text(encoding="utf-8")
+    assert {tool.name for tool in capabilities.filtered_user_tools} == {"make_receipt"}
+    assert {tool.name for tool in capabilities.web_request_tools} == {"web_request"}
+
+
+@pytest.mark.parametrize("fault", [None, "no-tools", "failed-view", "wrong-path", "missing-result"])
+def test_skill_verifier_requires_successful_reference_read(fault):
+    module = _load_verifier()
+    reference = SAMPLE / "skills" / "preview-check" / "references" / "check.txt"
+    view = {
+        "tool_name": "view", "success": True,
+        "arguments": json.dumps({"path": str(reference)}), "result": "REFERENCE_READ_7C42A9",
+    }
+    result = {
+        "response": "SKILL_LOADED_PREVIEW_CHECK REFERENCE_READ_7C42A9",
+        "tool_calls": [{"tool_name": "skill", "success": True}, view],
+    }
+    if fault == "no-tools":
+        result["tool_calls"] = []
+    elif fault == "failed-view":
+        view["success"] = False
+    elif fault == "wrong-path":
+        view["arguments"] = {"path": str(reference.parent / "wrong.txt")}
+    elif fault == "missing-result":
+        view["result"] = "No marker"
+
+    class Client:
+        def post(self, path, *, json):
+            assert path == "/agents/main/chat"
+            assert "REFERENCE_READ_7C42A9" not in json["prompt"]
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: result)
+
+    if fault is None:
+        module.skill(Client())
+    else:
+        with pytest.raises(AssertionError):
+            module.skill(Client())
+
+
+@pytest.mark.parametrize(
+    "fault", [None, "no-tools", "failed-search", "wrong-tool", "missing-result", "wrong-link"],
+)
+def test_mcp_verifier_requires_successful_learn_tool_evidence(fault):
+    module = _load_verifier()
+    link = "https://learn.microsoft.com/azure/azure-functions/functions-reference-python"
+    call = {
+        "tool_name": "microsoft-learn-microsoft_docs_search", "success": True, "result": link,
+    }
+    result = {"response": link, "tool_calls": [call]}
+    if fault == "no-tools":
+        result["tool_calls"] = []
+    elif fault == "failed-search":
+        call["success"] = False
+    elif fault == "wrong-tool":
+        call["tool_name"] = "web_request"
+    elif fault == "missing-result":
+        call["result"] = "No link"
+    elif fault == "wrong-link":
+        result["response"] = link + "-unrelated"
+
+    class Client:
+        def post(self, path, *, json):
+            assert path == "/agents/main/chat"
+            assert "microsoft_docs_search" in json["prompt"]
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: result)
+
+    if fault is None:
+        module.mcp(Client())
+    else:
+        with pytest.raises(AssertionError):
+            module.mcp(Client())
+
+
+def test_capabilities_verifier_runs_both_checks(monkeypatch):
+    module = _load_verifier()
+    phases = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["base_url"] == "http://127.0.0.1:7073"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["verify.py", "--base-url", "http://127.0.0.1:7073", "--phase", "capabilities"],
+    )
+    monkeypatch.setattr(module.httpx, "Client", Client)
+    monkeypatch.setattr(module, "skill", lambda _client: phases.append("skill"))
+    monkeypatch.setattr(module, "mcp", lambda _client: phases.append("mcp"))
+    module.main()
+    assert phases == ["skill", "mcp"]
 
 
 def _load_verifier():

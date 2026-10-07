@@ -75,14 +75,8 @@ async def test_native_skill_then_view_reads_approved_physical_reference(monkeypa
     workspace = tmp_path / "native-workspace"
     workspace.mkdir()
     skill_root = tmp_path / "skills" / "preview-check"
-    skill_root.mkdir(parents=True)
-    reference = skill_root / "reference.txt"
-    reference.write_text("NATIVE_REFERENCE_7C42A9", encoding="utf-8")
-    (skill_root / "SKILL.md").write_text(
-        "---\nname: preview-check\ndescription: Offline resource check\n---\n"
-        f"Read the reference at {reference}.\n",
-        encoding="utf-8",
-    )
+    shutil.copytree(SAMPLE / "skills" / "preview-check", skill_root)
+    reference = skill_root / "references" / "check.txt"
     unapproved = tmp_path / "unapproved.txt"
     unapproved.write_text("must not be exposed", encoding="utf-8")
     skill = SkillDescriptor.create(name="preview-check", path=skill_root)
@@ -130,7 +124,7 @@ async def test_native_skill_then_view_reads_approved_physical_reference(monkeypa
             timeout=30,
         ))
         assert viewed.result_type == ToolResultType.SUCCESS, viewed
-        assert "NATIVE_REFERENCE_7C42A9" in viewed.text_result_for_llm
+        assert "REFERENCE_READ_7C42A9" in viewed.text_result_for_llm
         denied = ToolResultExpanded.from_dict(await session.rpc.tools.execute(
             ToolsExecuteRequest(name="view", arguments={"path": str(unapproved)}),
             timeout=30,
@@ -419,6 +413,14 @@ def native(monkeypatch, tmp_path, request):
 
     app_root = tmp_path / "app"
     shutil.copytree(SAMPLE, app_root)
+    # Provider lifecycle tests must not connect to the sample's public MCP server.
+    agent = app_root / "main.agent.md"
+    agent.write_text(
+        agent.read_text(encoding="utf-8").replace("mcp: true\n", "mcp: false\n").replace(
+            "skills: true\n", "skills: false\n",
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(copilot, "CopilotClient", create_client)
     monkeypatch.setattr(_harness, "_HARNESSES", {})
     monkeypatch.setattr(paths, "_app_root", app_root)

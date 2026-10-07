@@ -318,6 +318,11 @@ scoped to approved ownership: configured MCP requests and approved
 skill-resource/script actions may be allowed, while general file and shell
 access stay denied.
 
+The local Copilot sample enables a public Microsoft Learn MCP server and a
+reference-reading skill through those existing inputs. Its verifier checks
+native skill/view and MCP tool results through the public chat route.
+These sample checks add no discovery, registration, or execution behavior.
+
 Copilot persistence is a thin SessionFs boundary. The SDK owns session
 contents, continuation, compaction, recovery, and format compatibility; the
 host owns filesystem operations, containment, metadata, and SDK-shaped errors.
