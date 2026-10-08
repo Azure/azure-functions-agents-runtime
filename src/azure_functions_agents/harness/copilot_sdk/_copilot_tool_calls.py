@@ -42,6 +42,8 @@ class _ToolCall:
     started: bool = False
     completed: bool = False
     success: bool | None = None
+    start_emitted: bool = False
+    end_emitted: bool = False
 
     def public_record(self) -> ToolCallEvidence:
         record: ToolCallEvidence = {
@@ -108,6 +110,39 @@ class CopilotToolCalls:
             record = _ToolCall(tool_call_id)
             self._records[tool_call_id] = record
         return record
+
+    def is_custom(self, tool_call_id: str) -> bool:
+        record = self._records.get(tool_call_id)
+        return record.custom if record is not None else False
+
+    def start_event(
+        self, tool_call_id: str, *, synthesize_arguments: bool = False
+    ) -> ToolCallEvidence | None:
+        record = self._records.get(tool_call_id)
+        if record is None or record.start_emitted:
+            return None
+        record.start_emitted = True
+        arguments = record.arguments
+        if arguments is None and synthesize_arguments:
+            arguments = {}
+        return {
+            "type": "tool_start",
+            "tool_call_id": tool_call_id,
+            "tool_name": record.tool_name,
+            "arguments": arguments,
+        }
+
+    def end_event(self, tool_call_id: str) -> dict[str, Any] | None:
+        record = self._records.get(tool_call_id)
+        if record is None or not record.completed or record.end_emitted:
+            return None
+        record.end_emitted = True
+        return {
+            "type": "tool_end",
+            "tool_call_id": tool_call_id,
+            "tool_name": record.tool_name,
+            "result": record.result or "",
+        }
 
     def start_custom(self, invocation: ToolInvocation) -> None:
         record = self._record(invocation.tool_call_id)

@@ -642,6 +642,35 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
     asyncio.run(call())
 
 
+def test_registered_stream_invalid_session_header_emits_sse_error(preview, monkeypatch):
+    invoke = AsyncMock(side_effect=AssertionError("native stream must not start"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+    app = create_function_app(SAMPLE)
+    stream = next(
+        function.get_user_function() for function in app.get_functions()
+        if function.get_function_name() == "agent_main_builtin_chatstream"
+    )
+
+    async def call():
+        response = await stream(
+            SimpleNamespace(
+                headers={"x-ms-session-id": "bad id!"},
+                json=AsyncMock(return_value={"prompt": "stream"}),
+            )
+        )
+        assert response.status_code == 200
+        return [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in response.body_iterator
+        ]
+
+    events = asyncio.run(call())
+
+    assert [event["type"] for event in events] == ["error"]
+    assert "Invalid session_id" in events[0]["content"]
+    invoke.assert_not_awaited()
+
+
 def test_registered_agent_model_override_reaches_copilot_provider(preview, monkeypatch, tmp_path):
     root = tmp_path / "agent-model"
     shutil.copytree(SAMPLE, root)
