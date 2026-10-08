@@ -380,12 +380,15 @@ SSE advertises the public session only after native create/resume and any
 applicable custom-tool catalog verification, emits host `tool_start`/`tool_end`
 events in invocation order, filters child assistant deltas, and emits `done`
 only after a successful, non-interrupted SDK result and session disconnect.
-Closing the stream cancels and aborts the active turn, then re-raises
-cancellation without stopping the app's shared client. Resume trusts the SDK's
-`send_and_wait(...)` wait/error contract and rejects final results when the
-request-local live stream reports `AbortData`, `AgentInterruptedData`, or
-`idle(aborted=True)`. This remains an event-level acceptance barrier, not file
-parsing, rollback, recovery, or exactly-once execution.
+Its bounded 128-event buffer drops the oldest queued events under backpressure
+without cancelling execution, then emits `stream_truncated` and the complete
+final `message` before `done`. Closing the stream cancels and aborts the active
+turn, then re-raises cancellation without stopping the app's shared client.
+Resume trusts the SDK's `send_and_wait(...)` wait/error contract and rejects
+final results when the request-local live stream reports `AbortData`,
+`AgentInterruptedData`, or `idle(aborted=True)`. This remains an event-level
+acceptance barrier, not file parsing, rollback, recovery, or exactly-once
+execution.
 
 Authored HTTP-trigger input validation, response-format prompting, JSON
 extraction, `response_schema` validation, `AgentResult`, response bodies and

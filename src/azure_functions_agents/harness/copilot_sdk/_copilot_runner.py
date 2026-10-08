@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import uuid
+from collections import deque
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -33,65 +34,40 @@ if TYPE_CHECKING:
 
 
 _STREAM_EVENT_QUEUE_CAPACITY = 128
-_STREAM_BACKPRESSURE_MESSAGE = (
-    "Copilot stream backpressure limit exceeded after buffering "
-    f"{_STREAM_EVENT_QUEUE_CAPACITY} events. "
-    "The active stream execution was cancelled."
-)
 
 
 class _StreamEventQueue:
     def __init__(self) -> None:
-        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
-            maxsize=_STREAM_EVENT_QUEUE_CAPACITY
-        )
-        self._finished = asyncio.Event()
-        self._overflowed = False
-        self._execution: asyncio.Task[AgentResult] | None = None
-
-    @property
-    def overflowed(self) -> bool:
-        return self._overflowed
-
-    def bind_execution(self, execution: asyncio.Task[AgentResult]) -> None:
-        self._execution = execution
+        self._events: deque[dict[str, Any]] = deque()
+        self._available = asyncio.Event()
+        self._finished = False
+        self.dropped_events = 0
 
     def emit(self, event: dict[str, Any]) -> None:
-        if self._overflowed:
-            return
-        try:
-            self._events.put_nowait(event)
-        except asyncio.QueueFull:
-            self._overflowed = True
-            execution = self._execution
-            if execution is not None and not execution.done():
-                execution.cancel()
+        if len(self._events) >= _STREAM_EVENT_QUEUE_CAPACITY:
+            drop_index = 1 if self._events[0]["type"] == "session" else 0
+            del self._events[drop_index]
+            self.dropped_events += 1
+        self._events.append(event)
+        self._available.set()
 
     def finish(self) -> None:
-        self._finished.set()
+        self._finished = True
+        self._available.set()
 
     async def next_event(self) -> dict[str, Any] | None:
-        while self._events.empty():
-            if self._finished.is_set():
+        while True:
+            if self._events:
+                event = self._events.popleft()
+                if not self._events:
+                    self._available.clear()
+                return event
+            if self._finished:
                 return None
-            get_event = asyncio.create_task(self._events.get())
-            wait_finished = asyncio.create_task(self._finished.wait())
-            try:
-                done, _pending = await asyncio.wait(
-                    {get_event, wait_finished},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if get_event in done:
-                    return get_event.result()
-                if self._finished.is_set() and self._events.empty():
-                    return None
-            finally:
-                for task in (get_event, wait_finished):
-                    if not task.done():
-                        task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-        return self._events.get_nowait()
+            self._available.clear()
+            if self._events or self._finished:
+                continue
+            await self._available.wait()
 
 
 class _CopilotHarnessRunner:
@@ -274,29 +250,30 @@ class _CopilotHarnessRunner:
                 },
             ) as span:
                 execution = asyncio.create_task(execute())
-                events.bind_execution(execution)
                 try:
                     while (event := await events.next_event()) is not None:
                         if event["type"] == "delta":
                             emitted_text = True
                         yield f"data: {json.dumps(event, default=str)}\n\n"
-                    if events.overflowed:
-                        span.set_attribute("af.agent.outcome", "error")
-                        span.set_error(
-                            _STREAM_BACKPRESSURE_MESSAGE,
-                            fault_domain=FaultDomain.RUNTIME,
-                        )
-                        yield (
-                            "data: "
-                            f"{json.dumps({'type': 'error', 'content': _STREAM_BACKPRESSURE_MESSAGE})}"
-                            "\n\n"
-                        )
-                        return
                     result = await execution
                     from ...registration._handlers import _set_run_result_attributes
 
                     _set_run_result_attributes(span, result)
-                    if not emitted_text and result.content:
+                    if events.dropped_events:
+                        span.set_attribute(
+                            "af.agent.stream.dropped_event_count", events.dropped_events
+                        )
+                        yield (
+                            "data: "
+                            f"{json.dumps({'type': 'stream_truncated', 'dropped_events': events.dropped_events})}"
+                            "\n\n"
+                        )
+                        yield (
+                            "data: "
+                            f"{json.dumps({'type': 'message', 'content': result.content})}"
+                            "\n\n"
+                        )
+                    elif not emitted_text and result.content:
                         yield f"data: {json.dumps({'type': 'delta', 'content': result.content})}\n\n"
                     span.set_attribute("af.agent.outcome", "success")
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
