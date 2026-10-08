@@ -532,11 +532,6 @@ Pass `x-ms-session-id` header to continue a conversation across requests. If omi
 
 When `builtin_endpoints: true` or `builtin_endpoints.mcp: true`, the agent is exposed as an MCP tool named after its slug through the shared MCP-compatible endpoint at `/runtime/webhooks/mcp`. Requires the MCP extension system key in the `x-functions-key` header when deployed.
 
-The internal Copilot preview also enables this inbound tool through the bound
-runner, with the same prompt validation and session-ID handling. The Functions
-MCP extension still owns transport/authentication; `http_auth` does not apply.
-This path is not live-qualified against a real Functions host.
-
 ### Without built-in endpoints
 
 If no agent enables built-in endpoints, no chat UI, chat API, chatstream, or agent MCP tool is registered. The app still runs triggered functions. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).

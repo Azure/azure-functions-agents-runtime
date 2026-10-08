@@ -318,21 +318,30 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   files are never projected into MAF history.
 - The inbound built-in MCP tool (`builtin_endpoints.mcp: true`) is enabled
   through the existing bound runner. It validates `arguments.prompt`, returns
-  the agent's session ID, and resumes a supplied `sessionId`/`sessionid` without
-  retrying as a new session on failure. Omitted IDs create fresh sessions.
+  the agent's session ID, and normalizes the extension-owned transport
+  `sessionid` (also accepting the existing `sessionId` spelling) for native
+  continuation. This is not a public tool argument for choosing an agent
+  session. A transport ID requests native resume; if no matching native
+  session exists, the error is returned without retry-as-create. Omitted
+  transport IDs create fresh sessions.
   The Functions MCP extension owns `/runtime/webhooks/mcp` and its system-key
   authentication (`x-functions-key`); `builtin_endpoints.http_auth` controls
   HTTP chat only, not this webhook. This is distinct from outbound `mcp.json`
-  tools. Inbound MCP remains **not live-qualified**: no real Functions host or
-  extension-authenticated request has been exercised.
+  tools. Broader endpoint/session API improvements are deferred to
+  [Azure/azure-functions-bucees-planning#1366](https://github.com/Azure/azure-functions-bucees-planning/issues/1366).
 - Registered non-HTTP triggers and the built-in Debug UI (live chat, streaming,
   and continuation by pasting or picking a session ID) are enabled through the
   shared registration and runner path. Resuming an explicit ID continues the
   native session without restoring earlier transcript messages; the UI says so.
   A failed resume is an error and never creates a replacement session. These
-  surfaces are **not live-qualified**: unit and component tests are not
-  Functions-host qualification, and no trigger or binding service has been
-  exercised against a real host.
+  surfaces and inbound MCP have offline unit/component coverage only.
+  Core Tools/local-host evidence would separately establish indexing,
+  actual binding delivery, and extension transport/auth behavior; none was
+  collected for this change. Deployed-host evidence is a separate category
+  and was not collected either. **Not live-qualified** describes these
+  evidence gaps, not an unsupported runtime verdict. A missing binding
+  extension that prevents host indexing is a setup/integration failure,
+  not something the runtime must recover from.
 - HTTP streaming, declared delegates, Workflow Sub Agents, and workflow management
   are supported by the local adapter. Leaf state is isolated locally and deleted;
   it does not use the primary persistent storage route. These adapter tests do

@@ -707,6 +707,7 @@ def test_registered_copilot_mcp_preserves_prompt_sessions_and_errors(preview, mo
     binding = next(b.get_dict_repr() for b in function.get_bindings()
                    if b.get_dict_repr()["type"] == "mcpToolTrigger")
     assert binding["name"] == "context"
+    assert [prop["propertyName"] for prop in json.loads(binding["toolProperties"])] == ["prompt"]
     handler = function.get_user_function()
     # Later flag changes must not switch an already-registered handler to MAF.
     monkeypatch.setenv(_harness.FLAG, "false")
@@ -726,33 +727,28 @@ def test_registered_copilot_mcp_preserves_prompt_sessions_and_errors(preview, mo
         assert first["session_id"] == requests[0].session_id
         assert requests[0].prompt == "first"
         assert requests[0].new_session is True
-        context = json.dumps({
-            "arguments": {"prompt": "continue"},
-            "sessionId": f" {first['session_id']} ",
-        })
-        second = json.loads(await handler(context))
-        assert second["session_id"] == first["session_id"]
-        assert requests[1].session_id == first["session_id"]
-        assert requests[1].new_session is False
-
+        # The extension supplies transport identity, not the returned agent ID.
+        # The mocked runner represents an existing native session for that identity.
         transport_context = json.dumps({
             "arguments": {"prompt": "continue"},
             "sessionid": "transport/session",
         })
         mapped = json.loads(await handler(transport_context))
         assert mapped["session_id"].startswith("mcp-")
+        assert mapped["session_id"] != first["session_id"]
         assert requests[-1].new_session is False
         repeated = json.loads(await handler(transport_context))
         assert repeated["session_id"] == mapped["session_id"]
+        assert requests[-1].session_id == mapped["session_id"]
         assert requests[-1].new_session is False
 
         fail_resume = True
         calls_before_failure = len(requests)
-        failed = json.loads(await handler(context))
+        failed = json.loads(await handler(transport_context))
         assert failed == {"error": "Native resume failed."}
         assert len(requests) == calls_before_failure + 1
         assert requests[-1].new_session is False
-        assert requests[-1].session_id == first["session_id"]
+        assert requests[-1].session_id == mapped["session_id"]
 
     asyncio.run(call())
 

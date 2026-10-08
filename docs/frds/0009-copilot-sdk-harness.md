@@ -262,9 +262,11 @@ serialization, and shared runner contracts. Each Functions invocation creates
 one fresh Copilot session, including a batch delivery. These source-level
 contracts do not by themselves qualify a trigger: support claims require a
 real Functions host to register the binding, deliver a test event, and verify
-the serialized input reaches inference. If a required binding service or
-extension is unavailable, record that trigger as unqualified rather than
-unsupported. Durable activity/orchestration/entity triggers, warm-up triggers,
+the serialized input reaches inference. Track offline unit/component tests,
+Core Tools/local-host indexing and binding delivery, and deployed-host
+evidence separately. Missing extensions that prevent host indexing are
+setup/integration failures, not runtime unsupported-capability verdicts.
+Durable activity/orchestration/entity triggers, warm-up triggers,
 assistant-skill/MCP triggers, aliases, and dotted connector names remain
 outside the supported agent-trigger set under the existing authoring rules.
 
@@ -277,9 +279,12 @@ error and is never retried as a new session. Debug UI and per-trigger support
 claims also require real Functions-host qualification.
 
 The inbound built-in MCP endpoint uses the same bound runner and existing
-prompt validation and session-ID normalization. Calls without an ID create a
-native session; a supplied ID requests continuation, with errors surfaced
-without retry-as-create. The Functions MCP extension owns the transport and
+prompt validation and transport session-ID normalization. Calls without a
+transport ID create a native session; the extension-owned `sessionid`
+requests continuation, with errors surfaced without retry-as-create (including
+when no corresponding native session exists). It is not a public tool
+argument for selecting an agent session. Broader endpoint/session API
+improvements are outside this contract. The Functions MCP extension owns the transport and
 system-key authentication; HTTP endpoint auth settings do not alter that
 boundary. Inbound MCP behavior remains unqualified until exercised on a real
 Functions host.
