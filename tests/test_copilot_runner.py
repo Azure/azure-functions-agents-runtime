@@ -370,7 +370,7 @@ async def test_stream_invalid_session_id_emits_sse_error_without_native_executio
 
 
 @pytest.mark.asyncio
-async def test_sse_slow_consumer_cancels_overflowed_stream_once(preview, native):
+async def test_sse_slow_consumer_drops_old_events_without_cancelling_run(preview, native):
     from copilot.session_events import (
         AssistantMessageDeltaData,
         SessionEvent,
@@ -378,31 +378,25 @@ async def test_sse_slow_consumer_cancels_overflowed_stream_once(preview, native)
     )
 
     session = native.create_session.return_value
-    cancelled = asyncio.Event()
     produced = 0
     total_events = _copilot_runner._STREAM_EVENT_QUEUE_CAPACITY + 32
 
     async def flood(*_args, **_kwargs):
         nonlocal produced
-        try:
-            for index in range(total_events):
-                event = SessionEvent(
-                    data=AssistantMessageDeltaData(
-                        delta_content=f"chunk-{index}",
-                        message_id=f"message-{index}",
-                        parent_tool_call_id=None,
-                    ),
-                    type=SessionEventType.ASSISTANT_MESSAGE_DELTA,
-                    id=uuid4(),
-                    timestamp=datetime.now(UTC),
-                )
-                for callback in list(session.handlers):
-                    callback(event)
-                produced += 1
-                await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
+        for index in range(total_events):
+            event = SessionEvent(
+                data=AssistantMessageDeltaData(
+                    delta_content=f"chunk-{index}",
+                    message_id=f"message-{index}",
+                    parent_tool_call_id=None,
+                ),
+                type=SessionEventType.ASSISTANT_MESSAGE_DELTA,
+                id=uuid4(),
+                timestamp=datetime.now(UTC),
+            )
+            for callback in list(session.handlers):
+                callback(event)
+            produced += 1
         return session.send_and_wait.return_value
 
     session.send_and_wait.side_effect = flood
@@ -410,24 +404,28 @@ async def test_sse_slow_consumer_cancels_overflowed_stream_once(preview, native)
     try:
         first = json.loads((await anext(stream)).removeprefix("data: "))
         assert first["type"] == "session"
-        await asyncio.wait_for(cancelled.wait(), timeout=2)
         events = [first]
         async for chunk in stream:
             events.append(json.loads(chunk.removeprefix("data: ")))
         deltas = [event for event in events if event["type"] == "delta"]
+        truncation = [event for event in events if event["type"] == "stream_truncated"]
+        messages = [event for event in events if event["type"] == "message"]
         errors = [event for event in events if event["type"] == "error"]
-        assert len(deltas) == _copilot_runner._STREAM_EVENT_QUEUE_CAPACITY
-        assert deltas[0]["content"] == "chunk-0"
-        assert (
-            deltas[-1]["content"]
-            == f"chunk-{_copilot_runner._STREAM_EVENT_QUEUE_CAPACITY - 1}"
-        )
-        assert len(errors) == 1
-        assert errors[0]["content"] == _copilot_runner._STREAM_BACKPRESSURE_MESSAGE
-        assert events[-1] == errors[0]
-        assert all(event["type"] != "done" for event in events)
-        assert _copilot_runner._STREAM_EVENT_QUEUE_CAPACITY < produced < total_events
-        session.abort.assert_awaited_once()
+        assert len(deltas) <= _copilot_runner._STREAM_EVENT_QUEUE_CAPACITY
+        first_chunk = int(deltas[0]["content"].removeprefix("chunk-"))
+        assert first_chunk == total_events - len(deltas)
+        assert deltas[-1]["content"] == f"chunk-{total_events - 1}"
+        assert truncation == [
+            {
+                "type": "stream_truncated",
+                "dropped_events": total_events - len(deltas),
+            }
+        ]
+        assert messages == [{"type": "message", "content": "synthetic reply"}]
+        assert errors == []
+        assert events[-1] == {"type": "done"}
+        assert produced == total_events
+        session.abort.assert_not_awaited()
         session.disconnect.assert_awaited_once()
     finally:
         await _harness_lifecycle._shutdown_harnesses()
