@@ -1,0 +1,28 @@
+parameters:
+  - name: tgzPath
+    type: string
+  - name: NpmPublishTag
+    type: string
+    default: 'latest'
+
+steps:
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '22.x'
+    displayName: 'Use Node.js 22'
+  - bash: |
+      set -euo pipefail
+
+      mapfile -t packages < <(find '${{ parameters.tgzPath }}' -maxdepth 1 -type f -name '*.tgz' -print)
+      if [ "${#packages[@]}" -ne 1 ]; then
+        echo "Expected exactly one npm package in ${{ parameters.tgzPath }}, found ${#packages[@]}." >&2
+        exit 1
+      fi
+
+      npm publish "${packages[0]}" \
+        --tag '${{ parameters.NpmPublishTag }}' \
+        --registry https://registry.npmjs.org \
+        --@azure-functions-agents:registry=https://registry.npmjs.org \
+        --dry-run \
+        --ignore-scripts
+    displayName: 'Validate npm release'

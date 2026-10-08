@@ -1,6 +1,6 @@
 # Vally executor for Azure Functions Agents Runtime
 
-Private, path-loadable Vally 0.16.0 executor for an Azure Functions Agents Runtime synchronous chat
+Vally 0.16.0 executor for an Azure Functions Agents Runtime synchronous chat
 endpoint. It converts generic runtime response and tool evidence into a Vally trajectory; it does not
 start, deploy, or reconfigure the Function App.
 
