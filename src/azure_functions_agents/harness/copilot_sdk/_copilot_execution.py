@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
     from ..._tool_descriptor import ToolDescriptor
-    from ...runner import AgentResult, ToolCallEvidence
+    from ...runner import AgentResult
     from ._copilot_providers import ProviderTokenSource
     from ._copilot_session_fs import CopilotSessionFs
 
@@ -105,17 +105,6 @@ class _RequestTokenSource:
         error = self._error
         self._error = None
         return error
-
-
-def _tool_call_evidence(
-    calls: CopilotToolCalls, tool_call_id: str
-) -> ToolCallEvidence | None:
-    """Return the public evidence record tracked for one SDK tool call id."""
-    for record in calls.calls:
-        if record["tool_call_id"] == tool_call_id:
-            return record
-    return None
-
 
 @dataclass(frozen=True)
 class _ExecutionLifecycle:
@@ -183,8 +172,8 @@ def _tool(
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
         calls.start_custom(invocation)
-        started = _tool_call_evidence(calls, invocation.tool_call_id)
-        _emit_event(event_sink, dict(started) if started is not None else None)
+        start_event = calls.start_event(invocation.tool_call_id)
+        _emit_event(event_sink, dict(start_event) if start_event is not None else None)
         try:
             result = await function.invoke(
                 arguments=invocation.arguments,
@@ -195,26 +184,10 @@ def _tool(
             logger.warning("Copilot custom tool failed: tool=%s", function.name)
             text = '{"error":"Custom tool failed or returned unsupported content."}'
             calls.complete_custom(invocation.tool_call_id, text, success=False)
-            _emit_event(
-                event_sink,
-                {
-                    "type": "tool_end",
-                    "tool_call_id": invocation.tool_call_id,
-                    "tool_name": function.name,
-                    "result": text,
-                },
-            )
+            _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
             return ToolResult(text_result_for_llm=text, result_type="failure")
         calls.complete_custom(invocation.tool_call_id, text, success=True)
-        _emit_event(
-            event_sink,
-            {
-                "type": "tool_end",
-                "tool_call_id": invocation.tool_call_id,
-                "tool_name": function.name,
-                "result": text,
-            },
-        )
+        _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
         return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
@@ -364,7 +337,7 @@ async def _send_turn(
 ) -> SessionEvent | None:
     try:
         return await session.send_and_wait(
-            prompt,
+            prompt=prompt,
             timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
         )
     except BaseException:
@@ -464,7 +437,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
 
     owner = get_runtime(harness)
     lifecycle = _ExecutionLifecycle.create(harness, owner, request)
-    custom_tool_names = {function.name for function in request.tools}
     calls = CopilotToolCalls()
     messages: list[str] = []
     input_tokens: int | None = None
@@ -495,22 +467,23 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     output_tokens = (output_tokens or 0) + used_output
             case ToolExecutionStartData() as started:
                 calls.start_native(started)
-                if started.tool_name not in custom_tool_names:
-                    record = _tool_call_evidence(calls, started.tool_call_id)
-                    _emit_event(request.event_sink, dict(record) if record is not None else None)
-            case ToolExecutionCompleteData() as completed:
-                calls.complete_native(completed)
-                record = _tool_call_evidence(calls, completed.tool_call_id)
-                if record is not None and record.get("tool_name") not in custom_tool_names:
+                if not calls.is_custom(started.tool_call_id):
+                    start_event = calls.start_event(started.tool_call_id)
                     _emit_event(
                         request.event_sink,
-                        {
-                            "type": "tool_end",
-                            "tool_call_id": completed.tool_call_id,
-                            "tool_name": record.get("tool_name"),
-                            "result": record.get("result", ""),
-                        },
+                        dict(start_event) if start_event is not None else None,
                     )
+            case ToolExecutionCompleteData() as completed:
+                calls.complete_native(completed)
+                if not calls.is_custom(completed.tool_call_id):
+                    start_event = calls.start_event(
+                        completed.tool_call_id, synthesize_arguments=True
+                    )
+                    _emit_event(
+                        request.event_sink,
+                        dict(start_event) if start_event is not None else None,
+                    )
+                    _emit_event(request.event_sink, calls.end_event(completed.tool_call_id))
 
     token_source = _RequestTokenSource(owner)
     try:

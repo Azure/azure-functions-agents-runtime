@@ -984,6 +984,160 @@ async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_me
 
 
 @pytest.mark.asyncio
+async def test_event_sink_uses_call_provenance_for_native_and_custom_tool_events(
+    preview, monkeypatch,
+):
+    import copilot
+    from copilot.session_events import (
+        SessionEventType,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteResult,
+        ToolExecutionCompleteToolDescription,
+        ToolExecutionStartData,
+    )
+    from copilot.tools import ToolInvocation
+
+    @tool(name="bash")
+    def custom_bash(command: str) -> str:
+        return f"custom:{command}"
+
+    [descriptor] = _preview.prepare_tools([custom_bash])
+    client = _fake_client()
+    session = client.create_session.return_value
+    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+        tools=[SimpleNamespace(name=descriptor.name)]
+    )
+    events = []
+
+    async def send(*_args, **_kwargs):
+        [on_event] = session.handlers
+        [native_tool] = client.create_session.call_args.kwargs["tools"]
+
+        def emit(event_type, data):
+            on_event(_sdk_event(event_type, data))
+
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="mcp-bash",
+            tool_name="bash",
+            arguments={"command": "pwd"},
+            mcp_server_name="selected",
+            mcp_tool_name="bash",
+        ))
+        assert events[-1]["type"] == "tool_start"
+        assert events[-1]["tool_call_id"] == "mcp-bash"
+        for content in ("mcp:first", "mcp:duplicate"):
+            emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+                tool_call_id="mcp-bash",
+                success=True,
+                result=ToolExecutionCompleteResult(content=content),
+            ))
+
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="completion-only-bash",
+            success=True,
+            result=ToolExecutionCompleteResult(content="native:completion-only"),
+            tool_description=ToolExecutionCompleteToolDescription(name="bash"),
+        ))
+
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="custom-bash",
+            tool_name="bash",
+            arguments={"command": "echo hello"},
+        ))
+        await native_tool.handler(ToolInvocation(
+            session_id="native",
+            tool_call_id="custom-bash",
+            tool_name="bash",
+            arguments={"command": "echo hello"},
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="custom-bash",
+            success=True,
+            result=ToolExecutionCompleteResult(content="native:duplicate"),
+        ))
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(
+            preview,
+            replace(_request(), tools=(descriptor,), event_sink=events.append),
+        )
+
+        assert result.tool_calls == [
+            {
+                "type": "tool_start",
+                "tool_call_id": "mcp-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "pwd"},
+                "result": "mcp:first",
+                "success": True,
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "completion-only-bash",
+                "tool_name": "bash",
+                "arguments": None,
+                "result": "native:completion-only",
+                "success": True,
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "custom-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "echo hello"},
+                "result": "custom:echo hello",
+                "success": True,
+            },
+        ]
+        assert events == [
+            {
+                "type": "session",
+                "session_id": "example",
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "mcp-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "pwd"},
+            },
+            {
+                "type": "tool_end",
+                "tool_call_id": "mcp-bash",
+                "tool_name": "bash",
+                "result": "mcp:first",
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "completion-only-bash",
+                "tool_name": "bash",
+                "arguments": {},
+            },
+            {
+                "type": "tool_end",
+                "tool_call_id": "completion-only-bash",
+                "tool_name": "bash",
+                "result": "native:completion-only",
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "custom-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "echo hello"},
+            },
+            {
+                "type": "tool_end",
+                "tool_call_id": "custom-bash",
+                "tool_name": "bash",
+                "result": "custom:echo hello",
+            },
+        ]
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("permission_callback", [False, True])
 async def test_prompt_refusal_or_permission_request_alone_does_not_invent_tool_execution(
     preview, monkeypatch, permission_callback,
