@@ -180,6 +180,108 @@ def test_unavailable_history_shows_notice_only_for_the_current_session() -> None
 
     _run_node(harness)
 
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+@pytest.mark.parametrize("history_status", [200, 501])
+def test_reload_promotes_server_session_and_loads_history(history_status: int) -> None:
+    script = _script_text()
+    restore = script[script.index("function loadRestoredSessionCandidate()"):
+                     script.index("\n\t\t// Reflect the active session id")]
+    promote = script[script.index("function markWorkflowsSupported()"):
+                     script.index("\n\t\t// Cheap non-cryptographic hash")]
+    probe = script[script.index("async function probeWorkflowsCapability()"):
+                   script.index('\n\t\tdocument.addEventListener("visibilitychange"')]
+    harness = textwrap.dedent(
+        """
+        const state = { baseUrl: "https://example.test", sessionId: null };
+        let restoredSessionIdCandidate = null;
+        let sessionWasFromServer = false;
+        let sessionIdIsExplicit = false;
+        let workflowsCapability = "unknown";
+        let workflowProbeInFlight = false;
+        let historyReplayGeneration = 0;
+        let historyReplayInFlight = false;
+        let restoredGreetingContent = { textContent: "Greeting" };
+        const chatEl = { innerHTML: "Greeting" };
+        const rendered = [];
+        const historyCalls = [];
+        let resolveProbe;
+        const localStorage = {
+          getItem(key) { return key === "session" ? "server-session" : "server"; },
+        };
+
+        function storageKeyForSessionId() { return "session"; }
+        function storageKeyForSessionIdSource() { return "source"; }
+        function isValidSessionId(value) { return Boolean(value); }
+        function getApiBasePath() { return "/agents/main"; }
+        function buildAuthQuery() { return ""; }
+        function hideDetails() {}
+        function stopWorkflowPolling() {}
+        function startWorkflowPolling() {}
+        function persistSessionId() {}
+        function updateSessionBar() {}
+        function recordSessionActivity() {}
+        function markWorkflowsUnsupported() { workflowsCapability = "unsupported"; }
+        function scrollChatToBottom() {}
+        function shortSessionId(value) { return value; }
+        function setStatus() {}
+        function renderBubble(role, text, meta) { rendered.push({ role, text, meta }); }
+        globalThis.fetch = (url, options) => {
+          if (url.endsWith("/workflows")) {
+            return new Promise(resolve => { resolveProbe = resolve; });
+          }
+          historyCalls.push({ url, options });
+          return Promise.resolve({
+            ok: __HISTORY_STATUS__ === 200,
+            status: __HISTORY_STATUS__,
+            json: async () => ({ messages: [{ role: "assistant", text: "Earlier reply" }] }),
+          });
+        };
+
+        __RESTORE__
+        __PROMOTE__
+        __PROBE__
+        __HISTORY__
+
+        loadRestoredSessionCandidate();
+        if (state.sessionId !== null || restoredSessionIdCandidate !== "server-session") {
+          throw new Error("server-issued ID activated before capability confirmation");
+        }
+        const pending = probeWorkflowsCapability();
+        resolveProbe({ ok: true, status: 200 });
+        await pending;
+        await new Promise(resolve => setImmediate(resolve));
+        if (state.sessionId !== "server-session" || historyCalls.length !== 1
+            || historyCalls[0].options.headers["x-ms-session-id"] !== "server-session") {
+          throw new Error("promoted server session did not request its history");
+        }
+        const expected = __HISTORY_STATUS__ === 200 ? "Earlier reply" : HISTORY_UNAVAILABLE_NOTICE;
+        if (rendered.length !== 1 || rendered[0].text !== expected) {
+          throw new Error("reload did not render transcript or unavailable-history notice");
+        }
+
+        // A new server session arriving during the probe must win over the stored ID.
+        state.sessionId = null;
+        restoredSessionIdCandidate = "server-session";
+        workflowsCapability = "unknown";
+        const raced = probeWorkflowsCapability();
+        state.sessionId = "new-session";
+        sessionWasFromServer = true;
+        resolveProbe({ ok: true, status: 200 });
+        await raced;
+        if (state.sessionId !== "new-session" || historyCalls.length !== 1) {
+          throw new Error("probe overwrote a newer session or loaded stale history");
+        }
+        """
+    )
+    harness = (harness.replace("__HISTORY_STATUS__", str(history_status))
+               .replace("__RESTORE__", restore)
+               .replace("__PROMOTE__", promote)
+               .replace("__PROBE__", probe)
+               .replace("__HISTORY__", _history_replay_functions(script)))
+    _run_node(harness)
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
 def test_delayed_workflow_response_is_discarded_after_session_switch() -> None:
     script = _script_text()

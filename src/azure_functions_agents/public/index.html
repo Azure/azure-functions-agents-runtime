@@ -1756,6 +1756,7 @@
 						restoredGreetingContent.textContent =
 							"Welcome back — reconnected to your previous session. Active workflows will appear below within a few seconds.";
 					}
+					void loadSessionHistory(state.sessionId, { announce: false, replaceView: false });
 				}
 			} catch (_err) {
 				// Network error during probe — leave capability "unknown" so
