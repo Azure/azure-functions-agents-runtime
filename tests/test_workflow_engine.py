@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from collections.abc import Callable
+from contextvars import Context
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,9 @@ from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     ResolvedAgent,
     ToolsFilter,
+    WorkflowSubagentRef,
 )
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import activity as workflow_activity
@@ -81,6 +84,7 @@ def _registered_function(
     catalog=None,
     workflow_agent_policies=None,
     handler_catalog=None,
+    harness=None,
 ) -> Callable[..., Any]:
     app = _FakeApp()
     engine.register_workflows(
@@ -88,6 +92,7 @@ def _registered_function(
         catalog=catalog,
         workflow_agent_policies=workflow_agent_policies,
         handler_catalog=handler_catalog,
+        harness=harness,
     )
     [blueprint] = app.blueprints
     for builder in blueprint._function_builders:
@@ -99,6 +104,215 @@ def _registered_function(
                 return registered.__closure__[0].cell_contents
             return registered
     raise AssertionError(f"workflow function {name!r} was not registered")
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_activity_retains_app_harness_and_reauthorizes(monkeypatch, tmp_path):
+    bound = AppHarness(HarnessKind.COPILOT, tmp_path)
+    seen = []
+
+    async def run_leaf(*args, **kwargs):
+        seen.append(kwargs["_harness"])
+        return "analysis"
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"analyst"}),
+            ),
+        },
+        harness=bound,
+    )
+    task = {
+        "id": "analysis", "agent": "analyst", "task": "Review",
+        "workflow_id": "workflow-1", "workflow_agent_slug": "coordinator",
+    }
+    assert await activity(task) == {
+        "id": "analysis", "result": {"agent": "analyst", "text": "analysis"}
+    }
+    policy_task = {
+        **task,
+        "task_id": "analysis",
+        "execution": {
+            "max_attempts": 1,
+            "durable_retry_policy": {
+                "first_retry_interval_ms": 0,
+                "max_number_of_attempts": 1,
+                "backoff_coefficient": 1.0,
+                "max_retry_interval_ms": 0,
+            },
+        },
+    }
+    assert await activity(policy_task) == {
+        "id": "analysis", "ok": True,
+        "result": {"agent": "analyst", "text": "analysis"},
+    }
+    assert seen == [bound, bound]
+    with pytest.raises(RuntimeError, match="not authorized"):
+        await activity({**task, "agent": "other"})
+    assert seen == [bound, bound]
+
+
+@pytest.mark.asyncio
+async def test_activity_redelivery_uses_serving_app_binding_after_environment_change(
+    monkeypatch, tmp_path,
+):
+    from azure_functions_agents import runner
+    from azure_functions_agents.harness._harness_binding import FLAG
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
+
+    first = AppHarness(HarnessKind.COPILOT, tmp_path / "first")
+    replacement = AppHarness(HarnessKind.COPILOT, tmp_path / "replacement")
+    policies = {
+        "coordinator": WorkflowPlanPolicy(
+            allowed_tools=frozenset(),
+            allowed_subagents=frozenset({"analyst"}),
+        )
+    }
+    agent_catalog = _catalog("analyst")
+    original_leaf = runner.run_leaf_agent_task
+    monkeypatch.setattr(engine, "run_leaf_agent_task", original_leaf)
+    observed = []
+
+    async def fake_run(harness, request):
+        observed.append((harness, request.execution_role, request.session_id))
+        return runner.AgentResult(session_id=request.session_id, content="analysis")
+
+    monkeypatch.setattr(_copilot, "run", fake_run)
+    first_activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME, catalog=agent_catalog,
+        workflow_agent_policies=policies, harness=first,
+    )
+    replacement_activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME, catalog=agent_catalog,
+        workflow_agent_policies=policies, harness=replacement,
+    )
+    monkeypatch.setenv(FLAG, "false")
+    task = {
+        "id": "analysis", "agent": "analyst", "task": "Review",
+        "workflow_id": "workflow-1", "workflow_agent_slug": "coordinator",
+        "task_id": "analysis",
+        "execution": {
+            "max_attempts": 1,
+            "durable_retry_policy": {
+                "first_retry_interval_ms": 0,
+                "max_number_of_attempts": 1,
+                "backoff_coefficient": 1.0,
+                "max_retry_interval_ms": 0,
+            },
+        },
+    }
+    expected = {
+        "id": "analysis", "ok": True,
+        "result": {"agent": "analyst", "text": "analysis"},
+    }
+    assert await first_activity(task) == expected
+    assert await replacement_activity(task) == expected
+    assert observed[0][0] is first
+    assert observed[1][0] is replacement
+    assert [role for _, role, _ in observed] == ["workflow_subagent"] * 2
+    assert observed[0][2] != observed[1][2]
+
+
+def _compatibility_activity(*, catalog, harness=None):
+    app = _FakeApp()
+    integration.build_workflow_integration(
+        app, {"workflows": {"enabled": True}},
+        workflow_subagents=[WorkflowSubagentRef(agent="analyst")],
+        catalog=catalog, **({"harness": harness} if harness is not None else {}),
+    )
+    [blueprint] = app.blueprints
+    return next(
+        builder._function._func for builder in blueprint._function_builders
+        if builder._function._name == engine.SUB_AGENT_ACTIVITY_NAME
+    )
+
+
+def test_compatibility_activity_captures_default_harness_at_registration(monkeypatch, tmp_path):
+    from azure_functions_agents.config import paths
+    from azure_functions_agents.harness import _harness_binding as _harness
+
+    monkeypatch.setattr(_harness, "_HARNESSES", {})
+    monkeypatch.setenv(_harness.FLAG, "false")
+    monkeypatch.setattr(paths, "_app_root", tmp_path)
+    seen = []
+
+    async def run_leaf(*args, **kwargs):
+        seen.append(kwargs["_harness"])
+        return "analysis"
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _compatibility_activity(catalog=_catalog("analyst"))
+    assert tmp_path in _harness._HARNESSES
+    bound = _harness.get_harness()
+    monkeypatch.setenv(_harness.FLAG, "true")
+    monkeypatch.setattr(paths, "_app_root", tmp_path / "other")
+    task = {
+        "id": "analysis", "agent": "analyst", "task": "Review",
+        "workflow_id": "workflow-1", "workflow_agent_slug": "main",
+    }
+    for _ in range(2):
+        result = Context().run(asyncio.run, activity(task))
+        assert result["result"]["text"] == "analysis"
+    assert seen == [bound, bound]
+    assert bound.name is HarnessKind.MAF
+
+
+@pytest.mark.parametrize("policy_aware", [False, True])
+def test_compatibility_activities_propagate_distinct_app_harnesses(
+    monkeypatch, tmp_path, policy_aware,
+):
+    from azure_functions_agents import runner
+    from azure_functions_agents.config import paths
+    from azure_functions_agents.harness import _harness_binding as _harness
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
+
+    first = AppHarness(HarnessKind.COPILOT, tmp_path / "first")
+    replacement = AppHarness(HarnessKind.COPILOT, tmp_path / "replacement")
+    catalog = _catalog("analyst")
+    seen = []
+
+    async def invoke(harness, request):
+        seen.append((harness, request.execution_role))
+        return runner.AgentResult(session_id=request.session_id, content="analysis")
+
+    monkeypatch.setattr(_copilot, "run", invoke)
+    first_activity = _compatibility_activity(catalog=catalog, harness=first)
+    replacement_activity = _compatibility_activity(catalog=catalog, harness=replacement)
+    monkeypatch.setenv(_harness.FLAG, "false")
+    monkeypatch.setattr(paths, "_app_root", tmp_path / "other")
+    task = {
+        "id": "analysis", "agent": "analyst", "task": "Review",
+        "workflow_id": "workflow-1", "workflow_agent_slug": "main",
+    }
+    if policy_aware:
+        task.update({
+            "task_id": "analysis",
+            "execution": {
+                "max_attempts": 1,
+                "durable_retry_policy": {
+                    "first_retry_interval_ms": 0, "max_number_of_attempts": 1,
+                    "backoff_coefficient": 1.0, "max_retry_interval_ms": 0,
+                },
+            },
+        })
+    for activity in (first_activity, replacement_activity, first_activity):
+        result = Context().run(asyncio.run, activity(task))
+        assert result["result"]["text"] == "analysis"
+        if policy_aware:
+            assert result["ok"] is True
+    assert seen == [
+        (first, "workflow_subagent"),
+        (replacement, "workflow_subagent"),
+        (first, "workflow_subagent"),
+    ]
+    assert seen[0][0] is first
+    assert seen[1][0] is replacement
+    assert seen[2][0] is first
 
 
 @pytest.mark.asyncio

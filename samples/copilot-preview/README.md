@@ -1,6 +1,6 @@
 # Local Copilot preview
 
-This **default-off** Functions sample exercises non-streaming Copilot chat and
+This **default-off** Functions sample exercises Copilot HTTP chat and
 the authored `/preview` HTTP route with `make_receipt` and `web_request`
 (limited to `example.com`). The SDK owns sessions and their opaque files;
 the host supplies filesystem callbacks backed by local files or Blob.
@@ -159,8 +159,11 @@ and per-agent filters; see the [MCP and scoped skills guide](../../docs/copilot-
 before enabling them. This walkthrough requires neither and keeps the receipt
 and `web_request` behavior unchanged.
 
-This local preview does not support streaming, delegation,
-workflows or deployed hosting. Custom `ClientManager`
+The local adapter also supports SSE chat, declared chat delegates, Workflow
+Sub Agents, and Dynamic Workflow management when authored in an agent app.
+This sample remains a single-agent tool demonstration and does not configure
+those optional capabilities. Deployed hosting and debug chat UI remain
+unsupported in this preview. Custom `ClientManager`
 instances are MAF-only and are rejected when Copilot is on. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.

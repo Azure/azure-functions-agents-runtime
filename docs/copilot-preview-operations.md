@@ -298,8 +298,9 @@ Use isolated local settings or offline fixtures, not a customer's storage:
    `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` value fails app construction.
 2. **Configured Blob failure** — an invalid or unavailable configured storage
    target surfaces an error rather than writing session files locally.
-3. **Unsupported surfaces** — `/agents/main/chatstream` and
-   `/agents/main/history` return 501 rather than an empty success shape.
+3. **Unsupported surfaces** — `/agents/main/history` returns 501 rather than
+   an empty success shape. `/agents/main/chatstream` supports SSE; a native
+   creation/catalog failure emits terminal `error` without advertising a session.
 
 ## Known limits
 
@@ -313,8 +314,11 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification
   lands (issues #1357 and #1337).
-- Streaming, history projection, delegation, Workflow Sub Agents,
-  workflow-enabled agents, non-HTTP triggers and the debug chat UI remain
+- History projection, non-HTTP triggers, and the debug chat UI remain
   rejected before inference on the Copilot path.
+- HTTP streaming, declared delegates, Workflow Sub Agents, and workflow management
+  are supported by the local adapter. Leaf state is isolated locally and deleted;
+  it does not use the primary persistent storage route. These adapter tests do
+  not qualify hosted execution or real-provider/service parity.
 - Same-session serialization is process-local only. Callers must avoid
   cross-worker overlap; SDK recovery does not provide exactly-once tool effects.

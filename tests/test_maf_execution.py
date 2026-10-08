@@ -230,7 +230,7 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     assert returned_tracker is tracker
     manager.build_chat_client_with_target.assert_called_once_with(None)
     delegates.assert_awaited_once_with(
-        references, catalog, coordinator_deadline=123.0, _harness=None
+        references, catalog, coordinator_deadline=123.0, harness=None
     )
     assemble.assert_called_once()
     expected = [web_tool, delegate_tool] if overrides else [user_tool, web_tool, mcp_tool, delegate_tool]

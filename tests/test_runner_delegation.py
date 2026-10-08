@@ -761,7 +761,7 @@ async def test_delegate_captures_parent_context_without_mutating_catalog(
     tools, _ = await runner.build_subagent_tools(
         [SubagentRef(agent="leaf")], catalog,
         coordinator_deadline=asyncio.get_running_loop().time() + 1,
-        _harness=parent,
+        harness=parent,
     )
     assert await tools[0].invoke(arguments={"task": "work"}) == "reply"
     assert observed == [parent]

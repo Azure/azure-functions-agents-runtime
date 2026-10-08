@@ -134,9 +134,12 @@ def test_request_retains_frozen_neutral_descriptors_and_standalone_skill_paths()
         "prompt", "instructions", "agent_slug", "session_id", "new_session",
         "model", "tools", "max_output_tokens", "deadline",
         "mcp_servers", "skills", "skill_catalog",
+        "execution_role", "event_sink",
     ]
-    assert request.tools is tools
     assert request.mcp_servers == request.skills == request.skill_catalog == ()
+    assert request.execution_role == "primary"
+    assert request.event_sink is None
+    assert request.tools is tools
     assert replace(request) == request
     with pytest.raises(FrozenInstanceError):
         request.model = "replacement"

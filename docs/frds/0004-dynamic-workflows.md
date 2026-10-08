@@ -924,14 +924,14 @@ flowchart TB
 
 #### Progressive authoring guidance and typed execution
 
-Detailed data-driven authoring guidance uses MAF skill progressive disclosure
-instead of occupying every workflow-enabled turn's system instructions. The
-runtime packages a `data-driven-workflows` `SKILL.md`. Its name and short
-description are visible to direct workflow-enabled agents; the body is loaded
-only when the model decides a plan needs runtime conditions or collection fan-out.
-The narrow skill description is the selection pointer; the shared addendum does
-not mention the skill because E2E evaluation showed that even a qualified
-addendum pointer encouraged speculative loads for fixed DAGs. Static workflows
+Detailed data-driven authoring guidance uses native SDK skill loading instead
+of occupying every workflow-enabled turn's system instructions. The runtime
+packages a `data-driven-workflows` `SKILL.md`. Its name and short description
+are visible to direct workflow-enabled agents; the body is loaded only when the
+selected SDK decides a plan needs runtime conditions or collection fan-out. The
+narrow skill description is the selection pointer; the shared addendum does not
+mention the skill because E2E evaluation showed that even a qualified addendum
+pointer encouraged speculative loads for fixed DAGs. Static workflows
 therefore do not pay the detailed control-flow context cost.
 
 This runtime-owned skill is part of `workflows.enabled`, not the application's

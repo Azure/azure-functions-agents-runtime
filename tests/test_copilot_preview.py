@@ -299,7 +299,7 @@ def test_registered_mcp_and_skill_descriptors_are_supported(preview):
     assert capabilities.skill_catalog == (approved, excluded)
 
 
-def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
+def test_direct_preview_rejects_unsupported_surfaces(preview):
     resolved, capabilities = _sample()
     cases = [
         ("non_http_trigger", resolved.model_copy(update={"trigger": TriggerSpec(type="queue_trigger")})),
@@ -309,12 +309,15 @@ def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
         ("mcp_endpoint", resolved.model_copy(update={
             "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=True, mcp=True),
         })),
-        ("subagents", resolved.model_copy(update={"subagents": [SubagentRef(agent="specialist")]})),
-        ("workflows", resolved.model_copy(update={"workflows": WorkflowConfig(enabled=True)})),
     ]
     for diagnostic, candidate in cases:
         with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
             _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
+    for candidate in (
+        resolved.model_copy(update={"subagents": [SubagentRef(agent="specialist")]}),
+        resolved.model_copy(update={"workflows": WorkflowConfig(enabled=True)}),
+    ):
+        _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
 
 
 def test_direct_preview_accepts_explicit_host_system_tools(preview):
@@ -327,6 +330,16 @@ def test_direct_preview_accepts_explicit_host_system_tools(preview):
             endpoint="https://fixture.dynamicsessions.io"
         ),
     })
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+
+def test_workflow_management_delegate_namespace_is_not_a_collision(preview):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(update={
+        "subagents": [SubagentRef(agent="billing")],
+        "workflows": WorkflowConfig(enabled=True),
+    })
+
     _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
@@ -539,7 +552,7 @@ def test_combined_tool_collision_fails_before_native_startup(preview, monkeypatc
     invoke.assert_not_called()
 
 
-def test_workflow_management_tools_qualify_for_adapter_but_workflows_stay_rejected(preview):
+def test_workflow_management_requires_bound_policy(preview):
     from azure_functions_agents.workflows.tools import build_workflow_tools
 
     durable_client = AsyncMock()
@@ -550,7 +563,7 @@ def test_workflow_management_tools_qualify_for_adapter_but_workflows_stay_reject
     assert [function.name for function in _preview.prepare_tools(workflow_tools)] == [
         "start_workflow", "get_workflow_status", "list_workflows", "cancel_workflow", "terminate_workflow",
     ]
-    with pytest.raises(UnsupportedCapabilityError, match="workflows"):
+    with pytest.raises(UnsupportedCapabilityError, match="per-agent workflow policy"):
         asyncio.run(runner.run_agent(
             "hello", tools=[], mcp_tools=[], workflow_enabled=True,
             workflow_durable_client=durable_client,
@@ -559,16 +572,19 @@ def test_workflow_management_tools_qualify_for_adapter_but_workflows_stay_reject
 
 def test_stream_and_leaf_roles_never_fall_back(preview, monkeypatch):
     monkeypatch.setattr(_maf_execution, "_build_agent_session", AsyncMock(side_effect=AssertionError))
+    invoke = AsyncMock(side_effect=CopilotPreviewError("native fixture failure"))
+    monkeypatch.setattr(_copilot, "run", invoke)
 
     async def collect():
         return [json.loads(event.removeprefix("data: ")) async for event in runner.run_agent_stream("hi")]
 
     assert [event["type"] for event in asyncio.run(collect())] == ["error"]
     resolved, capabilities = _sample()
-    with pytest.raises(UnsupportedCapabilityError, match="workflow_subagent"):
+    with pytest.raises(CopilotPreviewError, match="native fixture failure"):
         asyncio.run(runner.run_leaf_agent_task(
             resolved, capabilities, "hi", timeout=1, execution_role="workflow_subagent",
         ))
+    assert invoke.await_count == 2
 
 
 def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
@@ -608,15 +624,51 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
         assert requests[0][0] is requests[1][0]
         assert requests[0][0].app_root == SAMPLE.resolve()
         assert requests[0][0].name == "copilot"
-        for name in ("agent_main_builtin_chatstream", "agent_main_builtin_history"):
+        for name in ("agent_main_builtin_history",):
             response = await functions[name](SimpleNamespace(
                 headers={}, json=AsyncMock(return_value={"prompt": "must not run"}),
             ))
             assert response.status_code == 501
-        assert len(requests) == 2
+        response = await functions["agent_main_builtin_chatstream"](SimpleNamespace(
+            headers={}, json=AsyncMock(return_value={"prompt": "stream"}),
+        ))
+        assert response.status_code == 200
+        events = [json.loads(chunk.removeprefix("data: ")) async for chunk in response.body_iterator]
+        assert events[-1]["type"] == "done"
+        assert requests[-1][1].new_session is True
+        assert len(requests) == 3
         assert validations == ["main"]
 
     asyncio.run(call())
+
+
+def test_registered_stream_invalid_session_header_emits_sse_error(preview, monkeypatch):
+    invoke = AsyncMock(side_effect=AssertionError("native stream must not start"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+    app = create_function_app(SAMPLE)
+    stream = next(
+        function.get_user_function() for function in app.get_functions()
+        if function.get_function_name() == "agent_main_builtin_chatstream"
+    )
+
+    async def call():
+        response = await stream(
+            SimpleNamespace(
+                headers={"x-ms-session-id": "bad id!"},
+                json=AsyncMock(return_value={"prompt": "stream"}),
+            )
+        )
+        assert response.status_code == 200
+        return [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in response.body_iterator
+        ]
+
+    events = asyncio.run(call())
+
+    assert [event["type"] for event in events] == ["error"]
+    assert "Invalid session_id" in events[0]["content"]
+    invoke.assert_not_awaited()
 
 
 def test_registered_agent_model_override_reaches_copilot_provider(preview, monkeypatch, tmp_path):

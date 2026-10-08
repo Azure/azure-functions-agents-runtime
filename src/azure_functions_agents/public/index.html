@@ -1676,7 +1676,10 @@
 					: "Copilot";
 				setBubbleText(streamingBubble.bubble, "copilot", result.text);
 				setBubbleIntermediates(streamingBubble.bubble, []);
-				setBubbleMeta(streamingBubble.bubble, copilotMeta);
+				setBubbleMeta(
+					streamingBubble.bubble,
+					result.streamTruncated ? `${copilotMeta} • live updates truncated` : copilotMeta
+				);
 				liveDetails.responseIntermediate = result.details.responseIntermediate;
 				liveDetails.toolCalls = result.details.toolCalls;
 				attachBubbleDetails(streamingBubble.bubble, liveDetails);
@@ -2596,6 +2599,7 @@
 			let streamText = "";
 			let finalMessage = "";
 			let doneReceived = false;
+			let streamTruncated = false;
 			const intermediateResponses = [];
 			const toolCalls = [];
 			const seenToolStartKeys = new Set();
@@ -2751,6 +2755,11 @@
 					throw new Error(typeof event?.content === "string" && event.content.trim() ? event.content : "Streaming request failed.");
 				}
 
+				if (type === "stream_truncated") {
+					streamTruncated = true;
+					return;
+				}
+
 				if (type === "done") {
 					doneReceived = true;
 				}
@@ -2809,8 +2818,11 @@
 			});
 
 			return {
-				text: finalMessage || streamText || "(No response body)",
+				text: streamTruncated
+					? finalMessage || "(No response body)"
+					: finalMessage || streamText || "(No response body)",
 				sessionId: state.sessionId,
+				streamTruncated,
 				details
 			};
 		}
@@ -2887,7 +2899,10 @@
 					: "assistant";
 				setBubbleText(streamingBubble.bubble, "assistant", result.text);
 				setBubbleIntermediates(streamingBubble.bubble, []);
-				setBubbleMeta(streamingBubble.bubble, assistantMeta);
+				setBubbleMeta(
+					streamingBubble.bubble,
+					result.streamTruncated ? `${assistantMeta} • live updates truncated` : assistantMeta
+				);
 				liveDetails.responseIntermediate = result.details.responseIntermediate;
 				liveDetails.toolCalls = result.details.toolCalls;
 				attachBubbleDetails(streamingBubble.bubble, liveDetails);
