@@ -398,9 +398,26 @@ chat is a distinct surface: `registration/endpoints.py` validates its own
 `prompt` envelope and returns the chat result envelope, but does not apply an
 agent's authored `input_schema`, `response_example`, or `response_schema`.
 
-Debug UI, history projection, and non-HTTP triggers remain unsupported and are
-rejected before inference. History routes return 501 rather than success-shaped
-empty output. The SDK owns compaction and its artifacts; the host adds no
+Registered non-HTTP triggers and the built-in Debug UI use the existing
+registration, serialization, and shared-runner contracts; each trigger delivery
+gets one fresh native session. The Debug UI supports live chat, streaming, and
+explicit continuation with the Copilot native session ID, which is resumed and
+never recreated on failure. The history route keeps returning a 501 JSON error
+(no native-file projection into MAF history), and the UI shows a notice that
+earlier transcript messages are not restored. Trigger and Debug UI behavior is
+not live-qualified until a real Functions host exercises it; offline tests do
+not qualify a binding. The inbound built-in MCP endpoint also uses the bound
+runner, preserving prompt validation, extension-owned transport `sessionid`
+normalization, and error responses without fallback. This transport identity
+is not a public argument for choosing an agent session; missing native state
+on resume remains an error. Its `/runtime/webhooks/mcp` transport and
+system-key authentication are owned by the Functions MCP extension;
+`builtin_endpoints.http_auth` does not govern it. This endpoint is enabled but
+not live-qualified. Offline adapter tests, Core Tools/local-host evidence,
+and deployed-host evidence are distinct; only offline tests were collected
+for these entrypoint changes. Missing extensions causing host indexing
+failures are setup/integration failures, not runtime capability rejection.
+The SDK owns compaction and its artifacts; the host adds no
 summarizer or recovery controller. Operational setup, supported script forms,
 inspection, and cleanup details live in
 [copilot-preview-operations.md](copilot-preview-operations.md), and the runnable

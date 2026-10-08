@@ -58,6 +58,28 @@ HTTP and non-HTTP completion behavior, and the
 [queue workflow sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-queue-p0-report/README.md) for a
 runnable example.
 
+### Copilot preview
+
+When the internal, default-off Copilot preview is selected
+(`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), registered non-HTTP triggers use the same
+registration, JSON-safe binding serialization, and shared runner as MAF. Each
+Functions invocation creates one fresh Copilot session, including a batch
+delivery. Auth, tool, and workflow policies are unchanged.
+
+The inbound built-in MCP endpoint is also enabled through the bound runner
+with existing prompt and extension-owned transport `sessionid` handling
+(not a public agent-session argument). Its transport and system-key
+authentication belong to the Functions MCP extension, not
+`builtin_endpoints.http_auth` (see [Built-in endpoint authentication](#built-in-endpoint-authentication)).
+It remains not live-qualified.
+
+Evidence for these Copilot entrypoints is limited to offline unit/component
+tests. No Core Tools/local-host indexing and binding-delivery evidence was
+collected for this change, and no deployed-host evidence was collected.
+**Not live-qualified** means those layers are unverified, not that the
+runtime rejects these triggers. Missing extensions that prevent host indexing
+are setup/integration failures, not runtime unsupported-capability verdicts.
+
 ## Supported Trigger Types
 
 | Agent `trigger.type` | Azure Functions decorator | Status | Notes |

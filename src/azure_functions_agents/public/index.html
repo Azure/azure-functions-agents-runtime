@@ -1759,6 +1759,7 @@
 						restoredGreetingContent.textContent =
 							"Welcome back — reconnected to your previous session. Active workflows will appear below within a few seconds.";
 					}
+					void loadSessionHistory(state.sessionId, { announce: false, replaceView: false });
 				}
 			} catch (_err) {
 				// Network error during probe — leave capability "unknown" so
@@ -2188,6 +2189,10 @@
 			historyReplayInFlight = false;
 		}
 
+		const HISTORY_UNAVAILABLE_NOTICE =
+			"Earlier transcript messages are not restored for this session. " +
+			"Your next message still continues it.";
+
 		// Fetch and repaint a session's prior transcript from the server so a
 		// resumed/restored session shows its history instead of an empty
 		// window. Best-effort: older servers (no /history route), storage that
@@ -2220,8 +2225,16 @@
 						method: "GET",
 						headers: { "x-ms-session-id": requestedId, "Accept": "application/json" },
 					});
-					// A 404 means this server predates the history endpoint —
-					// stay silent and leave whatever is already on screen.
+					// A 501 means this app's harness does not expose transcripts.
+					// Say so for the still-current session; other failures (e.g. a
+					// 404 from a server that predates the endpoint) stay silent.
+					if (resp.status === 501) {
+						if (state.sessionId === requestedId && generation === historyReplayGeneration) {
+							renderBubble("copilot", HISTORY_UNAVAILABLE_NOTICE, "History");
+							scrollChatToBottom();
+						}
+						return;
+					}
 					if (!resp.ok) return;
 					payload = await resp.json();
 				} catch (_e) {

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from azure.functions.timer import TimerRequest
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
@@ -299,21 +300,17 @@ def test_registered_mcp_and_skill_descriptors_are_supported(preview):
     assert capabilities.skill_catalog == (approved, excluded)
 
 
-def test_direct_preview_rejects_unsupported_surfaces(preview):
+def test_direct_preview_accepts_existing_entrypoints(preview):
     resolved, capabilities = _sample()
-    cases = [
-        ("non_http_trigger", resolved.model_copy(update={"trigger": TriggerSpec(type="queue_trigger")})),
-        ("debug_chat_ui", resolved.model_copy(update={
-            "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=False),
-        })),
-        ("mcp_endpoint", resolved.model_copy(update={
-            "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=True, mcp=True),
-        })),
-    ]
-    for diagnostic, candidate in cases:
-        with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
-            _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
+    candidate = resolved.model_copy(update={
+        "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=True, mcp=True),
+    })
+    _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
     for candidate in (
+        resolved.model_copy(update={"trigger": TriggerSpec(type="queue_trigger")}),
+        resolved.model_copy(update={
+            "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=False),
+        }),
         resolved.model_copy(update={"subagents": [SubagentRef(agent="specialist")]}),
         resolved.model_copy(update={"workflows": WorkflowConfig(enabled=True)}),
     ):
@@ -638,6 +635,120 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
         assert requests[-1][1].new_session is True
         assert len(requests) == 3
         assert validations == ["main"]
+
+    asyncio.run(call())
+
+
+def test_copilot_timer_trigger_and_debug_ui_register_through_shared_runner(preview, monkeypatch):
+    app_root = preview / "app"
+    app_root.mkdir()
+    (app_root / "main.agent.md").write_text(
+        "---\n"
+        "name: Timer\n"
+        "description: Synthetic timer agent.\n"
+        "builtin_endpoints:\n  chat_api: true\n  debug_chat_ui: true\n  mcp: false\n"
+        "trigger:\n  type: timer_trigger\n  args:\n    schedule: '0 */5 * * * *'\n"
+        "mcp: false\nskills: false\ntools: false\n"
+        "---\nSummarize the trigger.\n",
+        encoding="utf-8",
+    )
+    requests = []
+
+    async def invoke(harness, request):
+        requests.append(request)
+        return runner.AgentResult(request.session_id, "reply")
+
+    monkeypatch.setattr(_copilot, "run", invoke)
+    app = create_function_app(app_root)
+    functions = {f.get_function_name(): f.get_user_function() for f in app.get_functions()}
+
+    async def call():
+        await functions["main"](
+            TimerRequest(past_due=True, schedule_status={}, schedule={})
+        )
+        await functions["main"](
+            TimerRequest(past_due=False, schedule_status={}, schedule={})
+        )
+        history = await functions["agent_main_builtin_history"](
+            SimpleNamespace(headers={"x-ms-session-id": "caller-session"})
+        )
+        assert history.status_code == 501
+        assert "error" in json.loads(history.body)
+
+    asyncio.run(call())
+    assert [request.new_session for request in requests] == [True, True]
+    assert requests[0].session_id != requests[1].session_id
+    assert '"past_due": true' in requests[0].prompt
+
+def test_registered_copilot_mcp_preserves_prompt_sessions_and_errors(preview, monkeypatch):
+    app_root = preview / "mcp-app"
+    app_root.mkdir()
+    (app_root / "main.agent.md").write_text(
+        (SAMPLE / "main.agent.md").read_text(encoding="utf-8").replace(
+            "  mcp: false", "  mcp: true"
+        ),
+        encoding="utf-8",
+    )
+    requests = []
+    fail_resume = False
+
+    async def invoke(harness, request):
+        assert harness.name is HarnessKind.COPILOT
+        requests.append(request)
+        if fail_resume:
+            raise CopilotPreviewError("Native resume failed.")
+        return runner.AgentResult(request.session_id, "reply")
+
+    monkeypatch.setattr(_copilot, "run", invoke)
+    app = create_function_app(app_root)
+    function = next(
+        f for f in app.get_functions() if f.get_function_name() == "agent_main_builtin_mcp"
+    )
+    binding = next(b.get_dict_repr() for b in function.get_bindings()
+                   if b.get_dict_repr()["type"] == "mcpToolTrigger")
+    assert binding["name"] == "context"
+    assert [prop["propertyName"] for prop in json.loads(binding["toolProperties"])] == ["prompt"]
+    handler = function.get_user_function()
+    # Later flag changes must not switch an already-registered handler to MAF.
+    monkeypatch.setenv(_harness.FLAG, "false")
+
+    async def call():
+        nonlocal fail_resume
+        for arguments in ({}, {"prompt": " "}, {"prompt": 42}):
+            response = json.loads(await handler(json.dumps({"arguments": arguments})))
+            assert response == {"error": "Missing 'prompt'"}
+        assert requests == []
+        malformed = json.loads(await handler("{"))
+        assert "error" in malformed
+        assert requests == []
+
+        first = json.loads(await handler(json.dumps({"arguments": {"prompt": " first "}})))
+        assert first["response"] == "reply"
+        assert first["session_id"] == requests[0].session_id
+        assert requests[0].prompt == "first"
+        assert requests[0].new_session is True
+        # The extension supplies transport identity, not the returned agent ID.
+        # The mocked runner represents an existing native session for that identity.
+        transport_context = json.dumps({
+            "arguments": {"prompt": "continue"},
+            "sessionid": "transport/session",
+        })
+        mapped = json.loads(await handler(transport_context))
+        assert mapped["session_id"].startswith("mcp-")
+        assert mapped["session_id"] != first["session_id"]
+        assert requests[-1].new_session is False
+        repeated = json.loads(await handler(transport_context))
+        assert repeated["session_id"] == mapped["session_id"]
+        assert requests[-1].session_id == mapped["session_id"]
+        assert requests[-1].new_session is False
+
+        fail_resume = True
+        calls_before_failure = len(requests)
+        failed = json.loads(await handler(transport_context))
+        assert failed == {"error": "Native resume failed."}
+        assert len(requests) == calls_before_failure + 1
+        assert requests[-1].new_session is False
+        assert requests[-1].session_id == mapped["session_id"]
 
     asyncio.run(call())
 
