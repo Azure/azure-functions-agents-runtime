@@ -298,8 +298,9 @@ Use isolated local settings or offline fixtures, not a customer's storage:
    `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` value fails app construction.
 2. **Configured Blob failure** — an invalid or unavailable configured storage
    target surfaces an error rather than writing session files locally.
-3. **Transcript replay** — `/agents/main/history` returns a 501 JSON error rather than an empty
-   success shape (the Debug UI turns it into a "transcript not restored" notice). `/agents/main/chatstream` supports SSE; a native
+3. **Transcript replay** — `/agents/main/history` returns a 501 JSON error rather
+   than an empty success shape (the Debug UI turns it into a "transcript not
+   restored" notice). `/agents/main/chatstream` supports SSE; a native
    creation/catalog failure emits terminal `error` without advertising a session.
 
 ## Known limits
