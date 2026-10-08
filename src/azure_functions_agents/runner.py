@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import aclosing
@@ -41,7 +40,7 @@ from .registration.capabilities import (
     _merge_skill_descriptors,
 )
 from .registration.catalog import AgentCatalog, CatalogEntry
-from .streaming_events import HostedSkillEvent, HostedSkillEventKind
+from .streaming_events import AgentStreamEvent, AgentStreamEventKind, agent_event_to_sse
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -409,9 +408,12 @@ async def run_agent_events(
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    skills: Sequence[SkillDescriptor] | None = None,
+    skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
+    _session_is_new: bool = False,
     _execution_surface: str | None = None,
-) -> AsyncGenerator[HostedSkillEvent]:
+) -> AsyncGenerator[AgentStreamEvent]:
     """Yield harness-neutral structured events through the bound harness."""
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
@@ -441,11 +443,14 @@ async def run_agent_events(
             subagents=subagents,
             catalog=catalog,
             workflow_policy=workflow_policy,
+            skills=skills,
+            skill_catalog=skill_catalog,
+            session_is_new=_session_is_new,
             execution_surface=_execution_surface,
         )
-    except (ValueError, RuntimeError) as exc:
+    except Exception as exc:
         logger.error("Agent harness selection failed: %s", exc)
-        yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
+        yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
         return
 
     async with aclosing(stream) as stream:
@@ -480,41 +485,31 @@ async def run_agent_stream(
     _harness: AppHarness | None = None,
 ) -> AsyncIterator[str]:
     """Yield the existing SSE vocabulary under the selected app context."""
-    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
-    deadline = asyncio.get_running_loop().time() + timeout
-    try:
-        harness = _harness or get_harness()
-        selected = get_agent_runner(harness)
-        stream = selected.run_agent_stream(
-            prompt,
-            instructions=instructions,
-            timeout=timeout,
-            deadline=deadline,
-            tools=tools,
-            mcp_tools=mcp_tools,
-            skill_paths=skill_paths,
-            skills=skills,
-            skill_catalog=skill_catalog,
-            model=model,
-            session_id=session_id,
-            sandbox_tools=sandbox_tools,
-            system_addendum=system_addendum,
-            workflow_enabled=workflow_enabled,
-            workflow_durable_client=workflow_durable_client,
-            workflow_agent_slug=workflow_agent_slug,
-            agent_name=agent_name,
-            display_name=display_name,
-            web_request_tools=web_request_tools,
-            agent_configuration=agent_configuration,
-            subagents=subagents,
-            catalog=catalog,
-            workflow_policy=workflow_policy,
-        )
-    except Exception as exc:
-        logger.error("Agent harness selection failed: %s", exc)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-        return
-    async with aclosing(stream) as stream:
-        async for event in stream:
-            yield event
+    events = run_agent_events(
+        prompt,
+        instructions=instructions,
+        timeout=timeout,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        skills=skills,
+        skill_catalog=skill_catalog,
+        model=model,
+        session_id=session_id,
+        sandbox_tools=sandbox_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        display_name=display_name,
+        web_request_tools=web_request_tools,
+        agent_configuration=agent_configuration,
+        subagents=subagents,
+        catalog=catalog,
+        workflow_policy=workflow_policy,
+        _harness=_harness,
+    )
+    async with aclosing(events) as events:
+        async for event in events:
+            yield agent_event_to_sse(event)

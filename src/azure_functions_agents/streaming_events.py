@@ -9,8 +9,8 @@ from enum import StrEnum
 from typing import Any
 
 
-class HostedSkillEventKind(StrEnum):
-    """Stable event kinds exposed by HostedSkill streaming."""
+class AgentStreamEventKind(StrEnum):
+    """Stable event kinds emitted by harness-neutral agent streaming."""
 
     SESSION = "session"
     DELTA = "delta"
@@ -23,10 +23,10 @@ class HostedSkillEventKind(StrEnum):
 
 
 @dataclass(frozen=True)
-class HostedSkillEvent:
+class AgentStreamEvent:
     """One structured event from an agent stream."""
 
-    kind: HostedSkillEventKind
+    kind: AgentStreamEventKind
     session_id: str | None = None
     content: str | None = None
     tool_call_id: str | None = None
@@ -35,10 +35,10 @@ class HostedSkillEvent:
     result: Any = None
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> HostedSkillEvent:
+    def from_dict(cls, payload: Mapping[str, Any]) -> AgentStreamEvent:
         """Create an event from the runner's existing payload shape."""
         return cls(
-            HostedSkillEventKind(payload["type"]),
+            AgentStreamEventKind(payload["type"]),
             session_id=payload.get("session_id"),
             content=payload.get("content"),
             tool_call_id=payload.get("tool_call_id"),
@@ -50,16 +50,16 @@ class HostedSkillEvent:
     def to_dict(self) -> dict[str, Any]:
         """Return the existing public stream payload shape."""
         payload: dict[str, Any] = {"type": self.kind.value}
-        if self.kind is HostedSkillEventKind.SESSION:
+        if self.kind is AgentStreamEventKind.SESSION:
             payload["session_id"] = self.session_id
         elif self.kind in {
-            HostedSkillEventKind.DELTA,
-            HostedSkillEventKind.MESSAGE,
-            HostedSkillEventKind.INTERMEDIATE,
-            HostedSkillEventKind.ERROR,
+            AgentStreamEventKind.DELTA,
+            AgentStreamEventKind.MESSAGE,
+            AgentStreamEventKind.INTERMEDIATE,
+            AgentStreamEventKind.ERROR,
         }:
             payload["content"] = self.content
-        elif self.kind is HostedSkillEventKind.TOOL_START:
+        elif self.kind is AgentStreamEventKind.TOOL_START:
             payload.update(
                 {
                     "tool_call_id": self.tool_call_id,
@@ -67,7 +67,7 @@ class HostedSkillEvent:
                     "arguments": self.arguments,
                 }
             )
-        elif self.kind is HostedSkillEventKind.TOOL_END:
+        elif self.kind is AgentStreamEventKind.TOOL_END:
             payload.update(
                 {
                     "tool_call_id": self.tool_call_id,
@@ -77,6 +77,11 @@ class HostedSkillEvent:
             )
         return payload
 
-    def to_sse(self) -> str:
-        """Serialize this event using the existing HTTP SSE contract."""
-        return f"data: {json.dumps(self.to_dict(), default=str)}\n\n"
+
+def agent_event_to_sse(event: AgentStreamEvent) -> str:
+    """Serialize a neutral event using the existing HTTP SSE contract."""
+    return f"data: {json.dumps(event.to_dict(), default=str)}\n\n"
+
+
+HostedSkillEventKind = AgentStreamEventKind
+HostedSkillEvent = AgentStreamEvent

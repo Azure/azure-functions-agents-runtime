@@ -131,7 +131,12 @@ from .runner import (  # noqa: E402
     run_agent,
     run_agent_stream,
 )
-from .streaming_events import HostedSkillEvent, HostedSkillEventKind  # noqa: E402
+from .streaming_events import (  # noqa: E402
+    AgentStreamEvent,
+    AgentStreamEventKind,
+    HostedSkillEvent,
+    HostedSkillEventKind,
+)
 from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 from .system_tools.web_request import create_web_request_tools  # noqa: E402
 from .workflows.context import (  # noqa: E402
@@ -157,6 +162,8 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
+    "AgentStreamEvent",
+    "AgentStreamEventKind",
     "ClientManager",
     "HostedSkill",
     "HostedSkillDFApp",

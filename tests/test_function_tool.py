@@ -330,10 +330,17 @@ async def test_maf_adapter_uses_skill_descriptor_paths(
     }
     if streaming:
         events = [
-            event async for event in _maf_execution.run_stream(harness, request, display_name=None, **options)
+            event
+            async for event in _maf_execution.run_events(
+                harness,
+                request,
+                display_name=None,
+                execution_surface=None,
+                **options,
+            )
         ]
         assert len(events) == 1
-        assert "captured source paths" in events[0]
+        assert "captured source paths" in (events[0].content or "")
     else:
         with pytest.raises(RuntimeError, match="captured source paths"):
             await _maf_execution.run(harness, request, **options)

@@ -27,7 +27,7 @@ from ...discovery.tools import discover_user_tools
 from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
-from ...streaming_events import HostedSkillEvent, HostedSkillEventKind
+from ...streaming_events import AgentStreamEvent, AgentStreamEventKind
 from .. import _harness_execution
 from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest
 from .._history_identity import validate_agent_slug
@@ -742,7 +742,7 @@ async def run_events(
     catalog: AgentCatalog | None,
     workflow_policy: WorkflowPlanPolicy | None,
     execution_surface: str | None,
-) -> AsyncGenerator[HostedSkillEvent]:
+) -> AsyncGenerator[AgentStreamEvent]:
     """Yield harness-neutral structured events for a selected MAF invocation."""
     loop = asyncio.get_running_loop()
     deadline = request.deadline
@@ -789,10 +789,10 @@ async def run_events(
         ) as span:
             span.set_attribute("af.agent.outcome", "error")
             span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-            yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
+            yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
         return
 
-    yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id=resolved_id)
+    yield AgentStreamEvent(AgentStreamEventKind.SESSION, session_id=resolved_id)
 
     span_attributes = {
         "af.agent.name": agent_name,
@@ -843,24 +843,24 @@ async def run_events(
 
                 async def emit_tool_start_if_ready(
                     call_id: str, event: ToolCallEvidence
-                ) -> AsyncIterator[HostedSkillEvent]:
+                ) -> AsyncIterator[AgentStreamEvent]:
                     if call_id in emitted_tool_calls:
                         return
                     if not _is_complete_json_argument(event["arguments"]):
                         return
                     emitted_tool_calls.add(call_id)
-                    yield HostedSkillEvent.from_dict(event)
+                    yield AgentStreamEvent.from_dict(event)
 
                 async def emit_tool_start_before_result(
                     call_id: str | None,
-                ) -> AsyncIterator[HostedSkillEvent]:
+                ) -> AsyncIterator[AgentStreamEvent]:
                     if call_id is None or call_id in emitted_tool_calls:
                         return
                     event = pending_tool_calls.get(call_id)
                     if event is None:
                         return
                     emitted_tool_calls.add(call_id)
-                    yield HostedSkillEvent.from_dict(event)
+                    yield AgentStreamEvent.from_dict(event)
 
                 stream: _AgentResponseStream | None = None
                 stream_settled = False
@@ -899,21 +899,21 @@ async def run_events(
                             if ctype == "text":
                                 text = _content_text(item)
                                 if text:
-                                    yield HostedSkillEvent(
-                                        HostedSkillEventKind.DELTA,
+                                    yield AgentStreamEvent(
+                                        AgentStreamEventKind.DELTA,
                                         content=text,
                                     )
                             elif ctype == "text_reasoning":
                                 text = _content_text(item)
                                 if text:
-                                    yield HostedSkillEvent(
-                                        HostedSkillEventKind.INTERMEDIATE,
+                                    yield AgentStreamEvent(
+                                        AgentStreamEventKind.INTERMEDIATE,
                                         content=text,
                                     )
                             elif ctype == "function_call":
                                 call_id, event = buffer_function_call(item)
                                 if call_id is None:
-                                    yield HostedSkillEvent.from_dict(event)
+                                    yield AgentStreamEvent.from_dict(event)
                                 else:
                                     async for output in emit_tool_start_if_ready(call_id, event):
                                         yield output
@@ -924,15 +924,15 @@ async def run_events(
                                 result_event = _function_result_event(item)
                                 if _looks_like_tool_error(result_event.get("result")):
                                     ordinary_tool_error_count += 1
-                                yield HostedSkillEvent.from_dict(result_event)
+                                yield AgentStreamEvent.from_dict(result_event)
                     for call_id, event in pending_tool_calls.items():
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
-                            yield HostedSkillEvent.from_dict(event)
+                            yield AgentStreamEvent.from_dict(event)
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
                     try:
-                        yield HostedSkillEvent(HostedSkillEventKind.DONE)
+                        yield AgentStreamEvent(AgentStreamEventKind.DONE)
                     finally:
                         usage_details = None
                         try:
@@ -952,8 +952,8 @@ async def run_events(
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
-                    yield HostedSkillEvent(
-                        HostedSkillEventKind.ERROR,
+                    yield AgentStreamEvent(
+                        AgentStreamEventKind.ERROR,
                         content=f"Timeout after {timeout}s",
                     )
                 except asyncio.CancelledError:
@@ -969,7 +969,7 @@ async def run_events(
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                    yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
+                    yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
                 finally:
                     if not stream_settled:
                         exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
@@ -983,8 +983,8 @@ async def run_events(
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
-            yield HostedSkillEvent(
-                HostedSkillEventKind.ERROR,
+            yield AgentStreamEvent(
+                AgentStreamEventKind.ERROR,
                 content=f"Timeout after {timeout}s",
             )
         finally:
@@ -993,47 +993,3 @@ async def run_events(
                 (delegate_error_tracker.count if delegate_error_tracker else 0)
                 + ordinary_tool_error_count,
             )
-
-
-async def run_stream(
-    harness: AppHarness,
-    request: HarnessRequest,
-    *,
-    timeout: float,
-    instructions: str | None,
-    system_addendum: str | None,
-    session_id: str | None,
-    model: str | None,
-    agent_name: str | None,
-    display_name: str | None,
-    agent_configuration: AgentConfiguration | None,
-    workflow_enabled: bool,
-    workflow_durable_client: DurableFunctionsClient | None,
-    workflow_agent_slug: str | None,
-    subagents: list[SubagentRef] | None,
-    catalog: AgentCatalog | None,
-    workflow_policy: WorkflowPlanPolicy | None,
-) -> AsyncGenerator[str]:
-    """Serialize canonical MAF events with the existing SSE contract."""
-    events = run_events(
-        harness,
-        request,
-        instructions=instructions,
-        timeout=timeout,
-        model=model,
-        session_id=session_id,
-        system_addendum=system_addendum,
-        workflow_enabled=workflow_enabled,
-        workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
-        agent_name=agent_name,
-        display_name=display_name,
-        agent_configuration=agent_configuration,
-        subagents=subagents,
-        catalog=catalog,
-        workflow_policy=workflow_policy,
-        execution_surface=None,
-    )
-    async with contextlib.aclosing(events):
-        async for event in events:
-            yield event.to_sse()

@@ -32,6 +32,8 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "DEFAULT_MODEL",
         "DEFAULT_TIMEOUT",
         "AgentResult",
+        "AgentStreamEvent",
+        "AgentStreamEventKind",
         "ClientManager",
         "HostedSkill",
         "HostedSkillDFApp",

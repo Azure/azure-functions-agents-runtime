@@ -74,7 +74,7 @@ def install_agent(monkeypatch, agent, *, tracker=None):
 
 @pytest.mark.parametrize(
     ("public_name", "adapter_name"),
-    [("run_agent", "run"), ("run_agent_stream", "run_stream")],
+    [("run_agent", "run"), ("run_agent_events", "run_events")],
 )
 def test_public_entrypoints_keep_explicit_parameters_and_adapters_accept_neutral_requests(
     public_name, adapter_name

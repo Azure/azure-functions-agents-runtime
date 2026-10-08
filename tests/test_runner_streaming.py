@@ -28,7 +28,7 @@ from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, d
 from azure_functions_agents.harness import _harness_execution as shared
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
-from azure_functions_agents.streaming_events import HostedSkillEventKind
+from azure_functions_agents.streaming_events import HostedSkillEvent, HostedSkillEventKind
 
 
 @pytest.mark.asyncio
@@ -37,11 +37,11 @@ async def test_closing_the_public_stream_closes_the_selected_generator(monkeypat
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
 
     class _SelectedRunner:
-        def run_agent_stream(self, _prompt, **kwargs):
+        def run_agent_events(self, _prompt, **kwargs):
             async def _stream():
                 try:
-                    yield "data: fixture\n\n"
-                    yield "data: unused\n\n"
+                    yield HostedSkillEvent(HostedSkillEventKind.DELTA, content="fixture")
+                    yield HostedSkillEvent(HostedSkillEventKind.DELTA, content="unused")
                 finally:
                     closed.append(True)
 
@@ -50,7 +50,7 @@ async def test_closing_the_public_stream_closes_the_selected_generator(monkeypat
     monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _SelectedRunner())
     stream = runner.run_agent_stream("fixture", _harness=harness)
 
-    assert await anext(stream) == "data: fixture\n\n"
+    assert await anext(stream) == 'data: {"type": "delta", "content": "fixture"}\n\n'
     await stream.aclose()
     assert closed == [True]
 

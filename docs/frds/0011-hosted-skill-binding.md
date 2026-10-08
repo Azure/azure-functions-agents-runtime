@@ -4,7 +4,7 @@ title: HostedSkill binding
 status: Finalized
 author: victoriahall
 created: 2026-10-05
-updated: 2026-10-05
+updated: 2026-10-08
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1362
 pull_requests: []
@@ -204,7 +204,7 @@ class HostedSkill:
         prompt: str,
         *,
         session_id: str | None = None,
-    ) -> AsyncIterator[HostedSkillEvent]: ...
+    ) -> AsyncGenerator[HostedSkillEvent, None]: ...
 ```
 
 `HostedSkill` has no `__call__` method. A blank or non-string prompt is rejected
@@ -222,14 +222,16 @@ buckets. A caller-provided ID is also the returned `AgentResult.session_id`.
 
 `run()` returns the existing `AgentResult`. It forwards the selected entry's
 resolved instructions, model, timeout, `agent_configuration`, filtered user
-tools, MCP tools, skill paths, and `web_request` tools. It creates ACA Dynamic
-Sessions tools after resolving the run's session ID so `execute_python` uses
-that same public identity. It passes shallow copies of mutable tool, MCP, and
-skill-path lists so neither the runner nor an SDK can mutate the catalog's
-capability lists. HostedSkill uses the same process-wide ACA credential and HTTP
-connection pools as existing agent surfaces; the sandbox module continues to
-own those shared resources while each method call owns only its bound tool
-closure and stream lifecycle.
+tools, MCP tools, approved skill descriptors, full skill ownership catalog, and
+`web_request` tools. It creates ACA Dynamic Sessions tools after resolving the
+run's session ID so `execute_python` uses that same public identity. An omitted
+session ID is generated and marked new; an explicit ID is treated as a resume
+without probing history. It passes shallow copies of mutable capability lists so
+neither the runner nor an SDK can mutate the catalog. HostedSkill uses the same
+process-wide ACA credential and HTTP connection pools as existing agent surfaces;
+the sandbox module continues to own those shared resources while each method call
+owns only its bound tool closure and stream lifecycle. The outer HostedSkill span
+owns the one-shot `display_name` and `execution_surface="hosted_skill"` telemetry.
 
 If `response_example` or `response_schema` is configured, HostedSkill prepends
 the same response-format instructions used by HTTP handlers and validates the
@@ -239,9 +241,10 @@ valid `AgentResult`.
 
 ### 4.4 Structured streaming
 
-`stream()` returns harness-neutral `HostedSkillEvent` values rather than
-HTTP/SSE strings. A frozen event type and finite `HostedSkillEventKind` describe
-the existing public vocabulary:
+`stream()` returns harness-neutral `AgentStreamEvent` values rather than
+HTTP/SSE strings. A frozen event type and finite `AgentStreamEventKind` describe
+the existing public vocabulary. `HostedSkillEvent` and `HostedSkillEventKind`
+remain aliases so the initially reviewed HostedSkill API stays source-compatible:
 
 - `session` with the resolved session ID;
 - `delta`, `message`, or `intermediate` with content;
@@ -249,18 +252,43 @@ the existing public vocabulary:
 - `tool_end` with call ID, name, and result;
 - terminal `done` or `error`.
 
-The runner owns one structured event iterator. Existing `run_agent_stream()`
-becomes an adapter that serializes those events to its unchanged
-`data: <JSON>\n\n` contract. Existing event ordering, fragmented tool-argument
-coalescing, deadlines, stream finalization, cancellation, usage recording,
-tool-error accounting, spans, and unknown-content handling remain authoritative.
+Structured events are an optional runner capability, separate from the required
+one-shot and leaf-execution backend contract. The MAF adapter implements that
+capability by translating SDK updates into neutral events. A backend without the
+capability, including the Copilot preview harness, does not implement a streaming
+stub; the bound runner rejects streaming centrally with
+`UnsupportedCapabilityError` synchronously when `AgentRunner.run_agent_events()`
+is called, before backend acquisition or execution. The diagnostic states that
+the selected harness does not support streaming without naming an SDK-specific
+recovery path. The public structured iterator retains the existing terminal
+`error` event contract, and the SSE adapter serializes that same event, so callers
+do not receive an `AttributeError` and existing HTTP behavior remains unchanged.
+
+The optional capability accepts the same neutral inventories and execution
+metadata as existing SSE execution, including approved `skills`, the full
+`skill_catalog`, `display_name`, `execution_surface`, and whether the session is
+new. For streaming, HostedSkill passes the selected entry's name as `display_name`,
+`execution_surface="hosted_skill"`, the omitted-versus-explicit session result,
+and the descriptor inventories directly; no path re-discovers or reconstructs
+those values.
+
+Existing `run_agent_stream()` is the only SSE adapter. Above the harness backend
+boundary, it serializes neutral events to its unchanged `data: <JSON>\n\n`
+contract. Explicitly closing or cancelling that adapter closes its owned event
+iterator. Event objects own their structured payload conversion but do not own
+HTTP transport serialization.
+Existing event ordering, fragmented tool-argument coalescing, deadlines, stream
+finalization, cancellation, usage recording, tool-error accounting, spans, and
+unknown-content handling remain authoritative in the MAF event implementation.
 
 The structured iterator buffers function-call argument chunks just as the
 current runner does: it emits `tool_start` when the accumulated argument value
 is complete JSON, or immediately before the corresponding result/end of stream
 if completion cannot be detected sooner. Consumers receive one coalesced start,
-not raw MAF fragments. `session` is first; content, reasoning, and tool events
-then retain provider order; exactly one terminal `done` or `error` is last.
+not raw MAF fragments. For an execution that reaches the backend, `session` is
+first; content, reasoning, and tool events then retain provider order; exactly
+one terminal `done` or `error` is last. Capability rejection occurs before a
+session exists and therefore emits only the terminal `error` event.
 
 An error event is terminal and is never followed by `done`. Consumer
 cancellation propagates rather than becoming an error event. If a response
@@ -272,12 +300,15 @@ validation as `run()`. It cannot retract already consumed deltas; validation
 failure emits a non-sensitive response-contract error and suppresses `done`.
 Consumers that need the final JSON must likewise accumulate text events.
 
-When a consumer breaks iteration, cancels, or closes the generator, a
-`try`/`finally` boundary closes the core iterator. Generator exit and task
-cancellation reach the runner's existing MAF finalization path, which settles
-usage and provider callbacks; MCP and other context-managed execution resources
-are released by the same agent/session teardown. Cancellation is not converted
-to a model-visible or HostedSkill error event.
+Explicit generator close and task cancellation reach the runner's existing MAF
+finalization path, which settles usage and provider callbacks; MCP and other
+context-managed execution resources are released by the same agent/session
+teardown. Cancellation is not converted to a model-visible or HostedSkill error
+event and propagates through every adapter. A plain `break` does not itself close
+an async generator. Callers that stop consuming a public iterator early must use
+`contextlib.aclosing()` or call `aclose()` for deterministic release; each
+internal adapter uses `aclosing()` so closing its outer iterator immediately
+closes the iterator it owns.
 
 ### 4.5 Provider and Foundry contract
 
@@ -321,7 +352,12 @@ them:
 
 The decorator is a method on an already constructed enhanced app and reads that
 app's frozen harness directly. Copilot rejection is therefore a constant-time
-check with no SDK import or process startup.
+check with no SDK import or process startup, so HostedSkill never reaches the
+runner's generic absent-stream-capability path. Public runner callers can reach
+that path: `runner.run_agent_events()` catches the bound runner's synchronous
+`UnsupportedCapabilityError` and yields one terminal `error` event, which
+`HostedSkill.stream()` would forward for any future harness accepted by its
+decorator but lacking streaming.
 
 The selected agent may still define its own trigger or built-in endpoint; those
 surfaces coexist and keep their existing behavior. `input_schema` is not applied
@@ -380,6 +416,8 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
 | 13 | Enhanced app typing | Wrapper / protocol-only return / concrete SDK subclasses | Return public `HostedSkillFunctionApp` or `HostedSkillDFApp` subclasses sharing one mixin | Agent | 2026-10-05 |
 | 14 | Tool-call streaming | Raw argument fragments / coalesced starts | Preserve current coalescing and emit complete `tool_start` arguments when detectable | Agent | 2026-10-05 |
 | 15 | Shared catalog safety | Pass mutable lists directly / copy per call | Shallow-copy mutable capability lists before handing them to the runner or SDK | Agent | 2026-10-05 |
+| 16 | Harness streaming contract | Required methods with unsupported stubs / optional neutral event capability / backend-owned SSE | Make neutral event streaming an optional capability implemented by MAF; reject its absence centrally and serialize SSE above backend execution | Human | 2026-10-08 |
+| 17 | Event compatibility names | HostedSkill-specific primary classes / neutral primary classes only / neutral classes with runtime aliases | Supersede the HostedSkill-specific owning names from the original streaming decision with `AgentStreamEvent` and `AgentStreamEventKind`; keep the reviewed HostedSkill names as runtime aliases | Human | 2026-10-08 |
 
 ## 6. Test plan
 
@@ -401,7 +439,12 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
 - [ ] Unit: structured streaming covers event ordering, fragmented tool
   arguments, results, reasoning, timeout, provider/build failure, terminal
   errors, schema failure, consumer cancellation, generator close, resource
-  finalization, usage, and spans; existing SSE bytes remain unchanged.
+  finalization, usage, and spans; existing SSE bytes remain unchanged for every
+  event kind. It also covers runtime alias identity, full skill inventory and
+  new-session forwarding, stream display/surface telemetry, bound optional-
+  capability rejection before backend/native acquisition, public conversion to
+  a terminal error event, and close propagation through HostedSkill, runner,
+  and MAF.
 - [ ] Unit: decorator application rejects unknown slugs, subagents, workflows,
   Copilot preview, and missing built-in provider settings with safe diagnostics.
 - [ ] Unit: Foundry preflight requires a project endpoint, permits existing
@@ -428,7 +471,8 @@ selection.
 ## 7. Docs impact
 
 - [ ] `docs/architecture.md` - add the enhanced app/decorator registration path,
-  catalog-backed facade, structured stream core, and package ownership.
+  catalog-backed facade, optional structured-event capability, runner-owned SSE
+  adapter, MAF event core, Copilot capability boundary, and package ownership.
 - [ ] `docs/front-matter-spec.md` - document identity-slug selection,
   endpoint-less internal agents, reused versus surface-only fields, and version
   1 limitations.
@@ -452,4 +496,11 @@ selection.
   removed for inert entries. Separate subclass feasibility was verified against
   the installed Functions and Durable Functions SDKs. A focused second pass
   found no remaining blockers and marked the design ready for human sign-off.
-- **Human sign-off:** victoriahall, 2026-10-05. Approved for implementation.
+- **Human sign-off:** victoriahall, 2026-10-05. Approved the original feature
+  contract for implementation.
+- **Refinement sign-off:** victoriahall, 2026-10-08. Approved the optional neutral
+  event-capability and compatibility-name decisions for implementation. An
+  independent architecture review on 2026-10-08 identified forwarding, rejection,
+  decision-history, generator-closure, and closeable-return-type ambiguities.
+  The follow-up review on 2026-10-08 confirmed those findings were resolved and
+  the design was ready to return to `Finalized`.

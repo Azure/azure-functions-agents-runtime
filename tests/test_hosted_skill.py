@@ -16,6 +16,7 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.hosted_skill import HostedSkill
 from azure_functions_agents.registration.capabilities import AgentCapabilities
@@ -72,6 +73,14 @@ def _make_skill(
     *,
     response_schema: dict[str, Any] | None = None,
 ) -> tuple[HostedSkill, AgentCapabilities]:
+    approved_skill = SkillDescriptor.create(
+        name="one",
+        path=tmp_path / "skills" / "one",
+    )
+    excluded_skill = SkillDescriptor.create(
+        name="excluded",
+        path=tmp_path / "skills" / "excluded",
+    )
     resolved = ResolvedAgent(
         name="Internal",
         slug="internal",
@@ -97,6 +106,8 @@ def _make_skill(
         filtered_mcp_tools=["mcp"],  # type: ignore[list-item]
         enabled_skill_paths=[tmp_path / "skills" / "one"],
         web_request_tools=["web"],
+        skills=(approved_skill,),
+        skill_catalog=(approved_skill, excluded_skill),
     )
     harness = AppHarness(HarnessKind.MAF, tmp_path)
     return HostedSkill(CatalogEntry(resolved, capabilities), harness), capabilities
@@ -134,6 +145,10 @@ async def test_run_forwards_catalog_values_with_one_session_identity(
     assert captured["tools"] is not capabilities.filtered_user_tools
     assert captured["mcp_tools"] is not capabilities.filtered_mcp_tools
     assert captured["skill_paths"] is not capabilities.enabled_skill_paths
+    assert captured["skills"] == list(capabilities.skills)
+    assert captured["skills"] is not capabilities.skills
+    assert captured["skill_catalog"] == list(capabilities.skill_catalog)
+    assert captured["skill_catalog"] is not capabilities.skill_catalog
     assert captured["web_request_tools"] is not capabilities.web_request_tools
 
     captured["tools"].append("mutated")
@@ -355,13 +370,19 @@ async def test_stream_validates_completed_response_before_done(
         },
     )
     closed = False
+    completed = False
+    generator_exit = False
 
     async def events() -> AsyncIterator[HostedSkillEvent]:
-        nonlocal closed
+        nonlocal closed, completed, generator_exit
         try:
             yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id="session-one")
             yield HostedSkillEvent(HostedSkillEventKind.DELTA, content='{"wrong": true}')
             yield HostedSkillEvent(HostedSkillEventKind.DONE)
+            completed = True
+        except GeneratorExit:
+            generator_exit = True
+            raise
         finally:
             closed = True
 
@@ -376,6 +397,8 @@ async def test_stream_validates_completed_response_before_done(
     ]
     assert output[-1].content == "Agent response validation failed"
     assert closed is True
+    assert completed is True
+    assert generator_exit is False
 
 
 @pytest.mark.asyncio
@@ -460,8 +483,8 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     tmp_path: Path,
     session_id: str | None,
 ) -> None:
-    skill, _ = _make_skill(tmp_path)
-    captured: dict[str, str] = {}
+    skill, capabilities = _make_skill(tmp_path)
+    captured: dict[str, Any] = {}
 
     def build_sandbox(_resolved: ResolvedAgent, resolved_id: str) -> list[str]:
         captured["sandbox"] = resolved_id
@@ -470,6 +493,10 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     async def events(_prompt: str, **kwargs: Any) -> AsyncIterator[HostedSkillEvent]:
         captured["runner"] = kwargs["session_id"]
         captured["execution_surface"] = kwargs["_execution_surface"]
+        captured["session_is_new"] = kwargs["_session_is_new"]
+        captured["display_name"] = kwargs["display_name"]
+        captured["skills"] = kwargs["skills"]
+        captured["skill_catalog"] = kwargs["skill_catalog"]
         yield HostedSkillEvent(
             HostedSkillEventKind.SESSION,
             session_id=kwargs["session_id"],
@@ -483,6 +510,10 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
 
     assert captured["sandbox"] == captured["runner"] == output[0].session_id
     assert captured["execution_surface"] == "hosted_skill"
+    assert captured["session_is_new"] is (session_id is None)
+    assert captured["display_name"] == "Internal"
+    assert captured["skills"] == list(capabilities.skills)
+    assert captured["skill_catalog"] == list(capabilities.skill_catalog)
     if session_id is not None:
         assert output[0].session_id == session_id
 

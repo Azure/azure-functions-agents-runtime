@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -16,7 +16,6 @@ from ...discovery.mcp import MCPServerDescriptor
 from ...discovery.skills import SkillDescriptor
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
-from ...streaming_events import HostedSkillEvent
 from .._agent_runner import AgentFunctionTool, AgentRunner
 from .._harness_binding import AppHarness, UnsupportedCapabilityError
 from . import _copilot_execution, _copilot_preview
@@ -92,114 +91,6 @@ class _CopilotHarnessRunner:
         )
         request = replace(request, tools=_copilot_preview.prepare_tools(request.tools))
         return await _copilot_execution.run(self._harness, request)
-
-    def run_agent_events(
-        self,
-        prompt: str,
-        *,
-        instructions: str | None = None,
-        timeout: float | None = None,
-        deadline: float,
-        tools: Sequence[AgentFunctionTool] | None = None,
-        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
-        skill_paths: Sequence[Path] | None = None,
-        model: str | None = None,
-        session_id: str | None = None,
-        sandbox_tools: Sequence[ToolInput] | None = None,
-        system_addendum: str | None = None,
-        workflow_enabled: bool = False,
-        workflow_durable_client: DurableFunctionsClient | None = None,
-        workflow_agent_slug: str | None = None,
-        agent_name: str | None = None,
-        display_name: str | None = None,
-        web_request_tools: Sequence[ToolInput] | None = None,
-        agent_configuration: AgentConfiguration | None = None,
-        subagents: list[SubagentRef] | None = None,
-        catalog: AgentCatalog | None = None,
-        workflow_policy: WorkflowPlanPolicy | None = None,
-        execution_surface: str | None = None,
-    ) -> AsyncGenerator[HostedSkillEvent]:
-        del (
-            prompt,
-            instructions,
-            timeout,
-            deadline,
-            tools,
-            mcp_tools,
-            skill_paths,
-            model,
-            session_id,
-            sandbox_tools,
-            system_addendum,
-            workflow_enabled,
-            workflow_durable_client,
-            workflow_agent_slug,
-            agent_name,
-            display_name,
-            web_request_tools,
-            agent_configuration,
-            subagents,
-            catalog,
-            workflow_policy,
-            execution_surface,
-        )
-        _copilot_preview.reject_unsupported(streaming=True)
-        raise AssertionError("Copilot streaming should have been rejected.")
-
-    def run_agent_stream(
-        self,
-        prompt: str,
-        *,
-        instructions: str | None = None,
-        timeout: float | None = None,
-        deadline: float,
-        tools: Sequence[AgentFunctionTool] | None = None,
-        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
-        skill_paths: Sequence[Path] | None = None,
-        model: str | None = None,
-        session_id: str | None = None,
-        sandbox_tools: Sequence[ToolInput] | None = None,
-        system_addendum: str | None = None,
-        workflow_enabled: bool = False,
-        workflow_durable_client: DurableFunctionsClient | None = None,
-        workflow_agent_slug: str | None = None,
-        agent_name: str | None = None,
-        display_name: str | None = None,
-        web_request_tools: Sequence[ToolInput] | None = None,
-        agent_configuration: AgentConfiguration | None = None,
-        subagents: list[SubagentRef] | None = None,
-        catalog: AgentCatalog | None = None,
-        workflow_policy: WorkflowPlanPolicy | None = None,
-        skills: Sequence[SkillDescriptor] | None = None,
-        skill_catalog: Sequence[SkillDescriptor] | None = None,
-    ) -> AsyncGenerator[str]:
-        del (
-            prompt,
-            instructions,
-            timeout,
-            deadline,
-            tools,
-            mcp_tools,
-            skill_paths,
-            model,
-            session_id,
-            sandbox_tools,
-            system_addendum,
-            workflow_enabled,
-            workflow_durable_client,
-            workflow_agent_slug,
-            agent_name,
-            display_name,
-            web_request_tools,
-            agent_configuration,
-            subagents,
-            catalog,
-            workflow_policy,
-            skills,
-            skill_catalog,
-        )
-        _copilot_preview.reject_unsupported(streaming=True)
-        raise AssertionError("Copilot streaming should have been rejected.")
 
     async def run_leaf_agent_task(
         self,
