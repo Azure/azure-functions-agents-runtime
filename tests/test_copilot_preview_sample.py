@@ -151,6 +151,66 @@ def test_capabilities_verifier_runs_both_checks(monkeypatch):
     assert phases == ["skill", "mcp"]
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None, "windows-path", "json-arguments", "failed-search", "failed-view",
+        "wrong-path", "not-advertised", "before-search", "wrong-link", "no-search",
+        "traversal", "sibling-prefix", "preview-path",
+    ],
+)
+def test_mcp_verifier_reads_only_the_saved_search_output(fault):
+    module = _load_verifier()
+    link = "https://learn.microsoft.com/azure/azure-functions/functions-reference-python"
+    output = "/session-state/temp/mcp-output.txt"
+    if fault == "windows-path":
+        output = output.replace("/", "\\")
+    elif fault == "traversal":
+        output = "/session-state/temp/../other.txt"
+    elif fault == "sibling-prefix":
+        output = "/session-state/tempx/mcp-output.txt"
+    search = {
+        "tool_name": "microsoft-learn-microsoft_docs_search",
+        "success": True,
+        "result": f"Output too large to read at once (44.9 KB). Saved to: {output}\n"
+        "Consider using view to read the saved output.",
+    }
+    read = {
+        "tool_name": "view", "success": True, "arguments": {"path": output}, "result": link,
+    }
+    result = {"response": link, "tool_calls": [search, read]}
+    if fault == "json-arguments":
+        read["arguments"] = json.dumps(read["arguments"])
+    elif fault == "failed-search":
+        result["tool_calls"].insert(0, {**search, "success": False})
+    elif fault == "failed-view":
+        read["success"] = False
+    elif fault == "wrong-path":
+        read["arguments"] = {"path": "/workspace/main.agent.md"}
+    elif fault == "not-advertised":
+        search["result"] = "No saved output."
+    elif fault == "before-search":
+        result["tool_calls"].reverse()
+    elif fault == "wrong-link":
+        result["response"] = link + "-unrelated"
+    elif fault == "no-search":
+        result["tool_calls"] = [read]
+    elif fault == "preview-path":
+        search["result"] += "\nPreview:\nSaved to: /session-state/temp/other.txt\n"
+        read["arguments"] = {"path": "/session-state/temp/other.txt"}
+
+    class Client:
+        def post(self, path, *, json):
+            assert path == "/agents/main/chat"
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: result)
+
+    if fault in {None, "windows-path", "json-arguments"}:
+        module.mcp(Client())
+    else:
+        with pytest.raises(AssertionError):
+            module.mcp(Client())
+
+
 def _load_verifier():
     source = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "verify.py"
     spec = importlib.util.spec_from_file_location("copilot_preview_verify", source)

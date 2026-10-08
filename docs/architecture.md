@@ -341,7 +341,7 @@ it preserves canonical-path ownership and excluded-root checks, never copies
 resources into session storage, and does not grant mutation or directory
 enumeration. All other paths retain the virtual workspace/session-state rules.
 
-The Copilot extra pins `github-copilot-sdk==1.0.17`. The host configures
+The Copilot extra pins `github-copilot-sdk==1.0.16`. The host configures
 `/session-state` as a virtual root and uses the host's path conventions.
 With Windows conventions, native callbacks can use
 `<workspace-drive>:\session-state\temp`. The Windows path policy maps only

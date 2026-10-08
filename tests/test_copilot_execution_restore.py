@@ -18,7 +18,7 @@ def runtime_is_cached() -> bool:
     """Report whether the pinned runtime bundle is already present; never download it."""
     from copilot._cli_version import get_runtime_platform
 
-    bundle = REPO_ROOT / ".tmp-validation" / "runtime-1.0.93-4" / "prebuilds" / get_runtime_platform()
+    bundle = REPO_ROOT / ".tmp-validation" / "runtime-1.0.90" / "prebuilds" / get_runtime_platform()
     wrapper = "copilot-runtime.exe" if os.name == "nt" else "copilot-runtime"
     return all((bundle / name).is_file() for name in (
         wrapper, "runtime.node", ".hostless-runtime-assets-v2"

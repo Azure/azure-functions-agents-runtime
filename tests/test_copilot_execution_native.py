@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
-CACHE = Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.93-4"
+CACHE = Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.90"
 SENTINEL = "not-a-credential-native-persistence-sentinel"
 AUTH_FAILURE_SENTINEL = "sentinel-private-native-provider-403"
 

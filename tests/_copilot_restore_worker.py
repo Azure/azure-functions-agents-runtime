@@ -165,7 +165,7 @@ def main() -> None:
     phase, session_dir, storage_root, out, probe_path = sys.argv[1:6]
     os.environ["COPILOT_SKIP_CLI_DOWNLOAD"] = "1"
     os.environ["COPILOT_CLI_EXTRACT_DIR"] = str(
-        Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.93-4"
+        Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.90"
     )
     from copilot._cli_version import get_runtime_platform
 

@@ -106,24 +106,52 @@ def _learn_links(text: str) -> set[str]:
     }
 
 
+def _session_output_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    assert normalized.startswith("/session-state/temp/"), "View is outside the session temp directory"
+    assert all(
+        part not in {"", ".", ".."} for part in normalized.split("/")[3:]
+    ), "The saved output path is invalid"
+    return normalized
+
+
 def mcp(client: httpx.Client) -> None:
     response = client.post("/agents/main/chat", json={
         "prompt": "For an MCP check, use microsoft_docs_search on microsoft-learn to search "
         "for the Azure Functions Python programming model. Include a Microsoft Learn link "
-        "from the result. Do not use web_request, make_receipt, a skill, or a shell command.",
+        "from the result. If the search output is saved to the session temp directory, "
+        "use view to read that file. Do not use web_request, make_receipt, a skill, or a shell command.",
     })
     response.raise_for_status()
     result = response.json()
     calls = result["tool_calls"]
     assert calls, "The response has no MCP tool evidence"
-    assert all(
-        call["tool_name"].endswith("microsoft_docs_search") and call.get("success") is True
-        for call in calls
-    ), "Expected successful Microsoft Learn search calls only"
+    assert all(call.get("success") is True for call in calls), "An MCP check tool failed"
+    saved_paths: set[str] = set()
+    evidence: list[str] = []
+    searches = 0
+    for call in calls:
+        if call["tool_name"].endswith("microsoft_docs_search"):
+            searches += 1
+            if call["result"].startswith("Output too large to read at once"):
+                saved = re.match(
+                    r"Output too large to read at once[^\r\n]*? Saved to: ([^\r\n]+)",
+                    call["result"],
+                )
+                assert saved is not None, "The large MCP result has no saved output path"
+                saved_paths.add(_session_output_path(saved.group(1)))
+        else:
+            assert call["tool_name"] == "view", "An unexpected MCP check tool was called"
+            arguments = call["arguments"]
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            assert _session_output_path(arguments["path"]) in saved_paths, "View did not read saved MCP output"
+        evidence.append(call["result"])
+    assert searches, "The response has no Microsoft Learn search"
     links = {
         link
-        for call in calls
-        for link in _learn_links(call["result"])
+        for text in evidence
+        for link in _learn_links(text)
     }
     assert links, "MCP returned no Learn link"
     assert links & _learn_links(result["response"]), "The response has no link from the MCP result"

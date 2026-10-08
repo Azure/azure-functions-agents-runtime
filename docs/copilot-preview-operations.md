@@ -25,15 +25,21 @@ production qualification.
 The SDK owns continuation, recovery and compaction. The host does not promise
 transactional turns or exactly-once tool effects.
 
-The Copilot extra pins `github-copilot-sdk==1.0.17`. Windows checks use the
-unchanged Python release-tag source and cached native runtime `1.0.93-4`.
-The public wheel could not be downloaded in the test environment because of
-a TLS error. These checks do not establish the wheel's native runtime pin.
-The release notes list `1.0.93-4`, but the tag's `nodejs/package.json` lists
-`1.0.93`. Keep the exact tested source and native version in test reports.
+The Copilot extra pins `github-copilot-sdk==1.0.16`. The published Python wheel
+pins native runtime `1.0.90`. The wheel is available through the approved package
+feed in the test environment. No SDK source overlay or datetime patch is needed
+for the tested skill/view path. Keep the exact tested package, native version,
+and live-service results in test reports. Offline checks do not prove that a
+live MCP search succeeds.
+
+The Windows live check used Core Tools `4.15.2`, Azure OpenAI Entra, and the
+`o4-mini` deployment. The skill check passed. The first MCP search failed.
+A second search and `view` of its saved output succeeded. The verifier still
+reports a failure because all tool calls must succeed. The cause of the first
+failure is not confirmed. This is not a fully passing MCP check.
 
 For offline native tests, first put an approved, complete native bundle in
-`.tmp-validation/runtime-1.0.93-4/prebuilds/<platform>/`. The bundle must include
+`.tmp-validation/runtime-1.0.90/prebuilds/<platform>/`. The bundle must include
 the runtime executable, `runtime.node`, and `.hostless-runtime-assets-v2`.
 The tests select that executable directly and never download it.
 Then run these commands from the repository root:

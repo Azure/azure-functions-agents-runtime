@@ -15,7 +15,7 @@ the target data-plane role (for example, Cognitive Services OpenAI User for
 Azure OpenAI or the project role approved by your Foundry administrator).
 
 `requirements.txt` installs this checkout with `[copilot]`, which pins
-`github-copilot-sdk==1.0.17`. The SDK downloads its native runtime on first
+`github-copilot-sdk==1.0.16`. The SDK downloads its native runtime on first
 use if uncached. On Windows, same-drive `session-state` callbacks use the
 configured session storage, not a physical directory at the drive root.
 The sample needs outbound HTTPS access to `learn.microsoft.com`. This public
@@ -205,6 +205,11 @@ $mcp | ConvertTo-Json -Depth 12
 
 The reference marker appears only in the file, not in the test prompt or skill
 instructions. Do not accept a guessed marker or missing/failed tool evidence.
+For a large MCP search result, the verifier permits `view` of only the saved
+file reported by a successful search under `/session-state/temp/`. All tool
+calls must succeed. The Windows SDK `1.0.16` live check had a failed first
+search followed by a successful retry, so its MCP check still failed. See
+[qualification scope](../../docs/copilot-preview-operations.md#qualification-scope).
 Keep MCP queries limited to public documentation. Do not send local files,
 conversation content, or credentials to the public server.
 
