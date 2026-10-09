@@ -20,9 +20,11 @@ steps:
       fi
 
       npm publish "${packages[0]}" \
-        --tag '${{ parameters.NpmPublishTag }}' \
+        --tag "${NPM_PUBLISH_TAG}" \
         --registry https://registry.npmjs.org \
         --@azure-functions-agents:registry=https://registry.npmjs.org \
         --dry-run \
         --ignore-scripts
     displayName: 'Validate npm release'
+    env:
+      NPM_PUBLISH_TAG: ${{ parameters.NpmPublishTag }}
