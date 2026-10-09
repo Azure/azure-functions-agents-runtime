@@ -19,13 +19,21 @@ from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
-from ..harness._harness_binding import AppHarness, HarnessKind, bind_harness, get_harness
+from ..harness._agent_runner import get_agent_runner
+from ..harness._harness_binding import (
+    AppHarness,
+    HarnessKind,
+    HarnessSessionState,
+    bind_harness,
+    get_harness,
+)
 from ..harness._history_identity import validate_agent_slug
 from ..harness._session_storage import SessionStorageError
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import (
     _SESSION_ID_HEADER,
     _request_header_value,
+    _session_id_response_headers,
     _set_run_result_attributes,
     build_sandbox_tools_for_session,
 )
@@ -76,7 +84,6 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
 # dependency-free module) so this layer stays valid without eagerly importing
 # the heavy ``runner`` module.
 _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
-_MAX_HISTORY_REPLAY_MESSAGES = 200
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -170,6 +177,7 @@ async def _run_builtin_agent(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
     _session_is_new: bool = False,
+    _session_state: HarnessSessionState | None = None,
 ) -> AgentResult:
     harness = bind_harness(resolved, capabilities)
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
@@ -197,6 +205,7 @@ async def _run_builtin_agent(
         catalog=catalog,
         _harness=harness,
         _session_is_new=_session_is_new or session_id is None,
+        _session_state=_session_state,
     )
 
 
@@ -211,6 +220,7 @@ def _run_builtin_agent_stream(
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    _session_state: HarnessSessionState | None = None,
 ) -> AsyncIterator[str]:
     harness = bind_harness(resolved, capabilities)
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
@@ -244,6 +254,7 @@ def _run_builtin_agent_stream(
         catalog=catalog,
         _harness=harness,
         _session_is_new=session_id is None,
+        _session_state=_session_state,
     )
 
 
@@ -254,16 +265,23 @@ def _extract_prompt_from_body(body: Any) -> str:
     return prompt.strip()
 
 
-def _json_error(message: str, status_code: int = 500) -> Response:
+def _json_error(
+    message: str, status_code: int = 500, headers: dict[str, str] | None = None
+) -> Response:
     return Response(
         content=json.dumps({"error": message}),
         status_code=status_code,
         media_type="application/json",
+        headers=headers,
     )
 
 
-def _sse_error_response(message: str, status_code: int = 400) -> StreamingResponse:
+def _sse_error_response(
+    message: str, status_code: int = 400, *, session_id: str | None = None
+) -> StreamingResponse:
     async def error_gen() -> AsyncIterator[str]:
+        if session_id is not None:
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
         yield f"data: {json.dumps({'type': 'error', 'content': message})}\n\n"
 
     return StreamingResponse(
@@ -316,6 +334,12 @@ def _register_http_chat(
         resolved_session_id = _resolve_builtin_endpoints_session_id(
             supplied_session_id
         )
+        session_state = HarnessSessionState(caller_supplied=supplied_session_id is not None)
+        failure_headers = _session_id_response_headers(
+            resolved_session_id,
+            caller_supplied=supplied_session_id is not None,
+            state=session_state,
+        )
         # This endpoint calls `run_agent` directly rather than going through
         # `_handlers.py`'s trigger-registered handlers, so — unlike a
         # user-defined `trigger:` agent — nothing upstream opens an
@@ -339,7 +363,11 @@ def _register_http_chat(
                 if auth_error is not None:
                     span.set_attribute("af.agent.outcome", "error")
                     span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
-                    return _json_error(auth_error.message, status_code=auth_error.status_code)
+                    return _json_error(
+                        auth_error.message,
+                        status_code=auth_error.status_code,
+                        headers=failure_headers,
+                    )
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
                 result = await _run_builtin_agent(
@@ -353,29 +381,54 @@ def _register_http_chat(
                     catalog=catalog,
                     workflow_policy=workflow_policy,
                     _session_is_new=not supplied_session_id,
+                    _session_state=session_state,
                 )
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
                 return Response(
                     json.dumps(
                         {
-                            "session_id": result.session_id,
+                            "session_id": (
+                                resolved_session_id
+                                if supplied_session_id is not None or session_state.resumable
+                                else None
+                            ),
                             "response": result.content,
                             "model": result.model,
                             "tool_calls": result.tool_calls,
                         }
                     ),
                     media_type="application/json",
-                    headers={_SESSION_ID_HEADER: result.session_id},
+                    headers=_session_id_response_headers(
+                        resolved_session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
+                    ),
                 )
             except SessionStorageError as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
-                return _json_error(str(exc), status_code=exc.status_code)
+                return _json_error(
+                    str(exc),
+                    status_code=exc.status_code,
+                    headers=_session_id_response_headers(
+                        resolved_session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
+                    ),
+                )
             except ValueError as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)
-                return _json_error(str(exc), status_code=400)
+                return _json_error(
+                    str(exc),
+                    status_code=400,
+                    headers=_session_id_response_headers(
+                        resolved_session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
+                    ),
+                )
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
@@ -385,7 +438,14 @@ def _register_http_chat(
                     source_marker(resolved.source_file),
                     error_msg,
                 )
-                return _json_error(error_msg)
+                return _json_error(
+                    error_msg,
+                    headers=_session_id_response_headers(
+                        resolved_session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
+                    ),
+                )
 
     decorated: Any
     if workflows_enabled:
@@ -419,25 +479,33 @@ def _register_http_chat_stream(
         req: Request,
         durable_client_config: str | None,
     ) -> StreamingResponse:
+        supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
         try:
             auth_error = authorize_entra_request(req.headers.get, auth)
             if auth_error is not None:
-                return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
+                return _sse_error_response(
+                    auth_error.message,
+                    status_code=auth_error.status_code,
+                    session_id=supplied_session_id,
+                )
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
-            session_id = _request_header_value(req, _SESSION_ID_HEADER)
+            session_state = HarnessSessionState(
+                caller_supplied=supplied_session_id is not None
+            )
 
             def run_stream(durable_client: DurableFunctionsClient | None) -> AsyncIterator[str]:
                 return _run_builtin_agent_stream(
                     prompt,
                     resolved=resolved,
                     capabilities=capabilities,
-                    session_id=session_id,
+                    session_id=supplied_session_id,
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
                     workflow_policy=workflow_policy,
+                    _session_state=session_state,
                 )
 
             # A Durable client injected by ``durable_client_input`` is scoped to the
@@ -460,7 +528,9 @@ def _register_http_chat_stream(
                 media_type="text/event-stream",
             )
         except ValueError as exc:
-            return _sse_error_response(str(exc), status_code=400)
+            return _sse_error_response(
+                str(exc), status_code=400, session_id=supplied_session_id
+            )
         except Exception as exc:
             error_msg = _format_exception_message(exc)
             logger.error(
@@ -468,7 +538,9 @@ def _register_http_chat_stream(
                 source_marker(resolved.source_file),
                 error_msg,
             )
-            return _sse_error_response(error_msg, status_code=500)
+            return _sse_error_response(
+                error_msg, status_code=500, session_id=supplied_session_id
+            )
 
     decorated: Any
     if workflows_enabled:
@@ -512,29 +584,38 @@ def _register_mcp_endpoint(
                 "af.agent.model": resolved.model,
             },
         ) as span:
+            session_id: str | None = None
+            resolved_session_id: str | None = None
+            session_state = HarnessSessionState()
             try:
                 payload = json.loads(context) if context else {}
                 arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
+                session_id = (
+                    _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
+                )
+                session_state = HarnessSessionState(caller_supplied=session_id is not None)
                 prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
                 if not isinstance(prompt, str) or not prompt.strip():
                     span.set_attribute("af.agent.outcome", "error")
                     span.set_error("Missing 'prompt'", fault_domain=FaultDomain.APP)
-                    return json.dumps({"error": "Missing 'prompt'"})
+                    return json.dumps(
+                        {"error": "Missing 'prompt'", "session_id": session_id}
+                    )
 
-                session_id = (
-                    _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
-                )
                 span.set_attribute("af.agent.session_id", session_id)
+                resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
                 result = await _run_builtin_agent(
                     prompt.strip(),
                     resolved=resolved,
                     capabilities=capabilities,
-                    session_id=session_id,
+                    session_id=resolved_session_id,
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
                     workflow_policy=workflow_policy,
+                    _session_is_new=session_id is None,
+                    _session_state=session_state,
                 )
                 # When the caller supplies no explicit session id (`session_id`
                 # is `None` above), the runner still resolves/generates one for
@@ -542,12 +623,16 @@ def _register_mcp_endpoint(
                 # with it (N1) instead of leaving the pre-call `None` in place,
                 # which otherwise left this attribute permanently unset for
                 # every caller-omitted-session-id turn.
-                span.set_attribute("af.agent.session_id", result.session_id)
+                span.set_attribute("af.agent.session_id", resolved_session_id)
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
                 return json.dumps(
                     {
-                        "session_id": result.session_id,
+                        "session_id": (
+                            resolved_session_id
+                            if session_id is not None or session_state.resumable
+                            else None
+                        ),
                         "response": result.content,
                         "model": result.model,
                         "tool_calls": result.tool_calls,
@@ -562,7 +647,17 @@ def _register_mcp_endpoint(
                     source_marker(resolved.source_file),
                     error_msg,
                 )
-                return json.dumps({"error": error_msg})
+                return json.dumps(
+                    {
+                        "error": error_msg,
+                        "session_id": (
+                            resolved_session_id
+                            if resolved_session_id is not None
+                            and (session_id is not None or session_state.resumable)
+                            else None
+                        ),
+                    }
+                )
 
     decorated: Any
     if workflows_enabled:
@@ -722,18 +817,10 @@ def _register_history_endpoint(
                 media_type="application/json",
             )
 
-        from ..harness.agent_framework._maf_blob_history import build_blob_provider_from_environment
-
-        provider = build_blob_provider_from_environment(agent_slug=slug)
-        if provider is None:
-            return Response(
-                json.dumps({"messages": [], "truncated": False}),
-                media_type="application/json",
-            )
-        # Present a clean transcript: drop internal/excluded turns.
-        provider.skip_excluded = True
         try:
-            messages = await provider.get_messages(session_id)
+            history = await get_agent_runner(selected_harness).get_session_history(
+                slug, session_id
+            )
         except Exception:
             logger.exception("history endpoint failed")
             return Response(
@@ -742,21 +829,8 @@ def _register_history_endpoint(
                 media_type="application/json",
             )
 
-        rendered: list[dict[str, str]] = []
-        for message in messages:
-            role = str(getattr(message, "role", "") or "").strip().lower()
-            if role not in ("user", "assistant"):
-                continue
-            text = getattr(message, "text", "")
-            if not isinstance(text, str) or not text:
-                continue
-            rendered.append({"role": role, "text": text})
-
-        truncated = len(rendered) > _MAX_HISTORY_REPLAY_MESSAGES
-        if truncated:
-            rendered = rendered[-_MAX_HISTORY_REPLAY_MESSAGES:]
         return Response(
-            json.dumps({"messages": rendered, "truncated": truncated}),
+            json.dumps({"messages": history.messages, "truncated": history.truncated}),
             media_type="application/json",
         )
 

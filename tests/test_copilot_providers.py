@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from azure.core.credentials import AccessToken
 
-from azure_functions_agents.client_manager import MAFClientManager, ProviderKind
 from azure_functions_agents.harness import (
     _harness_binding as _harness,
 )
@@ -20,6 +19,8 @@ from azure_functions_agents.harness._harness_binding import (
     HarnessKind,
     UnsupportedCapabilityError,
 )
+from azure_functions_agents.harness._provider_config import ProviderKind
+from azure_functions_agents.harness.agent_framework import _maf_client
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_execution as execution,
 )
@@ -90,7 +91,7 @@ def test_provider_target_is_resolved_without_maf_client_construction(
     for name, value in settings.items():
         monkeypatch.setenv(name, value)
     maf = Mock(side_effect=AssertionError("MAF client construction must not run"))
-    monkeypatch.setattr(MAFClientManager, "build_chat_client_with_target", maf)
+    monkeypatch.setattr(_maf_client, "build_chat_client", maf)
     selected = _harness.get_harness()
     assert selected.provider is not None
     assert selected.provider.kind == provider

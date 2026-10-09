@@ -7,15 +7,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from .._logger import logger
 from .._tool_descriptor import ToolDescriptor
-from ..client_manager import ProviderKind as ProviderKind
 from ..config.env import EnvVar, raw_env_value
 from ..config.paths import get_app_root
 from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor
+from ._provider_config import ProviderKind as ProviderKind
+from ._stream_events import StreamEvent
 
 if TYPE_CHECKING:
     from ..config.schema import ResolvedAgent
@@ -28,6 +29,23 @@ if TYPE_CHECKING:
 FLAG = EnvVar.ENABLE_COPILOT
 
 type ExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
+
+
+class HistoryMessage(TypedDict):
+    role: Literal["user", "assistant"]
+    text: str
+
+
+@dataclass(frozen=True)
+class SessionHistory:
+    messages: tuple[HistoryMessage, ...] = ()
+    truncated: bool = False
+
+
+@dataclass
+class HarnessSessionState:
+    resumable: bool = False
+    caller_supplied: bool = False
 
 
 class HarnessKind(StrEnum):
@@ -76,7 +94,8 @@ class HarnessRequest:
     skills: tuple[SkillDescriptor, ...] = ()
     skill_catalog: tuple[SkillDescriptor, ...] = ()
     execution_role: ExecutionRole = "primary"
-    event_sink: Callable[[dict[str, Any]], None] | None = None
+    event_sink: Callable[[StreamEvent], None] | None = None
+    session_state: HarnessSessionState = field(default_factory=HarnessSessionState)
 
 
 _HARNESSES: dict[Path, AppHarness] = {}

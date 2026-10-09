@@ -328,8 +328,18 @@ Still outside this FRD's supported preview contract:
 - Azure-hosted deployment and any trigger or Debug UI behavior not yet qualified
   on a real Functions host.
 
-Client-manager compatibility remains narrow: MAF keeps its existing extension
-behavior, while the Copilot preview accepts only the runtime's built-in manager.
+The approved harness-boundary cleanup removes public custom chat-client
+injection. Shared configuration retains portable model/provider settings, while
+MAF owns concrete client construction, narrow `ExperimentalWarning` suppression
+for `create_harness_agent()`/`FileSystemAgentFileStore` and
+`FileHistoryProvider`, instrumentation setup, and history projection. The
+common runtime retains neutral observability, registration, and request
+behavior. The retired
+`agent_configuration.agent_framework.compaction.max_context_window_tokens`
+field warns and is ignored; MAF uses its native model-aware default. Failed
+requests always return caller-supplied session IDs, and return generated IDs
+only after resumability is confirmed, consistently across response surfaces.
+`shutdown_runtime()` is the public async cleanup entry point.
 
 ## 5. Decisions log
 
@@ -355,6 +365,11 @@ still govern the feature.
 | 13 | Debug UI history under Copilot | unsupported UI / live-only / native continuation with MAF transcript replay | Support live chat, streaming, and explicit native-session continuation. Show that prior transcript messages are not restored; do not project Copilot native files into MAF history; surface resume failures without creating a replacement session. MAF history stays unchanged. | Human (larohra) | 2026-10-07 |
 | 14 | Inbound built-in MCP endpoint | reject under Copilot / reuse bound runner | Enable the existing MCP handler with prompt validation, native continuation, honest errors without fallback, and Functions-extension-owned system-key authentication. Keep real-host qualification separate from offline adapter evidence. | Human (larohra, relayed by coordinator) | 2026-10-07 |
 | 15 | SSE backpressure | cancel execution / drop oldest buffered events and complete the run | Keep at most 128 queued events; when a slow client falls behind, drop the oldest queued events, report the dropped count with `stream_truncated`, and send the complete final message before `done`. Client disconnect still cancels execution. | Human (larohra) | 2026-10-07 |
+| 16 | Client customization | public custom client-manager injection / built-in construction | Remove public `ClientManager`, `MAFClientManager`, getter, and setter APIs; preserve normal model/provider configuration and end custom chat-client injection. | Human (larohra) | 2026-10-07 |
+| 17 | Backend-specific responsibilities | common-module implementations / selected-harness ownership | Keep concrete MAF client creation, MAF warnings and instrumentation, and SDK history projection inside the selected MAF harness; retain neutral shared registration and observability helpers. | Human (larohra) | 2026-10-07 |
+| 18 | Legacy compaction field | honor field / warn and ignore | Remove the MAF-specific field from the public contract, warn when legacy global or per-agent config contains it, and use MAF's native model-aware default. | Human (larohra) | 2026-10-07 |
+| 19 | Failed-turn session IDs | echo generated ID on any failure / echo only resumable generated IDs | Always return caller-supplied IDs; return generated IDs only when the runtime confirms the session is resumable, consistently across HTTP, chat, and SSE surfaces. | Human (larohra) | 2026-10-07 |
+| 20 | Public shutdown API | keep manager-specific name / use neutral runtime name | Remove `shutdown_client_manager()` and expose `shutdown_runtime()` for acquired harness-owned resources. | Human (larohra) | 2026-10-07 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -370,6 +385,7 @@ still govern the feature.
 | Debug UI/history | Verify live chat/streaming and native continuation, display the no-transcript-restore notice, preserve MAF transcript replay, and surface native resume failures without retry-as-create. |
 | Non-HTTP entrypoints | Exercise each existing binding serializer and shared-handler contract offline; separately qualify each trigger on a real Functions host with actual binding delivery before marking it supported. Resource-blocked triggers remain unqualified, not unsupported. |
 | Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, and errors without replacement sessions. Real-host transport and system-key auth qualification remains separate. |
+| Harness cleanup | Verify selected-harness-only provider, warning, observability, and history ownership; legacy compaction warning/default behavior; public shutdown; and failed-turn session IDs on HTTP, chat, and SSE. |
 
 ## 7. Docs impact
 
@@ -377,6 +393,9 @@ still govern the feature.
   model, and selected-harness persistence split at the architecture level.
 - `docs/front-matter-spec.md` documents unchanged authoring surfaces and calls
   out that Copilot reuses the same MCP/skill filtering fields.
+- The cleanup amendment removes public custom-client injection, documents the
+  legacy compaction warning, and updates shutdown and failed-turn session-ID
+  behavior across the runtime docs.
 - `README.md` and operational docs may describe the bounded preview and storage
   namespace, but should defer detailed operational behavior to dedicated preview
   documentation rather than expanding this FRD.
@@ -390,3 +409,7 @@ still govern the feature.
 - **Scope note:** This FRD records the durable feature contract only. It does
   not preserve superseded iteration history, review churn, or qualification
   narratives that no longer change the product boundary.
+- **Harness-boundary cleanup sign-off:** Laveesh Rohra (`larohra`) approved the
+  cleanup amendment on 2026-10-07. Independent architecture review returned
+  **READY** on 2026-10-07; implementation may proceed under this amended
+  contract.

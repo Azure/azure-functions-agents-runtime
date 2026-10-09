@@ -22,12 +22,68 @@ from agent_framework import (
 )
 
 from azure_functions_agents import runner
-from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config import paths
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 from azure_functions_agents.harness import _harness_execution as shared
-from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._harness_binding import (
+    AppHarness,
+    HarnessKind,
+    HarnessSessionState,
+)
+from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
+
+
+def test_common_stream_echoes_supplied_id_and_gates_generated_ids(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    class _BoundRunner:
+        def run_agent_stream(self, _prompt: str, **kwargs: Any) -> Any:
+            async def events() -> AsyncIterator[str]:
+                state = kwargs["session_state"]
+                if _prompt == "confirmed":
+                    state.resumable = True
+                    yield 'data: {"type":"session","session_id":"generated"}\n\n'
+                yield 'data: {"type":"error","content":"pre-create failure"}\n\n'
+
+            return events()
+
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _harness: _BoundRunner())
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+
+    async def collect(prompt: str = "prompt", **kwargs: Any) -> list[str]:
+        return [
+            event async for event in runner.run_agent_stream(prompt, _harness=harness, **kwargs)
+        ]
+
+    generated_failure = asyncio.run(
+        collect(
+            session_id="generated",
+            _session_state=HarnessSessionState(caller_supplied=False),
+        )
+    )
+    assert generated_failure == ['data: {"type":"error","content":"pre-create failure"}\n\n']
+
+    generated_confirmed = asyncio.run(
+        collect(
+            "confirmed",
+            session_id="generated",
+            _session_state=HarnessSessionState(caller_supplied=False),
+        )
+    )
+    assert generated_confirmed == [
+        'data: {"type":"session","session_id":"generated"}\n\n',
+        'data: {"type":"error","content":"pre-create failure"}\n\n',
+    ]
+
+    supplied_failure = asyncio.run(
+        collect(
+            session_id="caller-id",
+            _session_state=HarnessSessionState(caller_supplied=True),
+        )
+    )
+    assert supplied_failure[0] == 'data: {"type": "session", "session_id": "caller-id"}\n\n'
+    assert len(supplied_failure) == 2
 
 
 @pytest.mark.asyncio
@@ -442,8 +498,8 @@ async def test_run_agent_stream_continues_after_loading_skill(
     )
     chat_client = LoadSkillChatClient()
     monkeypatch.setattr(
-        maf.get_client_manager(),
-        "build_chat_client_with_target",
+        maf,
+        "build_chat_client",
         lambda _model: (chat_client, InferenceTarget()),
     )
     monkeypatch.setattr(

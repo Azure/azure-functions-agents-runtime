@@ -18,11 +18,6 @@ from pydantic import BaseModel, Field
 
 from azure_functions_agents._function_tool import tool, workflow_tool
 from azure_functions_agents.app import create_function_app
-from azure_functions_agents.client_manager import (
-    ClientManager,
-    get_client_manager,
-    set_client_manager,
-)
 from azure_functions_agents.config import paths
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness import (
@@ -82,15 +77,6 @@ def preview(monkeypatch, tmp_path):
         OpenAIProvider("not-a-credential"),
         session_storage=resolve_route(tmp_path),
     )
-
-
-@pytest.fixture
-def replace_client_manager():
-    original = get_client_manager()
-    try:
-        yield set_client_manager
-    finally:
-        set_client_manager(original)
 
 
 def _request(*, new_session=True):
@@ -1520,27 +1506,6 @@ async def test_provider_config_is_resupplied_on_resume(preview, monkeypatch):
     assert created["model_id"] == resumed["model_id"] == "gpt-4.1-mini"
     assert created["wire_model"] == resumed["wire_model"] == "gpt-4.1-mini"
     assert created["wire_api"] == resumed["wire_api"] == "responses"
-
-
-@pytest.mark.asyncio
-async def test_late_custom_manager_replacement_fails_before_native_execution(
-    preview, monkeypatch, replace_client_manager
-):
-    class CustomManager(ClientManager):
-        def resolve_model(self, requested):
-            return requested or "custom"
-
-        def build_chat_client(self, model):
-            raise AssertionError("Custom MAF client must not be constructed")
-
-    replace_client_manager(CustomManager())
-    native = Mock(side_effect=AssertionError("Native runtime must not be acquired"))
-    monkeypatch.setattr(_copilot, "get_runtime", native)
-
-    with pytest.raises(UnsupportedCapabilityError, match=r"ClientManager.*MAF-only"):
-        await _copilot.run(preview, _request())
-
-    native.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ An endpoint-first chat agent with a built-in web UI, streaming API, MCP tool, Mi
 - **Microsoft Foundry** — provisions an AI Services account, Foundry project, and `gpt-5.4` deployment
 - **Code execution** — sandboxed Python via ACA Dynamic Sessions with Playwright support
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage
-- **Conversation compaction** — MAF bounds model-facing history to an explicit token budget while retaining full persisted history
+- **Conversation compaction** — the runtime relies on MAF's native defaults while retaining full persisted history
 
 ## Prerequisites
 
@@ -66,7 +66,7 @@ Once `func start` is running:
 
 ## How It Works
 
-- [`agents.config.yaml`](src/agents.config.yaml) sets the shared output limit and configures the code execution sandbox; [`main.agent.md`](src/main.agent.md) adds MAF compaction and built-in endpoints
+- [`agents.config.yaml`](src/agents.config.yaml) sets the shared output limit and configures the code execution sandbox; [`main.agent.md`](src/main.agent.md) enables the built-in endpoints
 - The Bicep template creates a Microsoft Foundry project and `gpt-5.4` deployment for cloud runs
 - The framework registers built-in HTTP chat endpoints, an MCP tool, and a built-in chat UI
 - The agent can answer questions and run Python code in a secure sandbox when needed

@@ -29,15 +29,11 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
-from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config import paths
-from azure_functions_agents.config.schema import (
-    AgentConfiguration,
-    AgentFrameworkCompactionConfig,
-    AgentFrameworkConfiguration,
-)
+from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 
 
@@ -451,8 +447,8 @@ async def test_public_maf_skill_paths_expand_to_selected_roots_before_sdk_loadin
     monkeypatch.setattr(agent_framework.SkillsProvider, "from_paths", from_paths)
     chat_client = SkillMetadataChatClient()
     monkeypatch.setattr(
-        maf.get_client_manager(),
-        "build_chat_client_with_target",
+        maf,
+        "build_chat_client",
         lambda _model: (chat_client, InferenceTarget()),
     )
     monkeypatch.setattr(maf, "_build_history_provider", lambda _slug: None)
@@ -506,8 +502,8 @@ def test_build_agent_session_forces_provider_managed_history(
         raising=False,
     )
     monkeypatch.setattr(
-        maf.get_client_manager(),
-        "build_chat_client_with_target",
+        maf,
+        "build_chat_client",
         lambda _model: (object(), InferenceTarget()),
     )
     history_calls: list[str] = []
@@ -611,8 +607,8 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
         raising=False,
     )
     monkeypatch.setattr(
-        maf.get_client_manager(),
-        "build_chat_client_with_target",
+        maf,
+        "build_chat_client",
         lambda _model: (object(), InferenceTarget()),
     )
     monkeypatch.setattr(maf, "_build_history_provider", lambda agent_slug: object())
@@ -746,8 +742,8 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         raising=False,
     )
     monkeypatch.setattr(
-        maf.get_client_manager(),
-        "build_chat_client_with_target",
+        maf,
+        "build_chat_client",
         lambda _model: (object(), InferenceTarget()),
     )
     monkeypatch.setattr(
@@ -828,8 +824,8 @@ def test_fresh_harness_agents_reload_history_for_same_session(
         return _SharedHistoryProvider(stored_messages)
 
     monkeypatch.setattr(
-        maf.get_client_manager(),
-        "build_chat_client_with_target",
+        maf,
+        "build_chat_client",
         lambda _model: (client, InferenceTarget()),
     )
     monkeypatch.setattr(
@@ -944,8 +940,8 @@ async def test_qualified_agent_name_round_trips_history_without_entering_model_r
     ) as provider_client:
         chat_client = OpenAIChatClient(model="offline-model", async_client=provider_client)
         monkeypatch.setattr(
-            maf.get_client_manager(),
-            "build_chat_client_with_target",
+            maf,
+            "build_chat_client",
             lambda _model: (chat_client, InferenceTarget()),
         )
         agent, session, resolved_id, _, _ = await maf._build_agent_session(
@@ -984,10 +980,10 @@ async def test_qualified_agent_name_round_trips_history_without_entering_model_r
     assert "Contoso-Agents/billing" not in json.dumps(requests)
 
 
-def test_harness_compacts_model_context_without_rewriting_stored_history(
+def test_native_compaction_preserves_small_history_without_rewriting_storage(
     monkeypatch: Any,
 ) -> None:
-    """Compaction trims model context while provider storage retains the full conversation."""
+    """Native defaults leave a small conversation intact in model context and storage."""
     response_text = "prior response detail " * 80
     first_prompt = "first-turn context " * 80
     second_prompt = "current-turn question " * 80
@@ -995,8 +991,8 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
     stored_messages: list[Message] = []
 
     monkeypatch.setattr(
-        maf.get_client_manager(),
-        "build_chat_client_with_target",
+        maf,
+        "build_chat_client",
         lambda _model: (client, InferenceTarget()),
     )
     monkeypatch.setattr(
@@ -1019,12 +1015,7 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
             "workflow_durable_client": None,
             "agent_name": None,
             "web_request_tools": None,
-            "agent_configuration": AgentConfiguration(
-                max_output_tokens=100,
-                agent_framework=AgentFrameworkConfiguration(
-                    compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=500)
-                ),
-            ),
+            "agent_configuration": AgentConfiguration(max_output_tokens=100),
         }
         first_agent, first_session, _, _, _ = await maf._build_agent_session(**common)
         await first_agent.run(first_prompt, session=first_session)
@@ -1037,9 +1028,7 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
     assert client.calls[0] == [first_prompt]
     assert client.calls[1], "expected a second model call"
     assert client.calls[1][-1] == second_prompt
-    assert first_prompt not in client.calls[1], (
-        "expected prior history to be compacted (no full first prompt in the second call)"
-    )
+    assert first_prompt in client.calls[1]
     assert [message.text for message in stored_messages] == [
         first_prompt,
         response_text,
@@ -1146,12 +1135,7 @@ def test_run_agent_stream_uses_session_builder_with_configuration(monkeypatch: A
 
 def test_run_agent_passes_agent_configuration_to_builder(monkeypatch: Any) -> None:
     captured: list[dict[str, Any]] = []
-    config = AgentConfiguration(
-        max_output_tokens=16_000,
-        agent_framework=AgentFrameworkConfiguration(
-            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=200_000)
-        ),
-    )
+    config = AgentConfiguration(max_output_tokens=16_000)
 
     async def fake_harness_builder(
         **kwargs: Any,

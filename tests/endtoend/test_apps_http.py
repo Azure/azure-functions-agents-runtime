@@ -178,25 +178,35 @@ def test_unknown_route_returns_404(builtin_endpoints_host: Served) -> None:
     expect_status(resp, 404)
 
 
-def test_http_agent_rejects_invalid_input_schema(structured_io_host: Served) -> None:
-    """input_schema validation returns 400 (with session header) before the LLM."""
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({}, id="missing-required-properties"),
+        pytest.param(
+            {"subscription_id": "sub-123", "report_type": "not-a-real-type"},
+            id="invalid-enum",
+        ),
+    ],
+)
+@pytest.mark.parametrize("session_id", [None, "caller-supplied-session"])
+def test_http_agent_rejects_invalid_input_schema(
+    structured_io_host: Served,
+    body: dict[str, str],
+    session_id: str | None,
+) -> None:
+    """Validation rejects input before execution and echoes only caller-supplied IDs."""
     client, endpoints = structured_io_host
     report = find_endpoint(endpoints, route_exact="structured-report", method="POST")
 
-    # Missing both required properties.
-    missing = client.post(report.route, json={})
-    expect_status(missing, 400)
-    payload = expect_json(missing)
+    headers = {"X-Ms-Session-Id": session_id} if session_id is not None else {}
+    response = client.post(report.route, json=body, headers=headers)
+    expect_status(response, 400)
+    payload = expect_json(response)
     assert payload.get("error") == "Input validation failed"
-    expect_header(missing, "x-ms-session-id")
-
-    # Required present but report_type violates the enum.
-    bad_enum = client.post(
-        report.route,
-        json={"subscription_id": "sub-123", "report_type": "not-a-real-type"},
-    )
-    expect_status(bad_enum, 400)
-    assert expect_json(bad_enum).get("error") == "Input validation failed"
+    if session_id is None:
+        assert "x-ms-session-id" not in response.headers
+    else:
+        assert expect_header(response, "x-ms-session-id") == session_id
 
 
 # --------------------------------------------------------------------------- #

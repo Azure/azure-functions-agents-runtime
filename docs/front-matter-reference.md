@@ -129,34 +129,18 @@ Enable built-in endpoints for interactive testing, programmatic access, and agen
 
 ### Global and agent: `agent_configuration`
 
-Configure portable output limits and Microsoft Agent Framework-specific conversation compaction:
+Configure portable output limits:
 
 ```yaml
 agent_configuration:
   max_output_tokens: 4096
-  agent_framework:
-    compaction:
-      max_context_window_tokens: 8192
 ```
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `max_output_tokens` | PositiveTokenLimit | No | `null` | Positive model output-token limit. May be configured without compaction. |
-| `agent_framework` | object | No | `{}` | Microsoft Agent Framework-specific settings. |
+| `max_output_tokens` | PositiveTokenLimit | No | `null` | Positive model output-token limit. |
 
-#### `agent_configuration.agent_framework`
-
-| Property | Type | Required | Default | Description |
-|----------|------|----------|---------|-------------|
-| `compaction` | object | No | `{}` | Microsoft Agent Framework conversation-compaction settings. |
-
-#### `agent_configuration.agent_framework.compaction`
-
-| Property | Type | Required | Default | Description |
-|----------|------|----------|---------|-------------|
-| `max_context_window_tokens` | PositiveTokenLimit | No | `null` | Positive total context budget used by conversation compaction. Requires an effective `max_output_tokens` smaller than this value. |
-
-Agent values recursively inherit global values. Explicit `null` clears an inherited leaf or subtree. When context compaction is configured, the effective `max_output_tokens` must be present and less than `max_context_window_tokens`.
+Agent values recursively inherit global values. Explicit `null` clears an inherited value.
 
 **See:** [Front Matter Spec - agent_configuration](./front-matter-spec.md#agent_configuration)
 

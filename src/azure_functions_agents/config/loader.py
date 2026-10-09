@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import frontmatter
 import yaml  # type: ignore[import-untyped]
@@ -24,6 +24,8 @@ _FRONTMATTER_ACTION_ITEMS = (
     f"Validate required fields like `name`, `description`, and `trigger` against {_FRONTMATTER_SCHEMA_LINK}.",
     "Re-run startup in strict mode to fail fast (load_agent_specs(..., strict=True)).",
 )
+
+type _ConfigDocument = dict[str, object]
 
 
 def _collect_agent_files(directory: Path) -> list[Path]:
@@ -94,14 +96,49 @@ def _log_frontmatter_indexing_error(source_file: Path, exc: Exception) -> None:
     )
 
 
-def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
+def _normalize_global_config_dict(data: _ConfigDocument) -> _ConfigDocument:
     normalized = dict(data)
-    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
+    return cast(_ConfigDocument, resolve_env_vars_in_data(normalized))
 
 
-def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+def _normalize_agent_metadata(metadata: _ConfigDocument) -> _ConfigDocument:
     normalized = dict(metadata)
-    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
+    return cast(_ConfigDocument, resolve_env_vars_in_data(normalized))
+
+
+def _mapping_field(data: _ConfigDocument, key: str) -> _ConfigDocument | None:
+    value = data.get(key)
+    return value if isinstance(value, dict) else None
+
+
+def _ignore_retired_compaction_setting(
+    data: _ConfigDocument, source_file: Path
+) -> _ConfigDocument:
+    """Drop only the retired MAF compaction setting while preserving strict validation."""
+    configuration = _mapping_field(data, "agent_configuration")
+    if configuration is None:
+        return data
+    agent_framework = _mapping_field(configuration, "agent_framework")
+    if agent_framework is None:
+        return data
+    compaction = _mapping_field(agent_framework, "compaction")
+    if compaction is None or "max_context_window_tokens" not in compaction:
+        return data
+
+    logger.warning(
+        "Ignoring retired configuration field "
+        "agent_configuration.agent_framework.compaction.max_context_window_tokens: file=%s "
+        "MAF uses its native model-aware compaction default.",
+        source_file,
+    )
+    compaction.pop("max_context_window_tokens")
+    if not compaction:
+        agent_framework.pop("compaction")
+    if not agent_framework:
+        configuration.pop("agent_framework")
+    if not configuration:
+        data.pop("agent_configuration")
+    return data
 
 
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:
@@ -130,7 +167,7 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
         _log_frontmatter_indexing_error(source_file, exc)
         raise ValueError(f"{source_file}: failed to parse frontmatter: {exc}") from exc
 
-    metadata = dict(post.metadata or {})
+    metadata = cast(_ConfigDocument, dict(post.metadata or {}))
     substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
 
     normalized = dict(metadata)
@@ -139,6 +176,7 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
         instructions = substitute_env_vars_in_text(post.content)
     else:
         instructions = post.content
+    normalized = _ignore_retired_compaction_setting(normalized, source_file)
 
     # Resolve once to avoid redundant filesystem calls
     resolved_source = source_file.resolve()
@@ -197,7 +235,7 @@ def load_global_config(app_root: Path) -> GlobalConfig:
             f"{source_file}: field `<root>`: expected a YAML mapping. See {_FRONTMATTER_SCHEMA_LINK}"
         )
 
-    normalized = _normalize_global_config_dict(data)
+    normalized = _ignore_retired_compaction_setting(_normalize_global_config_dict(data), source_file)
     try:
         return GlobalConfig.model_validate(normalized)
     except ValidationError as exc:
