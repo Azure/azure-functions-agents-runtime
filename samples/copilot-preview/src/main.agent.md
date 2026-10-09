@@ -32,3 +32,8 @@ For an MCP check, use microsoft_docs_search on the microsoft-learn server to
 search public Azure Functions documentation. Include a Microsoft Learn link
 from the tool result. Do not use make_receipt, web_request, or a skill for
 this check. Do not send local files, session content, or credentials to MCP.
+
+If a read-only Microsoft Learn search fails, retry it once with the same arguments.
+Do not retry other MCP tools or bypass access controls.
+If the retry also fails, report the failure.
+Base your answer only on successful tool results.

@@ -207,11 +207,20 @@ The reference marker appears only in the file, not in the test prompt or skill
 instructions. Do not accept a guessed marker or missing/failed tool evidence.
 For a large MCP search result, the verifier permits `view` of only the saved
 file reported by a successful search under `/session-state/temp/`. All tool
-calls must succeed. The Windows SDK `1.0.16` live check had a failed first
-search followed by a successful retry, so its MCP check still failed. See
+calls must succeed. A failed first search can be followed by a successful
+retry, but that still fails this check. See
 [qualification scope](../../docs/copilot-preview-operations.md#qualification-scope).
 Keep MCP queries limited to public documentation. Do not send local files,
 conversation content, or credentials to the public server.
+
+**Temporary MCP mitigation:** the sample instructs the model to retry a failed
+read-only Learn search once with the same arguments. This is a sample-only
+mitigation for the SDK/native catalog failure tracked in
+[#261](https://github.com/Azure/azure-functions-agents-runtime/issues/261).
+The failure is reported by the SDK's native runtime; its cause and ownership
+are not yet confirmed. The instruction does not guarantee a retry or success.
+Other MCP tools must not be retried. Failed calls remain visible, and the
+strict verifier still fails if the first call fails, even when the retry succeeds.
 
 The receipt and `web_request` behavior remains unchanged. To run without the
 public MCP service, set the top-level `mcp: false` in `src/main.agent.md` and
