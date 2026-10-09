@@ -44,7 +44,7 @@ jobs:
           enable-cache: true
 
       - name: Install documentation dependencies
-        run: uv sync --extra docs --no-install-project --locked
+        run: uv sync --python 3.13 --extra docs --no-install-project --locked
 
       - name: Build documentation
         run: uv run --no-sync mkdocs build --strict
