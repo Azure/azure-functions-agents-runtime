@@ -250,6 +250,31 @@ async def test_bootstrap_advertises_explicit_standalone_anonymous_access() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_bootstrap_advertises_only_the_gated_demo_fault_profiles(
+    enabled: bool,
+) -> None:
+    app = _App()
+    register_durable_chat_http_routes(
+        app,  # type: ignore[arg-type]
+        resolved=_resolved(auth=EndpointAuthConfig(mode="anonymous")),
+        settings=DurableLoopSettings(fault_injection_enabled=enabled),
+        chat_settings=_settings(allowed_origins='["https://frontend.example.test"]'),
+    )
+
+    response = await app.handlers["durable_chat_bootstrap_v1"](
+        _Request(headers={"Origin": "https://frontend.example.test"})
+    )
+    body = json.loads(response.body)
+
+    assert body["supported_fault_profiles"] == (
+        ["none", "model_apim_429_once"] if enabled else ["none"]
+    )
+    assert body["standalone_anonymous"] is True
+    assert response.headers["access-control-allow-origin"] == "https://frontend.example.test"
+
+
+@pytest.mark.asyncio
 async def test_standalone_bootstrap_and_preflight_are_exactly_origin_scoped() -> None:
     app = _App()
     allowed_origin = "https://frontend.example.test"

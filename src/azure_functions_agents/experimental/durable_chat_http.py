@@ -36,6 +36,7 @@ from .durable_chat_origin import (
     durable_chat_request_origin,
 )
 from .durable_chat_protocol import (
+    DURABLE_CHAT_FAULT_PROFILE_ALLOWLIST,
     MAX_DURABLE_CHAT_REPLAY_EVENTS,
     DurableChatAgentIdentityV1,
     DurableChatBootstrapV1,
@@ -61,7 +62,11 @@ from .durable_loop_http import (
     _owner_hash,
     _status_projection,
 )
-from .durable_loop_protocol import DurableLoopRunStatus, SandboxExecutionProfile
+from .durable_loop_protocol import (
+    DurableFaultProfile,
+    DurableLoopRunStatus,
+    SandboxExecutionProfile,
+)
 from .durable_loop_registration import _normalize_durable_client_binding_annotation
 
 _SHELL_ROUTE = "experimental/durable-chat"
@@ -142,6 +147,11 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
             history_namespace=_history_namespace(
                 owner_hash=_owner_hash(owner),
                 agent_slug=resolved.slug,
+            ),
+            supported_fault_profiles=(
+                DURABLE_CHAT_FAULT_PROFILE_ALLOWLIST
+                if settings.fault_injection_enabled
+                else (DurableFaultProfile.NONE,)
             ),
         )
         return _chat_model_response(bootstrap)

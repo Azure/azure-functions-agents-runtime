@@ -29,6 +29,10 @@ from .durable_loop_protocol import (
 )
 
 DURABLE_CHAT_SCHEMA_VERSION: Literal["1"] = "1"
+DURABLE_CHAT_FAULT_PROFILE_ALLOWLIST: tuple[DurableFaultProfile, ...] = (
+    DurableFaultProfile.NONE,
+    DurableFaultProfile.MODEL_APIM_429_ONCE,
+)
 MAX_DURABLE_CHAT_DOCUMENT_BYTES = 1024 * 1024
 MAX_DURABLE_CHAT_EVENT_BATCH = 64
 MAX_DURABLE_CHAT_REPLAY_EVENTS = 128
@@ -423,6 +427,10 @@ class DurableChatBootstrapV1(_DurableChatModel):
     sandbox_group_resource_id: _ResourceId | None = None
     integrations: DurableChatIntegrationMetadataV1 | None = None
     history_namespace: _Sha256
+    supported_fault_profiles: Annotated[
+        tuple[DurableFaultProfile, ...],
+        Field(min_length=1, max_length=len(DurableFaultProfile)),
+    ] = (DurableFaultProfile.NONE,)
 
     @model_validator(mode="after")
     def validate_bootstrap(self) -> Self:
@@ -435,6 +443,10 @@ class DurableChatBootstrapV1(_DurableChatModel):
             raise ValueError("durable-chat sandbox profiles must be unique")
         if self.default_sandbox_profile not in self.supported_sandbox_profiles:
             raise ValueError("durable-chat default sandbox profile must be supported")
+        if len(set(self.supported_fault_profiles)) != len(self.supported_fault_profiles):
+            raise ValueError("durable-chat fault profiles must be unique")
+        if DurableFaultProfile.NONE not in self.supported_fault_profiles:
+            raise ValueError("durable-chat fault profiles must include none")
         return self
 
 

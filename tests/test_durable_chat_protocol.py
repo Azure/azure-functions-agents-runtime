@@ -123,6 +123,30 @@ def _routes() -> tuple[DurableChatRouteDescriptorV1, ...]:
     )
 
 
+@pytest.mark.parametrize(
+    "profiles",
+    [
+        (DurableFaultProfile.MODEL_APIM_429_ONCE,),
+        (DurableFaultProfile.NONE, DurableFaultProfile.NONE),
+    ],
+)
+def test_bootstrap_rejects_invalid_fault_capability_lists(
+    profiles: tuple[DurableFaultProfile, ...],
+) -> None:
+    payload = _bootstrap().model_dump()
+    payload["supported_fault_profiles"] = profiles
+    with pytest.raises(ValueError, match="fault profiles"):
+        DurableChatBootstrapV1.model_validate(payload)
+
+
+def test_older_bootstrap_defaults_to_no_fault_injection() -> None:
+    payload = _bootstrap().model_dump()
+    del payload["supported_fault_profiles"]
+    assert DurableChatBootstrapV1.model_validate(payload).supported_fault_profiles == (
+        DurableFaultProfile.NONE,
+    )
+
+
 def _bootstrap() -> DurableChatBootstrapV1:
     return DurableChatBootstrapV1(
         agent=DurableChatAgentIdentityV1(

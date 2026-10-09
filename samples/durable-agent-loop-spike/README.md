@@ -212,6 +212,11 @@ dedicated APIM MCP API and does not create an ACA sandbox. The private
 APIM returns one OpenAI-compatible 429, the first model activity fails visibly
 in DTS, and a V3 orchestration timer schedules a second model activity that
 succeeds with the same bounded operation correlation.
+The standalone chat checkbox is shown only when bootstrap advertises
+`model_apim_429_once` in `supported_fault_profiles`, controlled by the existing
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_FAULT_INJECTION_ENABLED`
+gate. Selecting it sends that request's `fault_profile`; the browser does not
+simulate the failure or own the retry.
 
 Start the proxy with credentials only in process environment:
 
