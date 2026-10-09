@@ -16,7 +16,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Evaluate authored behavior** *(preview)* — run native Vally evaluations against the same chat surface under Core Tools or in staging
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
-- **MAF execution controls** — set output limits and optional Microsoft Agent Framework token-budget conversation compaction
+- **Execution controls** — set model output limits while each harness keeps its native conversation-compaction behavior
 
 ## Installation
 
@@ -169,10 +169,8 @@ and [evaluation sample](samples/agent-evaluation/).
 ### Agent configuration
 
 By default, agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional
-global defaults and recursive per-agent overrides configure model output limits. Both harnesses use
-their own native compaction defaults. The Copilot opt-in rejects configured output limits rather
-than silently dropping them; it does not expose the SDK's similarly named token-budget fields as a
-supported authoring contract.
+global defaults and recursive per-agent overrides configure model output limits. Harness-specific
+conversation compaction stays on each SDK's native default behavior.
 
 ```yaml
 # agents.config.yaml

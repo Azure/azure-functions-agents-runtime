@@ -7,13 +7,14 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._logger import logger
 from ..._skill_policy import SkillPolicy
 from .. import _harness_execution
 from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
 from .._provider_config import InferenceTarget
+from .._stream_events import ContentEvent, SessionEvent, StreamEvent
 from ._copilot_capabilities import (
     available_tools,
     mcp_configuration,
@@ -40,7 +41,8 @@ if TYPE_CHECKING:
         SystemMessageConfig,
         ToolSearchConfig,
     )
-    from copilot.session_events import PermissionRequest, SessionEvent
+    from copilot.session_events import PermissionRequest
+    from copilot.session_events import SessionEvent as CopilotSessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
     from ..._tool_descriptor import ToolDescriptor
@@ -70,10 +72,10 @@ class _SessionOptions(TypedDict):
     infinite_sessions: NotRequired[InfiniteSessionConfig]
 
 
-type _EventSink = Callable[[dict[str, Any]], None]
+type _EventSink = Callable[[StreamEvent], None]
 
 
-def _emit_event(event_sink: _EventSink | None, event: dict[str, Any] | None) -> None:
+def _emit_event(event_sink: _EventSink | None, event: StreamEvent | None) -> None:
     if event_sink is not None and event is not None:
         event_sink(event)
 
@@ -173,7 +175,7 @@ def _tool(
     async def invoke(invocation: ToolInvocation) -> ToolResult:
         calls.start_custom(invocation)
         start_event = calls.start_event(invocation.tool_call_id)
-        _emit_event(event_sink, dict(start_event) if start_event is not None else None)
+        _emit_event(event_sink, start_event)
         try:
             result = await function.invoke(
                 arguments=invocation.arguments,
@@ -262,7 +264,7 @@ async def _bounded_cleanup(
 
 @contextmanager
 def _event_subscription(
-    session: CopilotSession, on_event: Callable[[SessionEvent], None]
+    session: CopilotSession, on_event: Callable[[CopilotSessionEvent], None]
 ) -> Iterator[None]:
     unsubscribe = session.on(on_event)
     try:
@@ -334,7 +336,7 @@ async def _send_turn(
     *,
     prompt: str,
     deadline: float,
-) -> SessionEvent | None:
+) -> CopilotSessionEvent | None:
     try:
         return await session.send_and_wait(
             prompt=prompt,
@@ -345,7 +347,7 @@ async def _send_turn(
         raise
 
 
-def _final_reply_content(response: SessionEvent | None) -> str:
+def _final_reply_content(response: CopilotSessionEvent | None) -> str:
     from copilot.session_events import AssistantMessageData
 
     match response.data if response is not None else None:
@@ -360,7 +362,7 @@ def _final_reply_content(response: SessionEvent | None) -> str:
 
 async def _finalize_turn_response(
     session: CopilotSession,
-    response: SessionEvent | None,
+    response: CopilotSessionEvent | None,
     *,
     interrupted: bool,
     token_source: _RequestTokenSource,
@@ -384,7 +386,7 @@ async def _run_session_turn(
     *,
     prompt: str,
     deadline: float,
-    on_event: Callable[[SessionEvent], None],
+    on_event: Callable[[CopilotSessionEvent], None],
     recorder: _harness_execution._AgentUsageRecorder,
     get_usage: Callable[[], tuple[int | None, int | None]],
     token_source: _RequestTokenSource,
@@ -393,7 +395,7 @@ async def _run_session_turn(
 
     interrupted = False
 
-    def observe(event: SessionEvent) -> None:
+    def observe(event: CopilotSessionEvent) -> None:
         nonlocal interrupted
         match event.data:
             case AbortData() | AgentInterruptedData():
@@ -449,13 +451,16 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         ),
     )
 
-    def on_event(event: SessionEvent) -> None:
+    def on_event(event: CopilotSessionEvent) -> None:
         nonlocal input_tokens, output_tokens
         match event.data:
             case AssistantMessageDeltaData(delta_content=delta, parent_tool_call_id=None) if delta:
-                _emit_event(request.event_sink, {"type": "delta", "content": delta})
+                _emit_event(request.event_sink, ContentEvent(type="delta", content=delta))
             case AssistantReasoningDeltaData(delta_content=delta) if delta:
-                _emit_event(request.event_sink, {"type": "intermediate", "content": delta})
+                _emit_event(
+                    request.event_sink,
+                    ContentEvent(type="intermediate", content=delta),
+                )
         match event.data:
             case AssistantMessageData(content=content, parent_tool_call_id=None) if content:
                 messages.append(content)
@@ -468,20 +473,14 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 calls.start_native(started)
                 if not calls.is_custom(started.tool_call_id):
                     start_event = calls.start_event(started.tool_call_id)
-                    _emit_event(
-                        request.event_sink,
-                        dict(start_event) if start_event is not None else None,
-                    )
+                    _emit_event(request.event_sink, start_event)
             case ToolExecutionCompleteData() as completed:
                 calls.complete_native(completed)
                 if not calls.is_custom(completed.tool_call_id):
                     start_event = calls.start_event(
                         completed.tool_call_id, synthesize_arguments=True
                     )
-                    _emit_event(
-                        request.event_sink,
-                        dict(start_event) if start_event is not None else None,
-                    )
+                    _emit_event(request.event_sink, start_event)
                     _emit_event(request.event_sink, calls.end_event(completed.tool_call_id))
 
     token_source = _RequestTokenSource(owner)
@@ -550,7 +549,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 ):
                     if not request.mcp_servers and not request.skills:
                         await _verify_tool_catalog(session, request.tools)
-                    _emit_event(request.event_sink, {"type": "session", "session_id": request.session_id})
+                    _emit_event(
+                        request.event_sink,
+                        SessionEvent(type="session", session_id=request.session_id),
+                    )
                     logger.info(
                         "Copilot request target: provider=%s model=%s",
                         harness.provider.kind if harness.provider is not None else None,

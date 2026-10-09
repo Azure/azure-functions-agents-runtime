@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from azure_functions_agents._credential import build_async_credential
-from azure_functions_agents.harness._provider_config import InferenceTarget
+from azure_functions_agents.harness._provider_config import InferenceTarget, ProviderKind
 from azure_functions_agents.harness.agent_framework._maf_client import build_chat_client
 
 
@@ -36,7 +36,7 @@ def test_build_openai_client_with_resolved_target(monkeypatch: pytest.MonkeyPatc
     built, target = build_chat_client("custom-model")
 
     assert built is client
-    assert target == InferenceTarget("openai", "custom-model")
+    assert target == InferenceTarget(ProviderKind.OPENAI, "custom-model")
     constructor.assert_called_once_with(model="custom-model", api_key=None)
 
 
@@ -56,7 +56,7 @@ def test_build_azure_openai_client_preserves_optional_auth_and_api_version(
     built, target = build_chat_client("deployment")
 
     assert built is client
-    assert target == InferenceTarget("azure_openai", "deployment")
+    assert target == InferenceTarget(ProviderKind.AZURE_OPENAI, "deployment")
     constructor.assert_called_once_with(
         model="deployment",
         azure_endpoint="https://account.example",
@@ -84,7 +84,7 @@ def test_build_foundry_client_uses_managed_identity(
     built, target = build_chat_client("deployment")
 
     assert built is client
-    assert target == InferenceTarget("foundry", "deployment")
+    assert target == InferenceTarget(ProviderKind.FOUNDRY, "deployment")
     constructor.assert_called_once_with(
         project_endpoint="https://project.example",
         model="deployment",

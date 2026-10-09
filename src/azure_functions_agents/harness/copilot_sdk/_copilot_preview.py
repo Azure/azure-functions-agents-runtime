@@ -13,7 +13,7 @@ from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...workflows.tools import build_workflow_tools
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
-from .._provider_config import ProviderKind, resolve_inference_target
+from .._provider_config import resolve_inference_target
 
 if TYPE_CHECKING:
     from ...registration.capabilities import AgentCapabilities
@@ -46,10 +46,8 @@ def select_copilot_harness(root: Path) -> AppHarness:
     check_sdk_dependency()
     try:
         target = resolve_inference_target(None)
-        if target.provider is None:
-            raise ValueError
-        provider = ProviderKind(target.provider)
-    except (RuntimeError, ValueError):
+        provider, model = target.require()
+    except RuntimeError:
         raise UnsupportedCapabilityError(
             f"Copilot preview supports {PROVIDER_ENV}=openai, azure_openai, or foundry "
             "with the existing explicit-or-autodetected provider settings."
@@ -70,7 +68,7 @@ def select_copilot_harness(root: Path) -> AppHarness:
         HarnessKind.COPILOT,
         root,
         route.local_dir / "copilot-preview",
-        target.model,
+        model,
         copilot_provider,
         session_storage=route,
     )

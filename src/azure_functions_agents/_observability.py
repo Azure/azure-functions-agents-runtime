@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._logger import logger
-from .config.env import _to_bool, runtime_env_value
+from .config.env import EnvVar, _to_bool, runtime_env_value
 
 # ---------------------------------------------------------------------------
 # Conventions
@@ -100,10 +100,6 @@ class ResolvedObservability:
     capture_sensitive_data: bool
 
 
-_SENSITIVE_DATA_ENV = "ENABLE_SENSITIVE_DATA"
-_CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
-_AAD_AUTH_STRING_ENV = "APPLICATIONINSIGHTS_AUTHENTICATION_STRING"
-
 _CONTENT_ATTR_MAX_CHARS = 2048
 
 _configured = False
@@ -126,7 +122,7 @@ def _resolve_capture_sensitive_data() -> bool:
 
     The setting is shared by runtime-owned and selected-harness telemetry, and defaults off.
     """
-    value = runtime_env_value(_SENSITIVE_DATA_ENV)
+    value = runtime_env_value(EnvVar.ENABLE_SENSITIVE_DATA)
     return _to_bool(value, default=False) if value else False
 
 
@@ -160,7 +156,7 @@ def configure_observability() -> ResolvedObservability:
             enabled=_enabled, capture_sensitive_data=_capture_sensitive_data
         )
 
-    connection = runtime_env_value(_CONNECTION_ENV)
+    connection = runtime_env_value(EnvVar.APPLICATIONINSIGHTS_CONNECTION_STRING)
     if connection:
         _configure_azure_monitor(connection)
 
@@ -230,7 +226,7 @@ def _configure_azure_monitor(connection_string: str) -> None:
         # caller detects that no provider became active and emits an actionable warning.
         return
     kwargs: dict[str, Any] = {"connection_string": connection_string}
-    if runtime_env_value(_AAD_AUTH_STRING_ENV):
+    if runtime_env_value(EnvVar.APPLICATIONINSIGHTS_AUTHENTICATION_STRING):
         # Unlike the other exporters, Live Metrics (QuickPulse) doesn't resolve AAD auth from this
         # env var, so it 401s repeatedly when the App Insights resource requires AAD. Disable it
         # here — this only drops the real-time Portal view, not telemetry export. Remove once

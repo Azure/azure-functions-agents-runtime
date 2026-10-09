@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..._tool_descriptor import is_harness_object
+from .._stream_events import ToolEndEvent, ToolStartEvent
 from ._tool_result import tool_result_text as _ordinary_tool_result_text
 
 if TYPE_CHECKING:
@@ -117,7 +118,7 @@ class CopilotToolCalls:
 
     def start_event(
         self, tool_call_id: str, *, synthesize_arguments: bool = False
-    ) -> ToolCallEvidence | None:
+    ) -> ToolStartEvent | None:
         record = self._records.get(tool_call_id)
         if record is None or record.start_emitted:
             return None
@@ -125,24 +126,24 @@ class CopilotToolCalls:
         arguments = record.arguments
         if arguments is None and synthesize_arguments:
             arguments = {}
-        return {
-            "type": "tool_start",
-            "tool_call_id": tool_call_id,
-            "tool_name": record.tool_name,
-            "arguments": arguments,
-        }
+        return ToolStartEvent(
+            type="tool_start",
+            tool_call_id=tool_call_id,
+            tool_name=record.tool_name,
+            arguments=arguments,
+        )
 
-    def end_event(self, tool_call_id: str) -> dict[str, Any] | None:
+    def end_event(self, tool_call_id: str) -> ToolEndEvent | None:
         record = self._records.get(tool_call_id)
         if record is None or not record.completed or record.end_emitted:
             return None
         record.end_emitted = True
-        return {
-            "type": "tool_end",
-            "tool_call_id": tool_call_id,
-            "tool_name": record.tool_name,
-            "result": record.result or "",
-        }
+        return ToolEndEvent(
+            type="tool_end",
+            tool_call_id=tool_call_id,
+            tool_name=record.tool_name,
+            result=record.result or "",
+        )
 
     def start_custom(self, invocation: ToolInvocation) -> None:
         record = self._record(invocation.tool_call_id)

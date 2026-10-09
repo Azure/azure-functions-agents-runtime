@@ -44,8 +44,9 @@ def test_resolve_inference_target_precedence(
         monkeypatch.setenv(specific_env, specific_model)
 
     expected = specific_model or "runtime-model"
-    assert resolve_inference_target(None) == InferenceTarget(provider, expected or default_model)
-    assert resolve_inference_target("requested") == InferenceTarget(provider, "requested")
+    provider_kind = ProviderKind(provider)
+    assert resolve_inference_target(None) == InferenceTarget(provider_kind, expected or default_model)
+    assert resolve_inference_target("requested") == InferenceTarget(provider_kind, "requested")
 
 
 @pytest.mark.parametrize(

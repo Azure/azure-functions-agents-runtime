@@ -18,7 +18,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Code execution sandbox configuration
   - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
-- Default Microsoft Agent Framework execution with optional token-budget conversation-history compaction
+- Default runtime settings (model, timeout, and output limits)
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -66,7 +66,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
-- `agent_configuration` — Portable and Microsoft Agent Framework-specific execution defaults inherited by agents
+- `agent_configuration` — Portable execution defaults inherited by agents
 - `system_tools` — Object containing system-level tools configuration
   - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
   - `web_request` — Object or boolean configuring the built-in outbound HTTP request tool (enabled by default; `false` disables app-wide)
@@ -161,7 +161,7 @@ Fields are organized into categories based on how they can be used:
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
 - `timeout` — Execution time limit
-- `agent_configuration` — Output-token limit and Microsoft Agent Framework conversation-compaction settings
+- `agent_configuration` — Output-token limit
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
@@ -201,7 +201,7 @@ unless another agent references it through `subagents` or
 - **Type:** `object | null`
 - **Typical location:** Global defaults in `agents.config.yaml`; optional recursive overrides in agent front matter
 - **Default:** Empty configuration; Microsoft Agent Framework is the default harness
-- **Description:** Configures the model output limit. Harness-specific compaction uses each SDK's
+- **Description:** Configures the model output limit. Harness-specific conversation compaction uses each SDK's
   native defaults and is not configured through this public object.
 
 ```yaml

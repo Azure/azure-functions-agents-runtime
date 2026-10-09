@@ -13,7 +13,7 @@ def test_maf_instrumentation_is_configured_once_per_bound_harness(
 
     calls: list[bool] = []
     monkeypatch.setattr(maf_obs, "suppress_experimental_warnings", nullcontext)
-    monkeypatch.setattr(maf_obs, "capture_sensitive_data", lambda: True)
+    monkeypatch.setattr(maf_obs, "_capture_sensitive_data", lambda: True)
     monkeypatch.setattr(
         sdk_observability,
         "enable_instrumentation",
@@ -25,3 +25,17 @@ def test_maf_instrumentation_is_configured_once_per_bound_harness(
     maf_obs.configure_maf_instrumentation(harness)
 
     assert calls == [True]
+
+
+def test_maf_observability_module_imports_without_cycle() -> None:
+    import importlib
+    import sys
+
+    sys.modules.pop("azure_functions_agents.harness.agent_framework._maf_observability", None)
+    sys.modules.pop("azure_functions_agents._observability", None)
+
+    module = importlib.import_module(
+        "azure_functions_agents.harness.agent_framework._maf_observability"
+    )
+
+    assert hasattr(module, "configure_maf_instrumentation")

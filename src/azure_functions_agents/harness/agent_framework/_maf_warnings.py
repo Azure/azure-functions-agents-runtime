@@ -9,23 +9,32 @@ from contextlib import contextmanager
 
 @contextmanager
 def suppress_experimental_warnings() -> Iterator[None]:
-    """Suppress MAF's experimental category only within MAF-owned operations."""
+    """Suppress current MAF ExperimentalWarning noise only within MAF-owned operations."""
+    experimental_warning, import_warnings = _load_experimental_warning()
+    if experimental_warning is None:
+        _restore_warnings(import_warnings)
+        yield
+        return
+
+    for warning in import_warnings:
+        if not issubclass(warning.category, experimental_warning):
+            _restore_warning(warning)
+
+    with warnings.catch_warnings():
+        # agent-framework-core 1.13.0 still emits ExperimentalWarning when constructing
+        # create_harness_agent() (HARNESS/FileSystemAgentFileStore) and FileHistoryProvider.
+        warnings.simplefilter("ignore", category=experimental_warning)
+        yield
+
+
+def _load_experimental_warning() -> tuple[type[Warning] | None, list[warnings.WarningMessage]]:
     with warnings.catch_warnings(record=True) as import_warnings:
         warnings.simplefilter("always")
         try:
             from agent_framework._feature_stage import ExperimentalWarning
         except ImportError:
-            _restore_warnings(import_warnings)
-            yield
-            return
-
-    for warning in import_warnings:
-        if not issubclass(warning.category, ExperimentalWarning):
-            _restore_warning(warning)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=ExperimentalWarning)
-        yield
+            return None, list(import_warnings)
+    return ExperimentalWarning, list(import_warnings)
 
 
 def _restore_warnings(warnings_to_restore: list[warnings.WarningMessage]) -> None:

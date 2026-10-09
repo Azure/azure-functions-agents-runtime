@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import frontmatter
 import yaml  # type: ignore[import-untyped]
@@ -24,6 +24,8 @@ _FRONTMATTER_ACTION_ITEMS = (
     f"Validate required fields like `name`, `description`, and `trigger` against {_FRONTMATTER_SCHEMA_LINK}.",
     "Re-run startup in strict mode to fail fast (load_agent_specs(..., strict=True)).",
 )
+
+type _ConfigDocument = dict[str, object]
 
 
 def _collect_agent_files(directory: Path) -> list[Path]:
@@ -94,28 +96,33 @@ def _log_frontmatter_indexing_error(source_file: Path, exc: Exception) -> None:
     )
 
 
-def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
+def _normalize_global_config_dict(data: _ConfigDocument) -> _ConfigDocument:
     normalized = dict(data)
-    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
+    return cast(_ConfigDocument, resolve_env_vars_in_data(normalized))
 
 
-def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+def _normalize_agent_metadata(metadata: _ConfigDocument) -> _ConfigDocument:
     normalized = dict(metadata)
-    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
+    return cast(_ConfigDocument, resolve_env_vars_in_data(normalized))
+
+
+def _mapping_field(data: _ConfigDocument, key: str) -> _ConfigDocument | None:
+    value = data.get(key)
+    return value if isinstance(value, dict) else None
 
 
 def _ignore_retired_compaction_setting(
-    data: dict[str, Any], source_file: Path
-) -> dict[str, Any]:
+    data: _ConfigDocument, source_file: Path
+) -> _ConfigDocument:
     """Drop only the retired MAF compaction setting while preserving strict validation."""
-    configuration = data.get("agent_configuration")
-    if not isinstance(configuration, dict):
+    configuration = _mapping_field(data, "agent_configuration")
+    if configuration is None:
         return data
-    agent_framework = configuration.get("agent_framework")
-    if not isinstance(agent_framework, dict):
+    agent_framework = _mapping_field(configuration, "agent_framework")
+    if agent_framework is None:
         return data
-    compaction = agent_framework.get("compaction")
-    if not isinstance(compaction, dict) or "max_context_window_tokens" not in compaction:
+    compaction = _mapping_field(agent_framework, "compaction")
+    if compaction is None or "max_context_window_tokens" not in compaction:
         return data
 
     logger.warning(
@@ -160,7 +167,7 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
         _log_frontmatter_indexing_error(source_file, exc)
         raise ValueError(f"{source_file}: failed to parse frontmatter: {exc}") from exc
 
-    metadata = dict(post.metadata or {})
+    metadata = cast(_ConfigDocument, dict(post.metadata or {}))
     substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
 
     normalized = dict(metadata)

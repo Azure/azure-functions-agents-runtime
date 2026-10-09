@@ -10,7 +10,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
@@ -30,6 +30,13 @@ from .._harness_binding import (
     SessionHistory,
     UnsupportedCapabilityError,
 )
+from .._stream_events import (
+    ContentEvent,
+    DoneEvent,
+    SessionEvent,
+    StreamEvent,
+    StreamTruncatedEvent,
+)
 from . import _copilot_execution, _copilot_preview
 
 if TYPE_CHECKING:
@@ -44,12 +51,12 @@ _STREAM_EVENT_QUEUE_CAPACITY = 128
 
 class _StreamEventQueue:
     def __init__(self) -> None:
-        self._events: deque[dict[str, Any]] = deque()
+        self._events: deque[StreamEvent] = deque()
         self._available = asyncio.Event()
         self._finished = False
         self.dropped_events = 0
 
-    def emit(self, event: dict[str, Any]) -> None:
+    def emit(self, event: StreamEvent) -> None:
         if len(self._events) >= _STREAM_EVENT_QUEUE_CAPACITY:
             drop_index = 1 if self._events[0]["type"] == "session" else 0
             del self._events[drop_index]
@@ -61,7 +68,7 @@ class _StreamEventQueue:
         self._finished = True
         self._available.set()
 
-    async def next_event(self) -> dict[str, Any] | None:
+    async def next_event(self) -> StreamEvent | None:
         while True:
             if self._events:
                 event = self._events.popleft()
@@ -106,7 +113,7 @@ class _CopilotHarnessRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
-        event_sink: Callable[[dict[str, Any]], None] | None = None,
+        event_sink: Callable[[StreamEvent], None] | None = None,
         session_state: HarnessSessionState | None = None,
     ) -> AgentResult:
         del timeout
@@ -281,20 +288,12 @@ class _CopilotHarnessRunner:
                         span.set_attribute(
                             "af.agent.stream.dropped_event_count", events.dropped_events
                         )
-                        yield (
-                            "data: "
-                            f"{json.dumps({'type': 'stream_truncated', 'dropped_events': events.dropped_events})}"
-                            "\n\n"
-                        )
-                        yield (
-                            "data: "
-                            f"{json.dumps({'type': 'message', 'content': result.content})}"
-                            "\n\n"
-                        )
+                        yield f"data: {json.dumps(StreamTruncatedEvent(type='stream_truncated', dropped_events=events.dropped_events))}\n\n"
+                        yield f"data: {json.dumps(ContentEvent(type='message', content=result.content))}\n\n"
                     elif not emitted_text and result.content:
-                        yield f"data: {json.dumps({'type': 'delta', 'content': result.content})}\n\n"
+                        yield f"data: {json.dumps(ContentEvent(type='delta', content=result.content))}\n\n"
                     span.set_attribute("af.agent.outcome", "success")
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    yield f"data: {json.dumps(DoneEvent(type='done'))}\n\n"
                 except asyncio.CancelledError:
                     span.set_attribute("af.agent.outcome", "cancelled")
                     raise
@@ -302,12 +301,12 @@ class _CopilotHarnessRunner:
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
                     if session_state.resumable and not emitted_session:
-                        yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
-                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                        yield f"data: {json.dumps(SessionEvent(type='session', session_id=resolved_id))}\n\n"
+                    yield f"data: {json.dumps(ContentEvent(type='error', content=str(exc)))}\n\n"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+            yield f"data: {json.dumps(ContentEvent(type='error', content=str(exc)))}\n\n"
         finally:
             if execution is not None and not execution.done():
                 execution.cancel()
