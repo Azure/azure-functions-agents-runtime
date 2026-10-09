@@ -128,12 +128,6 @@ class DurableExecutionPlaneRouter(
                 package_hash=package_hash,
             )
             self._snapshot = snapshot
-        if (
-            request.catalog_hash != snapshot.catalog.catalog_hash
-            or request.policy_hash != snapshot.catalog.policy_hash
-            or request.package_hash != snapshot.package_hash
-        ):
-            raise RuntimeError("durable execution catalog binding changed")
         descriptor = snapshot.catalog.by_name().get(request.tool_name)
         if (
             descriptor is None
