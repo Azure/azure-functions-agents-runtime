@@ -1,4 +1,4 @@
-"""Azure Functions agent runtime app factory."""
+"""Azure Functions agent runtime app composition."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import json
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, final
 
 import azure.functions as func
 
+from . import _hosted_skill_app
 from ._agent_identity import agent_id
-from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
@@ -45,6 +45,43 @@ from .workflows.integration import (
     register_workflow_runtime,
     validate_workflow_agent_trigger,
 )
+
+type HostedSkillApp = (
+    _hosted_skill_app.HostedSkillFunctionApp | _hosted_skill_app.HostedSkillDFApp
+)
+
+
+class _HostedSkillFunctionAppConstructor(Protocol):
+    def __call__(self, app_root: Path | None = None) -> HostedSkillApp: ...
+
+
+if TYPE_CHECKING:
+    HostedSkillFunctionApp: _HostedSkillFunctionAppConstructor
+else:
+
+    @final
+    class HostedSkillFunctionApp:
+        """Compose and return the enhanced normal or Durable Functions app."""
+
+        def __init_subclass__(cls, **kwargs: Any) -> None:
+            raise TypeError("HostedSkillFunctionApp cannot be subclassed")
+
+        def __new__(  # type: ignore[misc]
+            cls,
+            app_root: Path | None = None,
+        ) -> HostedSkillApp:
+            if cls is not HostedSkillFunctionApp:
+                raise TypeError("HostedSkillFunctionApp cannot be subclassed")
+            return _compose_function_app(app_root)
+
+
+if TYPE_CHECKING:
+
+    def _hosted_skill_function_app_typing_contract() -> HostedSkillApp:
+        app = HostedSkillFunctionApp()
+        _ = app.route
+        _ = app.hosted_skill
+        return app
 
 
 def _tool_name(tool: object) -> str:
@@ -103,9 +140,9 @@ def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
     return set(sources_by_slug)
 
 
-def create_function_app(
+def _compose_function_app(
     app_root: Path | None = None,
-) -> HostedSkillFunctionApp | HostedSkillDFApp:
+) -> HostedSkillApp:
     """Build and return a fully-configured Azure Functions app.
 
     Two-pass composition: resolve, validate, and freeze every agent into a
@@ -222,14 +259,14 @@ def create_function_app(
         catalog,
         workflow_handler_catalog,
     )
-    app: HostedSkillFunctionApp | HostedSkillDFApp = (
-        HostedSkillDFApp(
+    app: HostedSkillApp = (
+        _hosted_skill_app.HostedSkillDFApp(
             catalog=catalog,
             harness=harness,
             http_auth_level=func.AuthLevel.FUNCTION,
         )
         if workflow_agent_policies
-        else HostedSkillFunctionApp(
+        else _hosted_skill_app.HostedSkillFunctionApp(
             catalog=catalog,
             harness=harness,
             http_auth_level=func.AuthLevel.FUNCTION,
@@ -366,3 +403,10 @@ def create_function_app(
     )
 
     return app
+
+
+def create_function_app(
+    app_root: Path | None = None,
+) -> HostedSkillApp:
+    """Build and return a fully configured Azure Functions app."""
+    return _compose_function_app(app_root)

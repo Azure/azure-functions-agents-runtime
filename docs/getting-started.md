@@ -125,9 +125,9 @@ and `builtin_endpoints`, then inject it by filename-derived slug:
 
 ```python
 from azurefunctions.extensions.http.fastapi import Request, Response
-from azure_functions_agents import HostedSkill, create_function_app
+from azure_functions_agents import HostedSkill, HostedSkillFunctionApp
 
-app = create_function_app()
+app = HostedSkillFunctionApp()
 
 
 @app.route(route="summarize", methods=["POST"])

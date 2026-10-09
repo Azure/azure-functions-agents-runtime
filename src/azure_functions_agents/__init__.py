@@ -110,9 +110,13 @@ except ImportError:
 
 
 from ._function_tool import tool, workflow_tool  # noqa: E402
-from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp  # noqa: E402
+from ._hosted_skill_app import HostedSkillDFApp  # noqa: E402
 from ._session_id import validate_session_id  # noqa: E402
-from .app import create_function_app  # noqa: E402
+from .app import (  # noqa: E402
+    HostedSkillApp,
+    HostedSkillFunctionApp,
+    create_function_app,
+)
 from .client_manager import (  # noqa: E402
     ClientManager,
     MAFClientManager,
@@ -166,6 +170,7 @@ __all__ = [
     "AgentStreamEventKind",
     "ClientManager",
     "HostedSkill",
+    "HostedSkillApp",
     "HostedSkillDFApp",
     "HostedSkillEvent",
     "HostedSkillEventKind",

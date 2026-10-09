@@ -36,6 +36,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "AgentStreamEventKind",
         "ClientManager",
         "HostedSkill",
+        "HostedSkillApp",
         "HostedSkillDFApp",
         "HostedSkillEvent",
         "HostedSkillEventKind",

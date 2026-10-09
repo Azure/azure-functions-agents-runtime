@@ -4,7 +4,7 @@ title: HostedSkill binding
 status: Finalized
 author: victoriahall
 created: 2026-10-05
-updated: 2026-10-08
+updated: 2026-10-09
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1362
 pull_requests: []
@@ -15,9 +15,9 @@ branch: hallvictoria/hosted-skill-binding
 
 ## 1. Summary
 
-Add an opt-in `@app.hosted_skill` decorator to the Function App returned by
-`create_function_app()`. The decorator injects a runtime-owned `HostedSkill`
-object into an ordinary asynchronous Azure Function handler, allowing
+Add a public `HostedSkillFunctionApp()` constructor with an opt-in
+`@app.hosted_skill` decorator. The decorator injects a runtime-owned
+`HostedSkill` object into an ordinary asynchronous Azure Function handler, allowing
 deterministic application code to invoke an existing markdown-defined agent by
 identity slug. `HostedSkill` exposes explicit `run()` and `stream()` methods,
 reuses the runtime's existing discovery, frontmatter, capability, provider,
@@ -29,7 +29,7 @@ package, Functions host binding type, worker converter, or harness provider.
 
 ## 2. Motivation / problem
 
-Today `create_function_app()` turns every `.agent.md` file into runtime-owned
+Today the runtime app composition pipeline turns every `.agent.md` file into runtime-owned
 triggers or built-in endpoints. An application that already has deterministic
 Functions cannot selectively call one of those agents from the middle of its
 own handler without bypassing the resolved catalog and directly reconstructing
@@ -56,7 +56,7 @@ second schema or duplicate connection settings in the decorator.
 **Goals**
 
 - Add `@app.hosted_skill(arg_name=..., agent_name=...)` to both normal and
-  Durable app objects returned by `create_function_app()`.
+  Durable app objects returned by `HostedSkillFunctionApp()`.
 - Inject a harness-neutral `HostedSkill` into an ordinary asynchronous Function
   while hiding the runtime-managed parameter from worker indexing.
 - Resolve `agent_name` against the existing immutable `AgentCatalog` by identity
@@ -110,15 +110,15 @@ pipeline authoritative and avoids a second interpretation of frontmatter.
 
 ### 4.1 Authoring and selection
 
-The author first creates the runtime app, then applies `hosted_skill` as the
-innermost decorator on an asynchronous handler:
+The author constructs `HostedSkillFunctionApp`, then applies `hosted_skill` as
+the innermost decorator on an asynchronous handler:
 
 ```python
 from azurefunctions.extensions.http.fastapi import Request, Response
 
-from azure_functions_agents import HostedSkill, create_function_app
+from azure_functions_agents import HostedSkill, HostedSkillFunctionApp
 
-app = create_function_app()
+app = HostedSkillFunctionApp()
 
 
 @app.route(route="orders/prepare", methods=["POST"])
@@ -167,15 +167,61 @@ construction with its internal catalog and harness inputs is unsupported.
 
 ### 4.2 App types and catalog lifetime
 
-A shared internal mixin provides the decorator. Public concrete
-`HostedSkillFunctionApp` and `HostedSkillDFApp` classes combine that mixin with
-`azure.functions.FunctionApp` and `azure.durable_functions.DFApp`, respectively.
-They remain instances of their corresponding SDK base and preserve its indexing
-and registration behavior. `create_function_app()` returns the union of those
-two concrete types, so static analysis exposes `.hosted_skill` regardless of
-which existing workflow-policy condition selects the Durable variant. It does
-not use a wrapper container or multiple inheritance between the two SDK app
-types.
+A shared internal mixin provides the decorator. The public
+`HostedSkillFunctionApp(app_root=None)` constructor owns discovery, composition,
+and registration, and returns the existing enhanced normal or Durable concrete
+app according to the composed workflow policies. Those concrete classes combine
+the mixin with `azure.functions.FunctionApp` and `azure.durable_functions.DFApp`,
+respectively, so the returned object remains an instance of the selected SDK base
+and preserves its indexing and registration behavior. The constructor is not a
+wrapper container and does not require callers to provide a catalog or harness.
+The existing `create_function_app(app_root=None)` function remains the default
+entry point over the same composition implementation. Existing samples and
+tests keep using that factory; the dedicated hybrid HostedSkill sample documents
+the additive constructor.
+
+`HostedSkillFunctionApp` is a non-subclassable constructor facade, not the
+runtime base type of the object it returns. At runtime it is a public class
+implemented with `__new__`; under `TYPE_CHECKING` the same public symbol is
+declared as a callable protocol whose return is the public `HostedSkillApp`
+type alias:
+
+```python
+type HostedSkillApp = (
+  _hosted_skill_app.HostedSkillFunctionApp
+  | _hosted_skill_app.HostedSkillDFApp
+)
+```
+
+`HostedSkillApp` is the annotation for code that accepts an already composed
+app. Runtime type checks continue to use the selected Azure Functions SDK base.
+The package does not promise `isinstance(app, HostedSkillFunctionApp)` because
+the constructed object is one of the two concrete enhanced SDK apps. Those
+catalog/harness constructors remain implementation details in
+`_hosted_skill_app.py`; `app.py` references them through that private module to
+avoid the public facade name collision. The existing `HostedSkillDFApp` package export is
+retained for compatibility. Subclassing the constructor facade raises `TypeError`
+rather than silently discarding the subclass.
+
+The current factory body moves to private `_compose_function_app(app_root)`. Both
+the constructor facade and compatibility function call that implementation
+exactly once. The facade lives in `app.py` with composition, avoiding a circular
+dependency on `_hosted_skill_app.py`; because `__new__` returns an unrelated
+concrete object, Python does not invoke an additional facade `__init__`.
+Strict mypy requires a targeted `# type: ignore[misc]` on that intentionally
+unrelated runtime `__new__` declaration. Mypy otherwise types a class call as
+the facade class despite the ignored unrelated return, so the exported final
+symbol is declared through a private callable protocol under `TYPE_CHECKING`;
+the runtime branch defines the public class with its real name. The protocol
+preserves the named `app_root` parameter and returns `HostedSkillApp`. A
+`TYPE_CHECKING` contract in
+`app.py` assigns the constructor result to `HostedSkillApp` and accesses
+`.route` and `.hosted_skill`, so the canonical `mypy src` gate enforces the
+public typing behavior.
+
+The package root exports `HostedSkillFunctionApp`, `HostedSkillApp`,
+`HostedSkillDFApp`, and `HostedSkill`. The `HostedSkillApp` alias is declared in
+`app.py` beside the constructor and private composition implementation.
 
 The app receives the complete immutable `AgentCatalog` only after pass 1
 composition succeeds. Decorator application looks up and compiles a selected
@@ -188,7 +234,7 @@ checks, reference validation, capability filtering, harness validation, and
 catalog freezing. It registers no Function unless application code later
 selects it with `@app.hosted_skill` or another supported internal reference.
 This relaxes the current external-surface requirement for all discovered agents
-because decorators execute only after `create_function_app()` returns; startup
+because decorators execute only after app composition returns; startup
 cannot know which entries later decorators will select. Composition therefore
 removes that requirement rather than adding a false
 `is_selected_by_hosted_skill` marker; decorator lookup is the later proof that a
@@ -407,8 +453,10 @@ extension bundle requirement, or Functions host metadata.
 Existing calls to `create_function_app()` remain source-compatible and return a
 subclass of the same normal or Durable app base used today. Existing registered
 functions, routes, bindings, and metadata are unchanged when the decorator is
-unused. The deliberate compatibility change is that a valid endpoint-less
-agent file no longer fails startup and instead becomes an inert catalog entry.
+unused. `HostedSkillFunctionApp()` and `create_function_app()` accept the same
+optional app root and produce equivalent composed apps. The deliberate
+compatibility change is that a valid endpoint-less agent file no longer fails
+startup and instead becomes an inert catalog entry.
 
 ## 5. Decisions log
 
@@ -433,6 +481,10 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
 | 17 | Event compatibility names | HostedSkill-specific primary classes / neutral primary classes only / neutral classes with runtime aliases | Supersede the HostedSkill-specific owning names from the original streaming decision with `AgentStreamEvent` and `AgentStreamEventKind`; keep the reviewed HostedSkill names as runtime aliases | Human | 2026-10-08 |
 | 18 | Selected harness support | MAF only / non-streaming Copilot only / both bound harness contracts | Supersede the Copilot rejection in decision 9: route `run()` and `stream()` through the app-bound MAF or Copilot runner | Human | 2026-10-09 |
 | 19 | Harness-specific preflight | Always use `ClientManager` / MAF-only decorator preflight / invocation-only validation | Keep decorator-time provider preflight for MAF, including its whole-module indexing consequence; use Copilot app-selection, catalog-validation, and runner-owned checks instead | Human | 2026-10-09 |
+| 20 | Public app construction | Factory function / constructor facade / require catalog and harness | Supersede the factory clause in the earlier **Declaration shape** choice: promote `HostedSkillsFunctionApp(app_root=None)` as the customer entry point, dynamically return the composed normal or Durable enhanced app, and retain `create_function_app()` for source compatibility | Human | 2026-10-09 |
+| 21 | Constructor typing and identity | Pretend facade is runtime base / expose concrete constructors / separate constructor and app alias | Supersede the public-concrete-class clause in the earlier **Enhanced app typing** choice: make the facade non-subclassable, annotate `__new__` with public `HostedSkillsApp`, do not promise facade `isinstance`, and stop exporting catalog/harness concrete constructors from the package root | Human | 2026-10-09 |
+| 22 | Mypy constructor inference | Direct public class annotation / untyped cast at call sites / conditional runtime class and typing declaration | Define the real public `__new__` facade class at runtime and declare the same public symbol under `TYPE_CHECKING` through a callable protocol returning `HostedSkillsApp`; this preserves class identity and runtime constructor/subclass behavior while making strict mypy infer the concrete-app union | Agent | 2026-10-09 |
+| 23 | Constructor name and adoption | Plural constructor promoted everywhere / singular additive constructor / factory only | Supersede decisions 20-22 only where naming and adoption differ: expose singular `HostedSkillFunctionApp(app_root=None)` with `HostedSkillApp` typing, retain `create_function_app()` as the default in existing samples/tests/docs, retain the `HostedSkillDFApp` compatibility export, and adopt the constructor only in HostedSkill-specific guidance and its dedicated sample | Human | 2026-10-09 |
 
 ## 6. Test plan
 
@@ -441,6 +493,12 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
   hidden worker signature, argument forwarding, caller-injection rejection,
   fresh facade identity, handler returns, exceptions, cancellation, SDK-base
   `isinstance` compatibility, and static return typing.
+- [ ] Unit: the public constructor calls composition once, rejects subclassing,
+  skips facade initialization, and exposes a mypy-checked union return that
+  supports `.route` and `.hosted_skill`; the source-side typing contract runs
+  under canonical `mypy src`, with one documented `__new__` return ignore.
+- [ ] Unit: package exports include `HostedSkillFunctionApp`, `HostedSkillApp`,
+  `HostedSkillDFApp`, and `HostedSkill`.
 - [ ] Unit: HostedSkill forwards resolved instructions, model, timeout,
   configuration, filtered user tools, MCP, skills, `web_request`, and
   session-bound sandbox tools without mutating the catalog.
@@ -467,8 +525,14 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
 - [ ] Unit: Foundry preflight requires a project endpoint, permits existing
   model fallback, constructs no client or credential, and delegates validation
   to custom managers.
-- [ ] Integration: `create_function_app()` catalogs an endpoint-less agent
-  without registering a surface and preserves all existing auto-registration.
+- [ ] Integration: the compatibility `create_function_app()` catalogs an
+  endpoint-less agent without registering a surface and preserves all existing
+  auto-registration.
+- [ ] Integration: `HostedSkillFunctionApp()` accepts the same optional app root,
+  performs complete composition without catalog/harness arguments, selects the
+  normal or Durable concrete app without double initialization, and remains
+  behaviorally equivalent to the compatibility factory: same selected concrete
+  type and registered functions for the same project.
 - [ ] Integration: a deterministic route invokes an injected HostedSkill backed
   by an existing `.agent.md` without repeating agent or connection settings.
 - [ ] Integration: decorated and undecorated handlers coexist in one app without
@@ -489,7 +553,8 @@ selection.
 
 - [ ] `docs/architecture.md` - add the enhanced app/decorator registration path,
   catalog-backed facade, optional structured-event capability, runner-owned SSE
-  adapter, MAF event core, Copilot capability boundary, and package ownership.
+  adapter, MAF event core, Copilot capability boundary, public constructor/private
+  composition split, and package ownership.
 - [ ] `docs/front-matter-spec.md` - document identity-slug selection,
   endpoint-less internal agents, reused versus surface-only fields, and version
   1 limitations.
@@ -528,3 +593,10 @@ selection.
   execution, retained MAF decorator-time provider preflight with its whole-app
   indexing consequence documented, and moved shared execution helpers out of
   the Azure-aware registration layer.
+- **Public-constructor refinement sign-off:** victoriahall, 2026-10-09. Requested
+  and approved the constructor facade, then refined its public name to
+  `HostedSkillFunctionApp()` and its adoption to additive-only: the existing
+  factory remains the default outside HostedSkill-specific guidance. Independent
+  architecture reviews on 2026-10-09 confirmed the runtime facade, callable
+  typing protocol, public app alias, package exports, and strict-typing contract
+  with no remaining blockers.

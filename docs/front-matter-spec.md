@@ -144,15 +144,15 @@ also be referenced as another agent's Chat or Workflow Sub Agent.
 
 ### HostedSkill injection
 
-`create_function_app()` returns an enhanced Azure Functions app with a
+`HostedSkillFunctionApp()` returns an enhanced Azure Functions app with a
 `hosted_skill` decorator. Place it directly below the Azure Functions trigger
 decorator and select an agent by its filename-derived identity slug:
 
 ```python
 from azurefunctions.extensions.http.fastapi import Request, Response
-from azure_functions_agents import HostedSkill, create_function_app
+from azure_functions_agents import HostedSkill, HostedSkillFunctionApp
 
-app = create_function_app()
+app = HostedSkillFunctionApp()
 
 
 @app.route(route="summarize", methods=["POST"])

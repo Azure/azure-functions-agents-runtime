@@ -1,8 +1,12 @@
 from azurefunctions.extensions.http.fastapi import JSONResponse, Request
 
-from azure_functions_agents import HostedSkill, create_function_app, validate_session_id
+from azure_functions_agents import (
+    HostedSkill,
+    HostedSkillFunctionApp,
+    validate_session_id,
+)
 
-app = create_function_app()
+app = HostedSkillFunctionApp()
 
 
 @app.route(route="summarize", methods=["POST"])

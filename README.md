@@ -167,9 +167,9 @@ and needs an agent internally. The selected `.agent.md` may omit both
 
 ```python
 from azurefunctions.extensions.http.fastapi import Request, Response
-from azure_functions_agents import HostedSkill, create_function_app
+from azure_functions_agents import HostedSkill, HostedSkillFunctionApp
 
-app = create_function_app()
+app = HostedSkillFunctionApp()
 
 
 @app.route(route="summarize", methods=["POST"])
