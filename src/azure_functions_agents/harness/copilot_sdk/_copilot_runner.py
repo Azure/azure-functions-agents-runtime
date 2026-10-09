@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Sequence
@@ -14,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from azure_functions_agents import runner as _runner
 
+from ..._agent_execution import _set_run_result_attributes
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput
 from ...config import ResolvedAgent, SubagentRef
@@ -22,6 +22,7 @@ from ...discovery.mcp import MCPServerDescriptor
 from ...discovery.skills import SkillDescriptor
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
+from ...streaming_events import AgentStreamEvent, AgentStreamEventKind
 from .._agent_runner import AgentFunctionTool, AgentRunner
 from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
 from . import _copilot_execution, _copilot_preview
@@ -172,7 +173,7 @@ class _CopilotHarnessRunner:
         result.delegate_error_count = delegate_tracker.count if delegate_tracker else 0
         return result
 
-    async def run_agent_stream(
+    async def run_agent_events(
         self,
         prompt: str,
         *,
@@ -199,7 +200,8 @@ class _CopilotHarnessRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
-    ) -> AsyncGenerator[str]:
+        execution_surface: str | None = None,
+    ) -> AsyncGenerator[AgentStreamEvent]:
         execution: asyncio.Task[AgentResult] | None = None
         try:
             validated_id = _validate_session_id(session_id)
@@ -238,56 +240,58 @@ class _CopilotHarnessRunner:
                 finally:
                     events.finish()
 
+            span_attributes = {
+                "af.agent.name": agent_name,
+                "af.agent.display_name": display_name,
+                "af.agent.trigger_type": "stream",
+                "af.agent.session_id": resolved_id,
+                "af.agent.model": model,
+            }
+            if execution_surface is not None:
+                span_attributes["af.agent.execution_surface"] = execution_surface
             with start_span(
                 f"agent.run {agent_name or 'agent'}",
                 lifecycle_stage=LifecycleStage.AGENT_RUN,
-                attributes={
-                    "af.agent.name": agent_name,
-                    "af.agent.display_name": display_name,
-                    "af.agent.trigger_type": "stream",
-                    "af.agent.session_id": resolved_id,
-                    "af.agent.model": model,
-                },
+                attributes=span_attributes,
             ) as span:
                 execution = asyncio.create_task(execute())
                 try:
                     while (event := await events.next_event()) is not None:
                         if event["type"] == "delta":
                             emitted_text = True
-                        yield f"data: {json.dumps(event, default=str)}\n\n"
+                        yield AgentStreamEvent.from_dict(event)
                     result = await execution
-                    from ...registration._handlers import _set_run_result_attributes
-
                     _set_run_result_attributes(span, result)
                     if events.dropped_events:
                         span.set_attribute(
                             "af.agent.stream.dropped_event_count", events.dropped_events
                         )
-                        yield (
-                            "data: "
-                            f"{json.dumps({'type': 'stream_truncated', 'dropped_events': events.dropped_events})}"
-                            "\n\n"
+                        yield AgentStreamEvent(
+                            AgentStreamEventKind.STREAM_TRUNCATED,
+                            dropped_events=events.dropped_events,
                         )
-                        yield (
-                            "data: "
-                            f"{json.dumps({'type': 'message', 'content': result.content})}"
-                            "\n\n"
+                        yield AgentStreamEvent(
+                            AgentStreamEventKind.MESSAGE,
+                            content=result.content,
                         )
                     elif not emitted_text and result.content:
-                        yield f"data: {json.dumps({'type': 'delta', 'content': result.content})}\n\n"
+                        yield AgentStreamEvent(
+                            AgentStreamEventKind.DELTA,
+                            content=result.content,
+                        )
                     span.set_attribute("af.agent.outcome", "success")
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    yield AgentStreamEvent(AgentStreamEventKind.DONE)
                 except asyncio.CancelledError:
                     span.set_attribute("af.agent.outcome", "cancelled")
                     raise
                 except Exception as exc:
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
-                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                    yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+            yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
         finally:
             if execution is not None and not execution.done():
                 execution.cancel()
@@ -342,4 +346,5 @@ def _validate_session_id(session_id: str | None) -> str | None:
 
 def create_runner(harness: AppHarness) -> AgentRunner:
     """Create the Copilot-backed bound execution facade for one app binding."""
-    return AgentRunner(_CopilotHarnessRunner(harness))
+    backend = _CopilotHarnessRunner(harness)
+    return AgentRunner(backend, event_backend=backend)

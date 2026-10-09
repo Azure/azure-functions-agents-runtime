@@ -14,7 +14,8 @@ from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor
 from ..registration.capabilities import AgentCapabilities
 from ..registration.catalog import AgentCatalog
-from ._harness_binding import AppHarness, HarnessKind
+from ..streaming_events import AgentStreamEvent
+from ._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -54,7 +55,19 @@ class _HarnessRunner(Protocol):
         session_is_new: bool = False,
     ) -> AgentResult: ...
 
-    def run_agent_stream(
+    async def run_leaf_agent_task(
+        self,
+        resolved: ResolvedAgent,
+        capabilities: AgentCapabilities,
+        task: str,
+        *,
+        timeout: float,
+        execution_role: Literal["delegate", "workflow_subagent"],
+    ) -> str: ...
+
+
+class _HarnessEventRunner(Protocol):
+    def run_agent_events(
         self,
         prompt: str,
         *,
@@ -81,24 +94,21 @@ class _HarnessRunner(Protocol):
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
-    ) -> AsyncGenerator[str]: ...
-
-    async def run_leaf_agent_task(
-        self,
-        resolved: ResolvedAgent,
-        capabilities: AgentCapabilities,
-        task: str,
-        *,
-        timeout: float,
-        execution_role: Literal["delegate", "workflow_subagent"],
-    ) -> str: ...
+        execution_surface: str | None = None,
+    ) -> AsyncGenerator[AgentStreamEvent]: ...
 
 
 class AgentRunner:
     """Concrete app-bound facade over one selected harness implementation."""
 
-    def __init__(self, backend: _HarnessRunner) -> None:
+    def __init__(
+        self,
+        backend: _HarnessRunner,
+        *,
+        event_backend: _HarnessEventRunner | None = None,
+    ) -> None:
         self._backend = backend
+        self._event_backend = event_backend
 
     async def run_agent(
         self,
@@ -156,7 +166,7 @@ class AgentRunner:
             session_is_new=session_is_new,
         )
 
-    def run_agent_stream(
+    def run_agent_events(
         self,
         prompt: str,
         *,
@@ -183,11 +193,16 @@ class AgentRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
-    ) -> AsyncGenerator[str]:
+        execution_surface: str | None = None,
+    ) -> AsyncGenerator[AgentStreamEvent]:
+        if self._event_backend is None:
+            raise UnsupportedCapabilityError(
+                "The selected agent harness does not support streaming."
+            )
         effective_deadline = deadline
         if effective_deadline is None:
             effective_deadline = asyncio.get_running_loop().time() + (timeout or 0.0)
-        return self._backend.run_agent_stream(
+        return self._event_backend.run_agent_events(
             prompt,
             instructions=instructions,
             timeout=timeout,
@@ -212,6 +227,7 @@ class AgentRunner:
             skills=skills,
             skill_catalog=skill_catalog,
             session_is_new=session_is_new,
+            execution_surface=execution_surface,
         )
 
     async def run_leaf_agent_task(

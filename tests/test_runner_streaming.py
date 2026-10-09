@@ -28,6 +28,7 @@ from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, d
 from azure_functions_agents.harness import _harness_execution as shared
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
+from azure_functions_agents.streaming_events import HostedSkillEvent, HostedSkillEventKind
 
 
 @pytest.mark.asyncio
@@ -36,11 +37,11 @@ async def test_closing_the_public_stream_closes_the_selected_generator(monkeypat
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
 
     class _SelectedRunner:
-        def run_agent_stream(self, _prompt, **kwargs):
+        def run_agent_events(self, _prompt, **kwargs):
             async def _stream():
                 try:
-                    yield "data: fixture\n\n"
-                    yield "data: unused\n\n"
+                    yield HostedSkillEvent(HostedSkillEventKind.DELTA, content="fixture")
+                    yield HostedSkillEvent(HostedSkillEventKind.DELTA, content="unused")
                 finally:
                     closed.append(True)
 
@@ -49,7 +50,7 @@ async def test_closing_the_public_stream_closes_the_selected_generator(monkeypat
     monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _SelectedRunner())
     stream = runner.run_agent_stream("fixture", _harness=harness)
 
-    assert await anext(stream) == "data: fixture\n\n"
+    assert await anext(stream) == 'data: {"type": "delta", "content": "fixture"}\n\n'
     await stream.aclose()
     assert closed == [True]
 
@@ -1186,6 +1187,63 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
     [span] = spans
     assert span.attributes["af.agent.name"] == "billing"
     assert span.attributes["af.agent.display_name"] == "Billing Specialist"
+
+
+def test_run_agent_events_reports_execution_surface_on_span(monkeypatch: Any) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_build_agent_session(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), "test-session", None, InferenceTarget()
+
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
+
+    async def collect() -> list[object]:
+        return [
+            event
+            async for event in runner.run_agent_events(
+                "prompt",
+                agent_name="billing",
+                _execution_surface="hosted_skill",
+            )
+        ]
+
+    asyncio.run(collect())
+
+    [span] = spans
+    assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.session_id"] == "test-session"
+
+
+def test_run_agent_events_records_session_build_failure_on_span(monkeypatch: Any) -> None:
+    spans = _install_start_span_capture(monkeypatch)
+    failure = RuntimeError("session setup failed")
+
+    async def fake_build_agent_session(**_kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
+
+    async def collect() -> list[object]:
+        return [
+            event
+            async for event in runner.run_agent_events(
+                "prompt",
+                agent_name="billing",
+                _execution_surface="hosted_skill",
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert [event.kind for event in events] == [HostedSkillEventKind.ERROR]
+    [span] = spans
+    assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert span.exceptions == [failure]
 
 
 def test_build_chat_options_from_environment(monkeypatch: Any) -> None:

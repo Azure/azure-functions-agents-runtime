@@ -25,7 +25,6 @@ ABC surface
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
@@ -33,7 +32,7 @@ from typing import Any, cast
 
 from ._credential import build_async_credential
 from ._logger import logger
-from .config.env import runtime_env_value
+from .config.env import EnvVar, runtime_env_value
 
 # ---------------------------------------------------------------------------
 # ABC
@@ -83,6 +82,10 @@ class ClientManager(ABC):
         """Construct a client and return any authoritative target metadata."""
         return self.build_chat_client(model), InferenceTarget()
 
+    def validate_provider_settings(self, model: str | None) -> None:
+        """Validate provider settings without constructing execution resources."""
+        return None
+
     async def close(self) -> None:
         """Release any resources held by the manager. Default: no-op."""
         return None
@@ -114,17 +117,45 @@ class MAFClientManager(ClientManager):
         """Resolve model as requested > provider-specific env > runtime env > default."""
         return self._resolve_model(requested, self._provider())
 
+    def validate_provider_settings(self, model: str | None) -> None:
+        """Validate built-in MAF provider settings without constructing a client."""
+        if self._has_custom_chat_client_builder():
+            return
+        provider = self._provider()
+        self._resolve_model(model, provider)
+        if provider == ProviderKind.OPENAI and not self._env(EnvVar.OPENAI_API_KEY):
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=openai requires OPENAI_API_KEY to be set."
+            )
+        if provider == ProviderKind.AZURE_OPENAI and not self._env(EnvVar.AZURE_OPENAI_ENDPOINT):
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai requires "
+                "AZURE_OPENAI_ENDPOINT to be set."
+            )
+        if provider == ProviderKind.FOUNDRY and not self._env(EnvVar.FOUNDRY_PROJECT_ENDPOINT):
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry requires "
+                "FOUNDRY_PROJECT_ENDPOINT to be set."
+            )
+        if provider not in ProviderKind:
+            raise RuntimeError(
+                f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
+                "Use one of: openai, azure_openai, foundry."
+            )
+
     @classmethod
     def _resolve_model(cls, requested: str | None, provider: str) -> str:
         if requested:
             return requested
-        runtime_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
+        runtime_model = runtime_env_value(EnvVar.MODEL)
         if provider == "azure_openai":
             return (
-                os.environ.get("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
+                runtime_env_value(EnvVar.AZURE_OPENAI_DEPLOYMENT)
+                or runtime_model
+                or _DEFAULT_OPENAI_MODEL
             )
         if provider == "foundry":
-            return os.environ.get("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
+            return runtime_env_value(EnvVar.FOUNDRY_MODEL) or runtime_model or _DEFAULT_FOUNDRY_MODEL
         return runtime_model or _DEFAULT_OPENAI_MODEL
 
     def build_chat_client(self, model: str | None) -> Any:
@@ -140,7 +171,11 @@ class MAFClientManager(ClientManager):
 
     def _has_custom_chat_client_builder(self) -> bool:
         """Return whether a subclass overrides the existing public builder hook."""
-        return type(self).build_chat_client is not MAFClientManager.build_chat_client
+        return (
+            type(self).build_chat_client is not MAFClientManager.build_chat_client
+            or type(self).build_chat_client_with_target
+            is not MAFClientManager.build_chat_client_with_target
+        )
 
     def _build_maf_chat_client_with_target(
         self, model: str | None
@@ -167,25 +202,25 @@ class MAFClientManager(ClientManager):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _env(name: str) -> str:
+    def _env(name: EnvVar) -> str:
         """Return ``$name`` stripped, or ``""`` if missing/blank.
 
         Empty-string env vars are common in local.settings.json templates and
         ``azd env set X ""`` workflows. We treat them as if the variable were
         unset so auto-detection does not pick them up.
         """
-        return (os.environ.get(name) or "").strip()
+        return runtime_env_value(name)
 
     @classmethod
     def _provider(cls) -> str:
-        explicit = cls._env("AZURE_FUNCTIONS_AGENTS_PROVIDER").lower()
+        explicit = cls._env(EnvVar.PROVIDER).lower()
         if explicit:
             return explicit
-        if cls._env("AZURE_OPENAI_ENDPOINT"):
+        if cls._env(EnvVar.AZURE_OPENAI_ENDPOINT):
             return "azure_openai"
-        if cls._env("FOUNDRY_PROJECT_ENDPOINT"):
+        if cls._env(EnvVar.FOUNDRY_PROJECT_ENDPOINT):
             return "foundry"
-        if cls._env("OPENAI_API_KEY"):
+        if cls._env(EnvVar.OPENAI_API_KEY):
             return "openai"
         raise RuntimeError(
             "No MAF provider configured. Set one of: "
@@ -202,14 +237,14 @@ class MAFClientManager(ClientManager):
 
         return OpenAIChatClient(
             model=model,
-            api_key=cls._env("OPENAI_API_KEY") or None,
+            api_key=cls._env(EnvVar.OPENAI_API_KEY) or None,
         )
 
     @classmethod
     def _build_azure_openai(cls, model: str) -> Any:
         from agent_framework.openai import OpenAIChatClient
 
-        endpoint = cls._env("AZURE_OPENAI_ENDPOINT")
+        endpoint = cls._env(EnvVar.AZURE_OPENAI_ENDPOINT)
         if not endpoint:
             raise RuntimeError(
                 "AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai requires "
@@ -222,10 +257,10 @@ class MAFClientManager(ClientManager):
         # Only forward api_version when the user explicitly sets it. MAF defaults
         # to the Responses API ("preview") which rejects Chat Completions GA
         # versions like "2024-10-21" with "API version not supported".
-        api_version = cls._env("AZURE_OPENAI_API_VERSION")
+        api_version = cls._env(EnvVar.AZURE_OPENAI_API_VERSION)
         if api_version:
             kwargs["api_version"] = api_version
-        api_key = cls._env("AZURE_OPENAI_API_KEY")
+        api_key = cls._env(EnvVar.AZURE_OPENAI_API_KEY)
         if api_key:
             kwargs["api_key"] = api_key
         else:
@@ -236,7 +271,7 @@ class MAFClientManager(ClientManager):
     def _build_foundry(cls, model: str) -> Any:
         from agent_framework.foundry import FoundryChatClient
 
-        endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
+        endpoint = cls._env(EnvVar.FOUNDRY_PROJECT_ENDPOINT)
         if not endpoint:
             raise RuntimeError(
                 "AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry requires "

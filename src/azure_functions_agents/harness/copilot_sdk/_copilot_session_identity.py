@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from ..._agent_identity import agent_id
-from ..._session_id import SESSION_ID_PATTERN
+from ..._session_id import validate_session_id
 from ...config.paths import resolve_config_dir
 from .._history_identity import validate_agent_slug
 from .._session_storage import (
@@ -49,11 +49,11 @@ def resolve_route(app_root: Path) -> StorageRoute:
 
 def validate_identity(agent_slug: str, session_id: str) -> None:
     validate_agent_slug(agent_slug)
-    if (
-        not isinstance(session_id, str)
-        or not SESSION_ID_PATTERN.fullmatch(session_id)
-        or session_id in {".", ".."}
-    ):
+    try:
+        validated_session_id = validate_session_id(session_id)
+    except ValueError:
+        raise ValueError("Invalid native session identity.") from None
+    if validated_session_id is None or session_id in {".", ".."}:
         raise ValueError("Invalid native session identity.")
 
 

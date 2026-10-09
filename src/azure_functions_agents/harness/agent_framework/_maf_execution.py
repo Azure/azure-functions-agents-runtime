@@ -6,12 +6,13 @@ import asyncio
 import contextlib
 import json
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 
 from azure_functions_agents import runner as _runner
 
+from ..._agent_execution import _looks_like_tool_error
 from ..._agent_identity import agent_id
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
@@ -24,9 +25,9 @@ from ...config.paths import resolve_config_dir as resolve_config_dir
 from ...config.schema import AgentConfiguration
 from ...discovery.mcp import MCPServerDescriptor, discover_mcp_servers
 from ...discovery.tools import discover_user_tools
-from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
+from ...streaming_events import AgentStreamEvent, AgentStreamEventKind
 from .. import _harness_execution
 from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest
 from .._history_identity import validate_agent_slug
@@ -206,10 +207,6 @@ async def _run_private_cleanup_hooks(
         await stream._run_cleanup_hooks()
     finally:
         error_carrier._stream_error = None
-
-
-def _sse_frame(payload: object, *, default: Callable[[object], object] | None = None) -> str:
-    return f"data: {json.dumps(payload, default=default)}\n\n"
 
 
 def _resolve_sessions_dir(agent_slug: str) -> Path:
@@ -726,7 +723,7 @@ async def run(
     )
 
 
-async def run_stream(
+async def run_events(
     harness: AppHarness,
     request: HarnessRequest,
     *,
@@ -744,8 +741,9 @@ async def run_stream(
     subagents: list[SubagentRef] | None,
     catalog: AgentCatalog | None,
     workflow_policy: WorkflowPlanPolicy | None,
-) -> AsyncGenerator[str]:
-    """Yield the existing SSE vocabulary for a selected MAF invocation."""
+    execution_surface: str | None,
+) -> AsyncGenerator[AgentStreamEvent]:
+    """Yield harness-neutral structured events for a selected MAF invocation."""
     loop = asyncio.get_running_loop()
     deadline = request.deadline
 
@@ -776,21 +774,40 @@ async def run_stream(
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        yield _sse_frame({"type": "error", "content": str(exc)})
+        span_attributes = {
+            "af.agent.name": agent_name,
+            "af.agent.display_name": display_name,
+            "af.agent.trigger_type": "stream",
+            "af.agent.model": model,
+        }
+        if execution_surface is not None:
+            span_attributes["af.agent.execution_surface"] = execution_surface
+        with start_span(
+            f"agent.run {agent_name or 'agent'}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes=span_attributes,
+        ) as span:
+            span.set_attribute("af.agent.outcome", "error")
+            span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+            yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
         return
 
-    yield _sse_frame({"type": "session", "session_id": resolved_id})
+    yield AgentStreamEvent(AgentStreamEventKind.SESSION, session_id=resolved_id)
+
+    span_attributes = {
+        "af.agent.name": agent_name,
+        "af.agent.display_name": display_name,
+        "af.agent.trigger_type": "stream",
+        "af.agent.session_id": resolved_id,
+        "af.agent.model": model,
+    }
+    if execution_surface is not None:
+        span_attributes["af.agent.execution_surface"] = execution_surface
 
     with start_span(
         f"agent.run {agent_name or 'agent'}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,
-        attributes={
-            "af.agent.name": agent_name,
-            "af.agent.display_name": display_name,
-            "af.agent.trigger_type": "stream",
-            "af.agent.session_id": resolved_id,
-            "af.agent.model": model,
-        },
+        attributes=span_attributes,
     ) as span:
         ordinary_tool_error_count = 0
         try:
@@ -826,22 +843,24 @@ async def run_stream(
 
                 async def emit_tool_start_if_ready(
                     call_id: str, event: ToolCallEvidence
-                ) -> AsyncIterator[str]:
+                ) -> AsyncIterator[AgentStreamEvent]:
                     if call_id in emitted_tool_calls:
                         return
                     if not _is_complete_json_argument(event["arguments"]):
                         return
                     emitted_tool_calls.add(call_id)
-                    yield _sse_frame(event)
+                    yield AgentStreamEvent.from_dict(event)
 
-                async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+                async def emit_tool_start_before_result(
+                    call_id: str | None,
+                ) -> AsyncIterator[AgentStreamEvent]:
                     if call_id is None or call_id in emitted_tool_calls:
                         return
                     event = pending_tool_calls.get(call_id)
                     if event is None:
                         return
                     emitted_tool_calls.add(call_id)
-                    yield _sse_frame(event)
+                    yield AgentStreamEvent.from_dict(event)
 
                 stream: _AgentResponseStream | None = None
                 stream_settled = False
@@ -880,15 +899,21 @@ async def run_stream(
                             if ctype == "text":
                                 text = _content_text(item)
                                 if text:
-                                    yield _sse_frame({"type": "delta", "content": text})
+                                    yield AgentStreamEvent(
+                                        AgentStreamEventKind.DELTA,
+                                        content=text,
+                                    )
                             elif ctype == "text_reasoning":
                                 text = _content_text(item)
                                 if text:
-                                    yield _sse_frame({"type": "intermediate", "content": text})
+                                    yield AgentStreamEvent(
+                                        AgentStreamEventKind.INTERMEDIATE,
+                                        content=text,
+                                    )
                             elif ctype == "function_call":
                                 call_id, event = buffer_function_call(item)
                                 if call_id is None:
-                                    yield _sse_frame(event)
+                                    yield AgentStreamEvent.from_dict(event)
                                 else:
                                     async for output in emit_tool_start_if_ready(call_id, event):
                                         yield output
@@ -899,15 +924,15 @@ async def run_stream(
                                 result_event = _function_result_event(item)
                                 if _looks_like_tool_error(result_event.get("result")):
                                     ordinary_tool_error_count += 1
-                                yield _sse_frame(result_event, default=str)
+                                yield AgentStreamEvent.from_dict(result_event)
                     for call_id, event in pending_tool_calls.items():
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
-                            yield _sse_frame(event)
+                            yield AgentStreamEvent.from_dict(event)
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
                     try:
-                        yield _sse_frame({"type": "done"})
+                        yield AgentStreamEvent(AgentStreamEventKind.DONE)
                     finally:
                         usage_details = None
                         try:
@@ -927,7 +952,10 @@ async def run_stream(
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
-                    yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
+                    yield AgentStreamEvent(
+                        AgentStreamEventKind.ERROR,
+                        content=f"Timeout after {timeout}s",
+                    )
                 except asyncio.CancelledError:
                     if usage_recorder is not None:
                         _emit_usage(usage_recorder)
@@ -941,7 +969,7 @@ async def run_stream(
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                    yield _sse_frame({"type": "error", "content": str(exc)})
+                    yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
                 finally:
                     if not stream_settled:
                         exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
@@ -955,7 +983,10 @@ async def run_stream(
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
-            yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
+            yield AgentStreamEvent(
+                AgentStreamEventKind.ERROR,
+                content=f"Timeout after {timeout}s",
+            )
         finally:
             span.set_attribute(
                 "af.agent.tool_error_count",

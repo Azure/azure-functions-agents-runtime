@@ -110,7 +110,13 @@ except ImportError:
 
 
 from ._function_tool import tool, workflow_tool  # noqa: E402
-from .app import create_function_app  # noqa: E402
+from ._hosted_skill_app import HostedSkillDFApp  # noqa: E402
+from ._session_id import validate_session_id  # noqa: E402
+from .app import (  # noqa: E402
+    HostedSkillApp,
+    HostedSkillFunctionApp,
+    create_function_app,
+)
 from .client_manager import (  # noqa: E402
     ClientManager,
     MAFClientManager,
@@ -120,12 +126,20 @@ from .client_manager import (  # noqa: E402
 from .client_manager import shutdown_client_manager as _shutdown_client_manager  # noqa: E402
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
 from .harness._harness_lifecycle import _shutdown_harnesses  # noqa: E402
+from .hosted_skill import HostedSkill  # noqa: E402
+from .response_contract import HostedSkillResponseError  # noqa: E402
 from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
     AgentResult,
     run_agent,
     run_agent_stream,
+)
+from .streaming_events import (  # noqa: E402
+    AgentStreamEvent,
+    AgentStreamEventKind,
+    HostedSkillEvent,
+    HostedSkillEventKind,
 )
 from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 from .system_tools.web_request import create_web_request_tools  # noqa: E402
@@ -152,7 +166,16 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
+    "AgentStreamEvent",
+    "AgentStreamEventKind",
     "ClientManager",
+    "HostedSkill",
+    "HostedSkillApp",
+    "HostedSkillDFApp",
+    "HostedSkillEvent",
+    "HostedSkillEventKind",
+    "HostedSkillFunctionApp",
+    "HostedSkillResponseError",
     "MAFClientManager",
     "WorkflowRetryBackoff",
     "WorkflowRetryPolicy",
@@ -172,5 +195,6 @@ __all__ = [
     "set_client_manager",
     "shutdown_client_manager",
     "tool",
+    "validate_session_id",
     "workflow_tool",
 ]

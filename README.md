@@ -13,6 +13,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
+- **Hosted skills in ordinary Functions** — inject a markdown agent into your own trigger handler with `@app.hosted_skill`
 - **Evaluate authored behavior** *(preview)* — run native Vally evaluations against the same chat surface under Core Tools or in staging
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
@@ -38,13 +39,13 @@ The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Az
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
-| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
+| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`; optional `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. If no model is configured, the runtime uses `gpt-4o-mini`. |
 | Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION` | Alternative Azure-hosted provider. `AZURE_OPENAI_DEPLOYMENT` takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD). |
 | OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` (default `gpt-4o-mini`) | Alternative non-Azure provider. `AZURE_FUNCTIONS_AGENTS_MODEL` applies directly for OpenAI. |
 
 If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
 
-Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
+Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > runtime fallback (`gpt-4o-mini`).
 
 ## Quick Start
 
@@ -157,6 +158,33 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+
+### Hosted skill bindings
+
+Use `@app.hosted_skill` when application code owns the Azure Functions trigger
+and needs an agent internally. The selected `.agent.md` may omit both
+`trigger` and `builtin_endpoints`; its identity slug comes from the filename.
+
+```python
+from azurefunctions.extensions.http.fastapi import Request, Response
+from azure_functions_agents import HostedSkill, HostedSkillFunctionApp
+
+app = HostedSkillFunctionApp()
+
+
+@app.route(route="summarize", methods=["POST"])
+@app.hosted_skill(arg_name="skill", agent_name="summarizer")
+async def summarize(req: Request, skill: HostedSkill) -> Response:
+  result = await skill.run((await req.body()).decode("utf-8"))
+  return Response(result.content, media_type="text/plain")
+```
+
+`skill.run()` returns an `AgentResult`; `skill.stream()` yields structured
+`HostedSkillEvent` values through the app-bound MAF or Copilot harness. The
+facade is intentionally not callable and must be obtained through decorator
+injection rather than constructed directly. See the
+[`hybrid-hosted-skill`](samples/hybrid-hosted-skill/) sample and
+[`HostedSkill injection`](docs/front-matter-spec.md#hostedskill-injection).
 
 ### Agent evaluations (preview)
 

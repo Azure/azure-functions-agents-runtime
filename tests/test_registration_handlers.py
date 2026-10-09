@@ -10,6 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from azure_functions_agents._agent_execution import (
+    _tool_error_count,
+    _total_tool_error_count,
+    build_sandbox_tools_for_session,
+)
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
@@ -26,9 +31,6 @@ from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration._handlers import (
-    _tool_error_count,
-    _total_tool_error_count,
-    build_sandbox_tools_for_session,
     make_agent_handler,
     make_http_agent_handler,
 )
@@ -172,6 +174,25 @@ def test_http_handler_response_schema_invalid_output_returns_500(monkeypatch: An
         "error": "Agent response validation failed",
         "details": "123 is not of type 'string'",
     }
+
+
+def test_http_handler_empty_response_schema_still_requires_json(monkeypatch: Any) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="not JSON", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema={}),
+        AgentCapabilities(),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 500
+    assert json.loads(response.body)["error"] == "Agent returned invalid JSON"
 
 
 def test_copilot_http_handler_keeps_host_owned_structured_output_validation(
@@ -431,7 +452,7 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
         return [tool(lambda: "ok", name="execute_python")]
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration._handlers.import_module",
+        "azure_functions_agents._agent_execution.import_module",
         lambda name: SimpleNamespace(create_sandbox_tools=fake_create_sandbox_tools),
     )
 
@@ -469,7 +490,7 @@ def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypa
         return [tool(lambda: fallback_session_id, name="execute_python")]
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration._handlers.import_module",
+        "azure_functions_agents._agent_execution.import_module",
         lambda name: SimpleNamespace(create_sandbox_tools=fake_create_sandbox_tools),
     )
 
@@ -1194,6 +1215,29 @@ def test_workflow_http_handler_rejects_invalid_schema_response(
     response = asyncio.run(
         handler(DummyRequest({"prompt": "start"}), SimpleNamespace(name="client"))
     )
+    assert response.status_code == 500
+    assert json.loads(response.body)["error"] == "Agent response validation failed"
+
+
+def test_http_handler_translates_invalid_response_schema(monkeypatch: Any) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content='{"message":"ok"}',
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema={"type": 123}),
+        AgentCapabilities(),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"prompt": "start"})))
+
     assert response.status_code == 500
     assert json.loads(response.body)["error"] == "Agent response validation failed"
 

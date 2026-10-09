@@ -16,6 +16,7 @@ from ...discovery.mcp import MCPServerDescriptor
 from ...discovery.skills import SkillDescriptor
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
+from ...streaming_events import AgentStreamEvent
 from .._agent_runner import AgentFunctionTool, AgentRunner
 from .._harness_binding import AppHarness
 from . import _maf_execution
@@ -96,7 +97,7 @@ class _MAFHarnessRunner:
             workflow_policy=workflow_policy,
         )
 
-    def run_agent_stream(
+    def run_agent_events(
         self,
         prompt: str,
         *,
@@ -120,10 +121,11 @@ class _MAFHarnessRunner:
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
         workflow_policy: WorkflowPlanPolicy | None = None,
-        session_is_new: bool = False,
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
-    ) -> AsyncGenerator[str]:
+        session_is_new: bool = False,
+        execution_surface: str | None = None,
+    ) -> AsyncGenerator[AgentStreamEvent]:
         request = _runner._request(
             self._harness,
             prompt,
@@ -144,7 +146,7 @@ class _MAFHarnessRunner:
             web_request_tools=web_request_tools,
             agent_configuration=agent_configuration,
         )
-        return _maf_execution.run_stream(
+        return _maf_execution.run_events(
             self._harness,
             request,
             timeout=timeout if timeout is not None else _runner.DEFAULT_TIMEOUT,
@@ -161,6 +163,7 @@ class _MAFHarnessRunner:
             subagents=subagents,
             catalog=catalog,
             workflow_policy=workflow_policy,
+            execution_surface=execution_surface,
         )
 
     async def run_leaf_agent_task(
@@ -183,4 +186,5 @@ class _MAFHarnessRunner:
 
 def create_runner(harness: AppHarness) -> AgentRunner:
     """Create the MAF-backed bound execution facade for one app binding."""
-    return AgentRunner(_MAFHarnessRunner(harness))
+    backend = _MAFHarnessRunner(harness)
+    return AgentRunner(backend, event_backend=backend)

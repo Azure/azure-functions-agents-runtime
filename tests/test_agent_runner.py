@@ -22,10 +22,15 @@ from azure_functions_agents.discovery.skills import (
 )
 from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.harness import _agent_runner
-from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._harness_binding import (
+    AppHarness,
+    HarnessKind,
+    UnsupportedCapabilityError,
+)
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runtime
 from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
+from azure_functions_agents.streaming_events import HostedSkillEvent, HostedSkillEventKind
 
 
 @pytest.mark.asyncio
@@ -122,6 +127,59 @@ def test_get_agent_runner_keeps_same_root_clones_independent(
     assert created[0] is not created[1]
 
 
+def test_agent_runner_rejects_events_when_backend_does_not_offer_capability() -> None:
+    selected = _agent_runner.AgentRunner(SimpleNamespace())
+
+    with pytest.raises(UnsupportedCapabilityError, match="streaming"):
+        selected.run_agent_events("prompt", deadline=123.0)
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_serializes_events_to_sse_and_closes_iterator() -> None:
+    closed = False
+
+    class _EventBackend:
+        def run_agent_events(self, prompt: str, **kwargs: object):
+            assert prompt == "prompt"
+            assert kwargs["timeout"] == 3.0
+
+            async def events():
+                nonlocal closed
+                try:
+                    yield HostedSkillEvent(
+                        HostedSkillEventKind.SESSION,
+                        session_id="session-one",
+                    )
+                    yield HostedSkillEvent(HostedSkillEventKind.DONE)
+                finally:
+                    closed = True
+
+            return events()
+
+    selected = _agent_runner.AgentRunner(
+        SimpleNamespace(),
+        event_backend=_EventBackend(),
+    )
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(runner, "get_agent_runner", lambda _selected: selected)
+        output = [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt",
+                timeout=3.0,
+                _harness=harness,
+            )
+        ]
+
+    assert output == [
+        'data: {"type": "session", "session_id": "session-one"}\n\n',
+        'data: {"type": "done"}\n\n',
+    ]
+    assert closed is True
+
+
 @pytest.mark.asyncio
 async def test_public_runner_shims_dispatch_all_three_operations_through_bound_runner(
     monkeypatch: pytest.MonkeyPatch,
@@ -134,11 +192,11 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
             seen["run_agent"] = {"prompt": prompt, **kwargs}
             return runner.AgentResult("session", "answer")
 
-        def run_agent_stream(self, prompt: str, **kwargs: object):
-            seen["run_agent_stream"] = {"prompt": prompt, **kwargs}
+        def run_agent_events(self, prompt: str, **kwargs: object):
+            seen["run_agent_events"] = {"prompt": prompt, **kwargs}
 
             async def _stream():
-                yield "data: ok\n\n"
+                yield HostedSkillEvent(HostedSkillEventKind.DELTA, content="ok")
 
             return _stream()
 
@@ -167,11 +225,11 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
     )
 
     assert result.content == "answer"
-    assert stream == ["data: ok\n\n"]
+    assert stream == ['data: {"type": "delta", "content": "ok"}\n\n']
     assert leaf == "leaf"
     assert seen["run_agent"]["session_is_new"] is True
     assert seen["run_agent"]["timeout"] == 2.0
-    assert seen["run_agent_stream"]["timeout"] == 3.0
+    assert seen["run_agent_events"]["timeout"] == 3.0
     assert seen["run_leaf_agent_task"]["execution_role"] == "delegate"
 
 
@@ -221,12 +279,8 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
     server = MCPServerDescriptor.create(
         name="selected", url="https://fixture.invalid/mcp", tools=["lookup"]
     )
-    approved = SkillDescriptor.create(
-        name="approved", path=tmp_path / "approved"
-    )
-    excluded = SkillDescriptor.create(
-        name="excluded", path=tmp_path / "excluded"
-    )
+    approved = SkillDescriptor.create(name="approved", path=tmp_path / "approved")
+    excluded = SkillDescriptor.create(name="excluded", path=tmp_path / "excluded")
     execution = AsyncMock(return_value=runner.AgentResult("session", "answer"))
     backend = _maf_execution if kind is HarnessKind.MAF else _copilot_execution
     monkeypatch.setattr(backend, "run", execution)
@@ -256,6 +310,51 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
     assert request.model == "fixture-model"
     assert request.instructions == "instructions"
     assert _agent_runner.get_agent_runner(harness) is selected
+
+
+@pytest.mark.asyncio
+async def test_maf_event_capability_forwards_skill_catalog_and_session_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = AppHarness(HarnessKind.MAF, tmp_path, default_model="fixture-model")
+    selected = _agent_runner.get_agent_runner(harness)
+    approved = SkillDescriptor.create(name="approved", path=tmp_path / "approved")
+    excluded = SkillDescriptor.create(name="excluded", path=tmp_path / "excluded")
+    observed: dict[str, object] = {}
+
+    def execute(actual_harness, request, **kwargs):
+        observed.update(harness=actual_harness, request=request, kwargs=kwargs)
+
+        async def events():
+            yield HostedSkillEvent(HostedSkillEventKind.DONE)
+
+        return events()
+
+    monkeypatch.setattr(_maf_execution, "run_events", execute)
+
+    output = [
+        event
+        async for event in selected.run_agent_events(
+            "prompt",
+            deadline=123.0,
+            session_id="session-one",
+            session_is_new=True,
+            skills=(approved,),
+            skill_catalog=(approved, excluded),
+            display_name="Billing",
+            execution_surface="hosted_skill",
+        )
+    ]
+
+    request = observed["request"]
+    assert request.skills == (approved,)
+    assert request.skill_catalog == (approved, excluded)
+    assert request.new_session is True
+    assert observed["harness"] is harness
+    assert observed["kwargs"]["display_name"] == "Billing"
+    assert observed["kwargs"]["execution_surface"] == "hosted_skill"
+    assert output == [HostedSkillEvent(HostedSkillEventKind.DONE)]
 
 
 @pytest.mark.asyncio

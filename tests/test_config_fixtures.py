@@ -596,11 +596,9 @@ def test_multi_agent_delegation_fixture() -> None:
     validate_resolved_agent(coordinator, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(billing, discovered_mcp_names=[], discovered_skills=[])
 
-    # Shipping has no trigger and no builtin_endpoints: on its own this is an
-    # error, but once it is known to be referenced as a subagent the
-    # requirement relaxes (FRD 0007 Decision #18).
-    with pytest.raises(ValueError, match="field `trigger`"):
-        validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
+    # Shipping has no trigger and no builtin_endpoints. It remains a valid
+    # inert catalog entry whether or not another agent references it.
+    validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(
         shipping,
         discovered_mcp_names=[],
@@ -816,3 +814,29 @@ def test_agent_configuration_fixture() -> None:
     assert explicit_null_spec.agent_configuration is None
     assert explicit_null.agent_configuration.max_output_tokens is None
     assert explicit_null.agent_configuration.agent_framework is None
+
+
+# ---------------------------------------------------------------------------
+# 20 — HostedSkill: surfaced app agent plus an unreferenced inert agent
+# ---------------------------------------------------------------------------
+
+
+def test_hosted_skill_endpointless_agent_fixture() -> None:
+    fixture = FIXTURES_ROOT / "20_hosted_skill"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    by_name = _specs_by_name(specs)
+
+    assert set(by_name) == {"Public Chat", "Internal Policy"}
+
+    public = compose(by_name["Public Chat"], global_config)
+    internal = compose(by_name["Internal Policy"], global_config)
+
+    assert public.trigger is not None
+    assert public.trigger.type == "http_trigger"
+    assert internal.slug == "internal_policy"
+    assert internal.trigger is None
+    assert internal.builtin_endpoints == BuiltinEndpointsConfig()
+    assert internal.subagents == []
+    validate_resolved_agent(internal, discovered_mcp_names=[], discovered_skills=[])

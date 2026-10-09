@@ -51,7 +51,7 @@ def _make_resolved(**overrides: object) -> ResolvedAgent:
     return ResolvedAgent(**defaults)  # type: ignore[arg-type]
 
 
-def test_validate_resolved_agent_requires_trigger_when_no_builtin_endpoints(
+def test_validate_resolved_agent_allows_inert_agent_without_builtin_endpoints(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "report.agent.md"
@@ -74,12 +74,7 @@ def test_validate_resolved_agent_requires_trigger_when_no_builtin_endpoints(
         metadata={},
         source_file=str(source),
     )
-    with pytest.raises(ValueError) as exc_info:
-        validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])
-    message = str(exc_info.value)
-    assert "field `trigger`" in message
-    assert message.count("docs/front-matter-spec.md#trigger") == 1
-    assert "docs/front-matter-spec.mddocs/front-matter-spec.md#trigger" not in message
+    validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])
 
 
 @pytest.mark.parametrize(
@@ -353,14 +348,6 @@ def test_validate_resolved_agent_relaxes_trigger_requirement_when_referenced_as_
         discovered_skills=[],
         is_referenced_as_subagent=True,
     )
-
-
-def test_validate_resolved_agent_still_requires_trigger_when_not_referenced() -> None:
-    """Regression: default `is_referenced_as_subagent=False` preserves the original requirement."""
-    resolved = _make_resolved(trigger=None, builtin_endpoints=BuiltinEndpointsConfig())
-
-    with pytest.raises(ValueError, match="field `trigger`"):
-        validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])
 
 
 def test_validate_subagent_references_accepts_known_references() -> None:

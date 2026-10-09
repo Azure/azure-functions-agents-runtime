@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 
+import azure_functions_agents._hosted_skill_app as hosted_app_module
 import azure_functions_agents.app as app_module
+from azure_functions_agents import HostedSkill, HostedSkillFunctionApp
 from azure_functions_agents.app import create_function_app
 
 # On-disk fixtures shared with test_config_fixtures.py's loader-level tests
@@ -348,6 +350,142 @@ def test_create_function_app_allows_endpoint_agent_without_trigger(
         "agents/main/chatstream",
         "agents/main/history",
     ]
+
+
+def test_create_function_app_catalogs_inert_agent_for_hosted_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "internal.agent.md",
+        """
+        name: Internal
+        description: Used only through application code.
+        """,
+    )
+
+    class Manager:
+        def validate_provider_settings(self, _model: str | None) -> None:
+            pass
+
+    monkeypatch.setattr(hosted_app_module, "get_client_manager", lambda: Manager())
+    app = create_function_app(tmp_path)
+
+    @app.hosted_skill(arg_name="skill", agent_name="internal")
+    async def use_internal(skill: HostedSkill) -> None:
+        pass
+
+    assert app.get_functions() == []
+
+
+def test_hosted_skill_function_app_composes_without_internal_arguments(
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "internal.agent.md",
+        """
+        name: Internal
+        description: Used only through application code.
+        """,
+    )
+
+    app = HostedSkillFunctionApp(app_root=tmp_path)
+
+    assert app.get_functions() == []
+    assert callable(app.hosted_skill)
+
+
+def test_hosted_skill_function_app_composes_once_without_facade_init(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    composed_app = object()
+    composition_roots: list[Path | None] = []
+
+    def _compose(app_root: Path | None = None) -> object:
+        composition_roots.append(app_root)
+        return composed_app
+
+    def _fail_init(_self: object, _app_root: Path | None = None) -> None:
+        pytest.fail("facade initialization must be skipped")
+
+    monkeypatch.setattr(app_module, "_compose_function_app", _compose)
+    monkeypatch.setattr(HostedSkillFunctionApp, "__init__", _fail_init)
+
+    app = HostedSkillFunctionApp(tmp_path)
+
+    assert app is composed_app
+    assert composition_roots == [tmp_path]
+
+
+def test_hosted_skill_function_app_forwards_default_app_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composed_app = object()
+    composition_roots: list[Path | None] = []
+
+    def _compose(app_root: Path | None = None) -> object:
+        composition_roots.append(app_root)
+        return composed_app
+
+    monkeypatch.setattr(app_module, "_compose_function_app", _compose)
+
+    app = HostedSkillFunctionApp()
+
+    assert app is composed_app
+    assert composition_roots == [None]
+
+
+def test_hosted_skill_function_app_rejects_subclassing() -> None:
+    assert HostedSkillFunctionApp.__name__ == "HostedSkillFunctionApp"
+    assert HostedSkillFunctionApp is not hosted_app_module.HostedSkillFunctionApp
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+        type("UnsupportedHostedSkillFunctionApp", (HostedSkillFunctionApp,), {})
+
+
+@pytest.mark.parametrize("workflows_enabled", [False, True])
+def test_hosted_skill_function_app_matches_compatibility_factory(
+    tmp_path: Path,
+    workflows_enabled: bool,
+) -> None:
+    workflow_config = (
+        """
+        name: Main
+        description: Handles chat.
+        builtin_endpoints:
+          chat_api: true
+        workflows:
+          enabled: true
+        """
+        if workflows_enabled
+        else """
+        name: Main
+        description: Handles chat.
+        builtin_endpoints:
+          chat_api: true
+        """
+    )
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        workflow_config,
+    )
+
+    constructor_app = HostedSkillFunctionApp(tmp_path)
+    factory_app = create_function_app(tmp_path)
+
+    expected_type = (
+        hosted_app_module.HostedSkillDFApp
+        if workflows_enabled
+        else hosted_app_module.HostedSkillFunctionApp
+    )
+    assert type(constructor_app) is expected_type
+    assert type(factory_app) is expected_type
+    assert _function_names(constructor_app.get_functions()) == _function_names(
+        factory_app.get_functions()
+    )
 
 
 def test_create_function_app_raises_on_missing_http_route(tmp_path: Path) -> None:

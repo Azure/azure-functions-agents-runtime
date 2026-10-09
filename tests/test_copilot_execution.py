@@ -237,8 +237,8 @@ async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_tur
         ToolExecutionStartData,
     )
 
+    from azure_functions_agents._agent_execution import _tool_error_count
     from azure_functions_agents.discovery.mcp import MCPServerDescriptor
-    from azure_functions_agents.registration._handlers import _tool_error_count
 
     client = _fake_client()
     session = client.create_session.return_value
@@ -890,9 +890,9 @@ async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_me
     )
     from copilot.tools import ToolInvocation
 
+    from azure_functions_agents._agent_execution import _set_run_result_attributes
     from azure_functions_agents._tool_descriptor import ToolDescriptor
     from azure_functions_agents.discovery.mcp import MCPServerDescriptor
-    from azure_functions_agents.registration._handlers import _set_run_result_attributes
 
     skills = _skill_inventory(preview.app_root)
     host_tool = ToolDescriptor.create(name="host_tool", description="Host tool", func=lambda: "host result")

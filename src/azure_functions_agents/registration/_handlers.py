@@ -13,6 +13,11 @@ import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
+from .._agent_execution import (
+    _set_run_result_attributes,
+    _total_tool_error_count,
+    build_sandbox_tools_for_session,
+)
 from .._logger import logger
 from .._observability import (
     ATTR_FAULT_DOMAIN,
@@ -22,10 +27,15 @@ from .._observability import (
     start_span,
 )
 from .._source_marker import source_marker
-from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ..harness._harness_binding import HarnessKind, bind_harness
 from ..harness._session_storage import SessionStorageError
+from ..response_contract import (
+    InvalidResponseJsonError,
+    ResponseSchemaValidationError,
+    response_format_instructions,
+    validate_response_contract,
+)
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
@@ -42,39 +52,12 @@ AUTH_LEVEL_MAP = {
 _SESSION_ID_HEADER = "x-ms-session-id"
 
 
-def extract_json_from_response(text: str) -> str:
-    """Extract JSON from an agent response, stripping markdown code fences if present."""
-    stripped = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", stripped, re.DOTALL)
-    if fence_match:
-        return fence_match.group(1).strip()
-    return stripped
-
-
 def normalize_timer_schedule(schedule: str) -> str:
     """Accept 5-part cron by prepending seconds; keep 6-part schedules unchanged."""
     schedule_parts = schedule.strip().split()
     if len(schedule_parts) == 5:
         return f"0 {schedule.strip()}"
     return schedule.strip()
-
-
-def build_sandbox_tools_for_session(
-    resolved: ResolvedAgent, session_id: str | None
-) -> list[ToolDescriptor] | None:
-    """Build per-request sandbox tools using the resolved session id."""
-    if resolved.tools_disabled:
-        return None
-    if resolved.sandbox_config is None:
-        return None
-    fallback = session_id or uuid.uuid4().hex
-    sandbox_module = import_module("azure_functions_agents.system_tools.sandbox")
-    create_sandbox_tools = sandbox_module.create_sandbox_tools
-    return list(describe_tools(
-        create_sandbox_tools(
-            resolved.sandbox_config.model_dump(), fallback_session_id=fallback
-        )
-    ))
 
 
 def validate_request_body(body: Any, input_schema: dict[str, Any] | None) -> Response | None:
@@ -114,59 +97,6 @@ def _should_log(resolved: ResolvedAgent) -> bool:
     return _to_bool(resolved.metadata.get("logger", True), default=True)
 
 
-def _looks_like_tool_error(result: Any) -> bool:
-    """Best-effort: does a recorded tool result represent a failure?
-
-    Catches both the sandbox error envelope (``{"error": ...}``) and a "successful" call whose
-    ``stderr`` is non-empty — the case that used to hide broken code execution.
-    """
-    if not isinstance(result, str):
-        return False
-    try:
-        parsed = json.loads(result)
-    except (TypeError, json.JSONDecodeError):
-        return False
-    if not isinstance(parsed, dict):
-        return False
-    if parsed.get("error"):
-        return True
-    stderr = parsed.get("stderr")
-    return bool(isinstance(stderr, str) and stderr.strip())
-
-
-def _tool_error_count(tool_calls: list[dict[str, Any]] | None) -> int:
-    if not tool_calls:
-        return 0
-    return sum(1 for call in tool_calls if _looks_like_tool_error(call.get("result")))
-
-
-def _total_tool_error_count(result: Any) -> int:
-    """Combine tool-call error heuristics with explicit delegate-error accounting.
-
-    ``_tool_error_count`` only recognizes the sandbox error envelope /
-    non-empty ``stderr`` heuristic (:func:`_looks_like_tool_error`), which
-    cannot classify a specialist's sanitized free-text delegation failure
-    (FRD 0007 §4.12: "do NOT rely on `_looks_like_tool_error`'s JSON
-    `{error}`/stderr heuristic for a specialist's sanitized free-text
-    failure"). ``AgentResult.delegate_error_count`` is incremented
-    explicitly by the ``delegate_<slug>`` adapter instead, and is added
-    here so both the run span and the response log see one combined count.
-    """
-    tool_calls = list(getattr(result, "tool_calls", None) or [])
-    delegate_error_count = int(getattr(result, "delegate_error_count", 0) or 0)
-    return _tool_error_count(tool_calls) + delegate_error_count
-
-
-def _set_run_result_attributes(span: Any, result: Any) -> None:
-    """Attach non-sensitive run-summary attributes; content only when opted in."""
-    tool_calls = list(getattr(result, "tool_calls", None) or [])
-    content = str(getattr(result, "content", "") or "")
-    span.set_attribute("af.agent.tool_call_count", len(tool_calls))
-    span.set_attribute("af.agent.tool_error_count", _total_tool_error_count(result))
-    span.set_attribute("af.agent.response_bytes", len(content))
-    span.set_content("af.agent.response", content)
-
-
 def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
     """Build the response log body, gating raw content behind capture_sensitive_data."""
     tool_calls = list(getattr(result, "tool_calls", None) or [])
@@ -181,25 +111,6 @@ def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
         payload["response"] = content
         payload["tool_calls"] = tool_calls
     return payload
-
-
-def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
-    if resolved.response_example:
-        return [
-            "You MUST respond with ONLY a valid JSON object "
-            "(no markdown, no explanation, no code fences). "
-            "Your response must match this example format:\n"
-            f"```json\n{resolved.response_example}\n```"
-        ]
-    if resolved.response_schema:
-        schema_str = json.dumps(resolved.response_schema, indent=2)
-        return [
-            "You MUST respond with ONLY a valid JSON object "
-            "(no markdown, no explanation, no code fences). "
-            "Your response must conform to this JSON Schema:\n"
-            f"```json\n{schema_str}\n```"
-        ]
-    return []
 
 
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
@@ -423,7 +334,7 @@ def make_http_agent_handler(
                     return validation_error
 
                 parts: list[str] = []
-                parts.extend(_response_format_instructions(resolved))
+                parts.extend(response_format_instructions(resolved))
                 parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
                 prompt = "\n\n".join(parts)
 
@@ -468,11 +379,13 @@ def make_http_agent_handler(
                         ),
                     )
 
-                if resolved.response_example or resolved.response_schema:
-                    extracted = extract_json_from_response(result.content)
+                if resolved.response_example or resolved.response_schema is not None:
                     try:
-                        parsed = json.loads(extracted)
-                    except json.JSONDecodeError as exc:
+                        parsed = validate_response_contract(
+                            result.content,
+                            resolved.response_schema,
+                        )
+                    except InvalidResponseJsonError as exc:
                         logger.warning(
                             "HTTP agent '%s' returned invalid JSON: %s",
                             resolved.name,
@@ -495,37 +408,31 @@ def make_http_agent_handler(
                             media_type="application/json",
                             headers={_SESSION_ID_HEADER: session_id},
                         )
-                    if resolved.response_schema:
-                        try:
-                            jsonschema.validate(
-                                instance=parsed,
-                                schema=resolved.response_schema,
-                            )
-                        except jsonschema.ValidationError as exc:
-                            logger.warning(
-                                "HTTP agent '%s' returned JSON that failed schema validation: %s",
-                                resolved.name,
-                                exc,
-                            )
-                            span.set_attribute("af.agent.outcome", "error")
-                            span.set_error(
-                                "response schema validation failed", fault_domain=FaultDomain.APP
-                            )
-                            span.add_event(
-                                "af.response.schema_validation_failed",
-                                {ATTR_FAULT_DOMAIN: FaultDomain.APP},
-                            )
-                            return Response(
-                                content=json.dumps(
-                                    {
-                                        "error": "Agent response validation failed",
-                                        "details": exc.message,
-                                    }
-                                ),
-                                status_code=500,
-                                media_type="application/json",
-                                headers={_SESSION_ID_HEADER: session_id},
-                            )
+                    except ResponseSchemaValidationError as exc:
+                        logger.warning(
+                            "HTTP agent '%s' returned JSON that failed schema validation: %s",
+                            resolved.name,
+                            exc.details,
+                        )
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.set_error(
+                            "response schema validation failed", fault_domain=FaultDomain.APP
+                        )
+                        span.add_event(
+                            "af.response.schema_validation_failed",
+                            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
+                        )
+                        return Response(
+                            content=json.dumps(
+                                {
+                                    "error": "Agent response validation failed",
+                                    "details": exc.details,
+                                }
+                            ),
+                            status_code=500,
+                            media_type="application/json",
+                            headers={_SESSION_ID_HEADER: session_id},
+                        )
                     return Response(
                         content=json.dumps(parsed, ensure_ascii=False),
                         status_code=200,

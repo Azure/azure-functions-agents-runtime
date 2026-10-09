@@ -45,30 +45,11 @@ def validate_resolved_agent(
 ) -> None:
     """Run post-merge sanity checks for a resolved agent.
 
-    ``is_referenced_as_subagent`` relaxes the trigger/``builtin_endpoints``
-    requirement below: an agent reachable only as another agent's
-    delegation target (via that agent's ``subagents:``) doesn't need its
-    own external entry point (Decision #18).
+    ``is_referenced_as_subagent`` is retained for caller compatibility. All
+    fully validated agents may now remain inert catalog entries without an
+    external trigger or built-in endpoint.
     """
     source_file = resolved.source_file or "<unknown>"
-
-    builtin_endpoints = resolved.builtin_endpoints
-    has_builtin_endpoints = bool(
-        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
-    )
-    if (
-        resolved.trigger is None
-        and not has_builtin_endpoints
-        and not is_referenced_as_subagent
-    ):
-        raise ValueError(
-            _format_error(
-                source_file,
-                "trigger",
-                "Required when no builtin_endpoints are enabled.",
-                "#trigger",
-            )
-        )
 
     if resolved.trigger is not None:
         trigger_type = str(resolved.trigger.type or "").strip()
