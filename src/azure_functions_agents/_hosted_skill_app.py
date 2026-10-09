@@ -85,10 +85,6 @@ def _source_call(
 
 def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
     resolved = entry.resolved
-    if harness.name is HarnessKind.COPILOT:
-        raise UnsupportedCapabilityError(
-            "HostedSkill is not available when Copilot preview is enabled."
-        )
     if resolved.subagents:
         raise UnsupportedCapabilityError(
             f"HostedSkill agent {resolved.slug!r} cannot declare chat-time subagents."
@@ -97,7 +93,8 @@ def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
         raise UnsupportedCapabilityError(
             f"HostedSkill agent {resolved.slug!r} cannot enable Dynamic Workflows."
         )
-    get_client_manager().validate_provider_settings(resolved.model)
+    if harness.name is HarnessKind.MAF:
+        get_client_manager().validate_provider_settings(resolved.model)
 
 
 class _HostedSkillAppMixin:

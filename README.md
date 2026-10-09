@@ -159,7 +159,7 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
-### Hosted skills
+### Hosted skill bindings
 
 Use `@app.hosted_skill` when application code owns the Azure Functions trigger
 and needs an agent internally. The selected `.agent.md` may omit both
@@ -180,7 +180,9 @@ async def summarize(req: Request, skill: HostedSkill) -> Response:
 ```
 
 `skill.run()` returns an `AgentResult`; `skill.stream()` yields structured
-`HostedSkillEvent` values. The facade is intentionally not callable. See the
+`HostedSkillEvent` values through the app-bound MAF or Copilot harness. The
+facade is intentionally not callable and must be obtained through decorator
+injection rather than constructed directly. See the
 [`hybrid-hosted-skill`](samples/hybrid-hosted-skill/) sample and
 [`HostedSkill injection`](docs/front-matter-spec.md#hostedskill-injection).
 

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from azure_functions_agents import runner as _runner
 
+from ..._agent_execution import _set_run_result_attributes
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput
 from ...config import ResolvedAgent, SubagentRef
@@ -260,8 +261,6 @@ class _CopilotHarnessRunner:
                             emitted_text = True
                         yield AgentStreamEvent.from_dict(event)
                     result = await execution
-                    from ...registration._handlers import _set_run_result_attributes
-
                     _set_run_result_attributes(span, result)
                     if events.dropped_events:
                         span.set_attribute(

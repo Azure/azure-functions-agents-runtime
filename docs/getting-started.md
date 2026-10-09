@@ -138,6 +138,9 @@ async def summarize(req: Request, skill: HostedSkill) -> Response:
 ```
 
 Use `skill.run()` for one result or `skill.stream()` for structured events.
+Obtain the facade through decorator injection; direct construction is not a
+supported API. The handler must be a plain `async def`, and agent calls must not
+run inside a replayed Durable orchestrator.
 See the [hybrid HostedSkill sample](../samples/hybrid-hosted-skill/).
 
 ## Where to go next

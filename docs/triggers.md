@@ -4,7 +4,10 @@ This document describes the trigger types that can be used in `.agent.md` front 
 
 ## How Triggers Work
 
-Each `*.agent.md` file requires either a `trigger` section or at least one enabled `builtin_endpoints` value — **unless** it is an internal specialist agent (see [Endpoint-less internal specialists](#endpoint-less-internal-specialists) below). The `type` field selects the trigger, and `trigger.args` is passed to the underlying Azure Functions decorator.
+The `trigger` section is optional. When present, its `type` selects the trigger
+and `trigger.args` is passed to the underlying Azure Functions decorator. An
+agent without a trigger or enabled built-in endpoint remains an inert catalog
+entry for internal selection.
 
 ```yaml
 ---
@@ -24,20 +27,19 @@ Runtime rules:
 - `timer_trigger` accepts 5-part cron expressions; the runtime prepends seconds before registration.
 - String values under `trigger.*`, including `type`, follow [environment variable substitution](./front-matter-spec.md#environment-variable-substitution).
 
-### Endpoint-less internal specialists
+### Endpoint-less internal agents
 
-An agent may omit **both** `trigger` and `builtin_endpoints` if — and only if — it is referenced by
-another agent's `subagents:` list ([chat-time delegation](./front-matter-spec.md#subagents), FRD
-0007). Such an agent registers no Azure Function trigger and no `/agents/{slug}/*` routes of its own;
-it is reachable only as a `delegate_<slug>` tool on whichever coordinator(s) declare it as a
-specialist. This is checked globally across the whole app — the specialist file can live anywhere
-(root or `agents/`) and can appear before or after the coordinator that references it in discovery
-order.
+Any agent may omit both `trigger` and `builtin_endpoints`. It still loads into
+the immutable agent catalog but registers no Azure Function trigger and no
+`/agents/{slug}/*` routes of its own. Application code can select it with
+`@app.hosted_skill`, or another agent can reference it as a Chat or Workflow Sub
+Agent. See [`samples/hybrid-hosted-skill/`](../samples/hybrid-hosted-skill/) and
+[`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/).
 
-An agent with neither `trigger` nor an enabled `builtin_endpoints` value, and that is **not**
-referenced by any other agent's `subagents:`, is invalid and fails validation — it would otherwise be
-completely unreachable. See [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/)
-for a runnable example (`tech.agent.md` is one such endpoint-less specialist).
+An unreferenced endpoint-less agent is valid but inert. Consequently, forgetting
+to declare a trigger or built-in endpoint no longer causes the previous startup
+validation error; verify that every agent intended for direct invocation has an
+explicit surface.
 
 ### Starting Dynamic Workflows
 

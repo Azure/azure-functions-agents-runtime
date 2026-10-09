@@ -259,14 +259,18 @@ def test_decorator_rejects_unsupported_agent_capabilities(
         app.hosted_skill(arg_name="skill", agent_name="internal")
 
 
-def test_decorator_rejects_copilot_preview(
+@pytest.mark.parametrize("harness_kind", list(HarnessKind))
+def test_decorator_accepts_bound_harness(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    harness_kind: HarnessKind,
 ) -> None:
-    app, _ = _app(monkeypatch, tmp_path, harness_kind=HarnessKind.COPILOT)
+    app, validated_models = _app(monkeypatch, tmp_path, harness_kind=harness_kind)
 
-    with pytest.raises(ValueError, match="Copilot preview"):
-        app.hosted_skill(arg_name="skill", agent_name="internal")
+    decorator = app.hosted_skill(arg_name="skill", agent_name="internal")
+
+    assert callable(decorator)
+    assert validated_models == (["model-one"] if harness_kind is HarnessKind.MAF else [])
 
 
 def test_enhanced_apps_preserve_sdk_base_types(

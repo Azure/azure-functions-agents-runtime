@@ -37,6 +37,12 @@ session ID in a later request to continue that agent conversation:
 {"prompt":"Make it even shorter.","session_id":"<session-id>"}
 ```
 
+The route uses the app's default Function-key authorization when deployed, but
+a format-valid `session_id` is only a conversation-continuity key. It does not
+prove conversation ownership. Callers that share endpoint access can resume a
+conversation when they know its ID, so applications that require per-user or
+per-tenant isolation must authorize session continuation themselves.
+
 The `summarizer.agent.md` file has no trigger or built-in endpoints. It is an
 inert catalog entry selected by the `summarizer` filename slug. This sample is
 local-first and does not provision Azure resources; use the repository's

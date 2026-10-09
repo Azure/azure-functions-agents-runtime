@@ -72,6 +72,7 @@ def _make_skill(
     tmp_path: Path,
     *,
     response_schema: dict[str, Any] | None = None,
+    harness_kind: HarnessKind = HarnessKind.MAF,
 ) -> tuple[HostedSkill, AgentCapabilities]:
     approved_skill = SkillDescriptor.create(
         name="one",
@@ -109,16 +110,18 @@ def _make_skill(
         skills=(approved_skill,),
         skill_catalog=(approved_skill, excluded_skill),
     )
-    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    harness = AppHarness(harness_kind, tmp_path)
     return HostedSkill(CatalogEntry(resolved, capabilities), harness), capabilities
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("harness_kind", list(HarnessKind))
 async def test_run_forwards_catalog_values_with_one_session_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    harness_kind: HarnessKind,
 ) -> None:
-    skill, capabilities = _make_skill(tmp_path)
+    skill, capabilities = _make_skill(tmp_path, harness_kind=harness_kind)
     captured: dict[str, Any] = {}
 
     def build_sandbox(_resolved: ResolvedAgent, session_id: str) -> list[str]:
@@ -140,6 +143,7 @@ async def test_run_forwards_catalog_values_with_one_session_identity(
     assert captured["instructions"] == "Follow policy."
     assert captured["model"] == "model-one"
     assert captured["agent_name"] == "internal"
+    assert captured["_harness"].name is harness_kind
     assert captured["_session_is_new"] is True
     assert captured["tools"] == capabilities.filtered_user_tools
     assert captured["tools"] is not capabilities.filtered_user_tools
@@ -478,12 +482,14 @@ async def test_stream_translates_invalid_response_schema_to_error_event(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("session_id", [None, "session-one"])
+@pytest.mark.parametrize("harness_kind", list(HarnessKind))
 async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     session_id: str | None,
+    harness_kind: HarnessKind,
 ) -> None:
-    skill, capabilities = _make_skill(tmp_path)
+    skill, capabilities = _make_skill(tmp_path, harness_kind=harness_kind)
     captured: dict[str, Any] = {}
 
     def build_sandbox(_resolved: ResolvedAgent, resolved_id: str) -> list[str]:
@@ -497,6 +503,7 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
         captured["display_name"] = kwargs["display_name"]
         captured["skills"] = kwargs["skills"]
         captured["skill_catalog"] = kwargs["skill_catalog"]
+        captured["harness"] = kwargs["_harness"]
         yield HostedSkillEvent(
             HostedSkillEventKind.SESSION,
             session_id=kwargs["session_id"],
@@ -512,6 +519,7 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     assert captured["execution_surface"] == "hosted_skill"
     assert captured["session_is_new"] is (session_id is None)
     assert captured["display_name"] == "Internal"
+    assert captured["harness"].name is harness_kind
     assert captured["skills"] == list(capabilities.skills)
     assert captured["skill_catalog"] == list(capabilities.skill_catalog)
     if session_id is not None:

@@ -169,6 +169,22 @@ are created only when `skill.run()` or `skill.stream()` is called. Supply a
 valid `session_id` to continue a conversation, or omit it to receive a new
 public session ID in the result/events.
 
+The handler must be a plain `async def`, the HostedSkill decorator must be
+immediately above the handler and below its Azure Functions trigger decorator,
+and the injected parameter must have a runtime-resolvable annotation that is
+exactly `HostedSkill`. A `TYPE_CHECKING`-only import, `HostedSkill | None`, and
+Durable orchestrator generators are rejected. `HostedSkillDFApp` supports
+ordinary Functions and Durable Activity handlers, but agent calls must not run
+inside replayed orchestrator code.
+
+Application code obtains `HostedSkill` only through decorator injection. Direct
+construction with internal catalog or harness objects is unsupported. Applying
+the decorator performs MAF provider preflight during module import. Invalid MAF
+provider settings therefore prevent the whole Function module from indexing,
+including unrelated deterministic Functions, even if no request would invoke
+the skill. Copilot preview uses its app-selection and catalog-validation gates
+instead of MAF client-manager preflight.
+
 HostedSkill direct execution reuses `instructions`, `model`, `timeout`,
 `agent_configuration`, `response_schema`, `response_example`, tools, skills,
 MCP servers, sandbox, and `web_request` settings. `trigger`,
@@ -176,10 +192,17 @@ MCP servers, sandbox, and `web_request` settings. `trigger`,
 not change the call. `input_schema` is not applied because v1 accepts a string
 prompt.
 
-HostedSkill v1 runs only through the Microsoft Agent Framework. Decorator
-application rejects agents that declare chat-time `subagents`, enable Dynamic
-Workflows, or run under the app-level Copilot preview. Streaming yields typed
-`HostedSkillEvent` values rather than Server-Sent Events text.
+HostedSkill runs through the app-bound MAF or Copilot harness. Decorator
+application rejects agents that declare chat-time `subagents` or enable Dynamic
+Workflows. Streaming yields typed `HostedSkillEvent` values rather than
+Server-Sent Events text.
+
+Session IDs are continuity keys, not authorization checks. Applications must
+authorize continuation when conversations belong to users or tenants. A
+response-contract failure occurs after the harness turn completes: invalid
+assistant content may already be persisted, and streamed content may already
+have reached the caller. Retrying the same session ID continues that history;
+it does not roll back the failed turn or create a fresh conversation.
 
 ---
 

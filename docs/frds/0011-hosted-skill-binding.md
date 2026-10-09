@@ -89,8 +89,8 @@ second schema or duplicate connection settings in the decorator.
   explicit `skill.<method>` APIs.
 - Structured request input or `input_schema` enforcement. Version 1 accepts a
   string prompt.
-- Chat-time Sub Agent delegation, Dynamic Workflow management, or Copilot
-  preview execution through HostedSkill in version 1.
+- Chat-time Sub Agent delegation or Dynamic Workflow management through
+  HostedSkill in version 1.
 - Changing deterministic Functions that do not apply the decorator.
 
 ## 4. Proposed design
@@ -106,7 +106,7 @@ pipeline authoritative and avoids a second interpretation of frontmatter.
 | translate | `config/merge.py`, `config/validation.py` | Reuse `ResolvedAgent`. Permit a fully validated agent with no external surface so it can be an inert internal catalog entry. |
 | compose | `app.py`, `registration/catalog.py`, `_hosted_skill_app.py` | Build the existing complete catalog before app mutation, then initialize an enhanced FunctionApp or DFApp with that catalog and the frozen app harness. |
 | register | `_hosted_skill_app.py`, existing Azure registration modules | Add a Python decorator that wraps an application handler and hides its injected parameter. Register no new host binding type. Existing automatic surfaces are unchanged. |
-| execute | `hosted_skill.py`, `runner.py`, `streaming_events.py`, `response_contract.py`, `client_manager.py` | Map facade calls to the existing runner inputs, expose typed stream events, enforce the response contract, and preflight provider configuration without constructing a client. |
+| execute | `hosted_skill.py`, `_agent_execution.py`, `runner.py`, `streaming_events.py`, `response_contract.py`, `client_manager.py` | Map facade calls to the existing runner inputs, expose typed stream events, enforce the response contract, share harness-neutral execution helpers, and preflight MAF provider configuration without constructing a client. |
 
 ### 4.1 Authoring and selection
 
@@ -147,6 +147,12 @@ the runtime-managed parameter. Passing that hidden parameter from the worker or
 application code is an error. The wrapper otherwise preserves argument binding,
 defaults, variadic arguments, return values, exceptions, and cancellation.
 
+The annotation must resolve at runtime to exactly `HostedSkill`; a
+`TYPE_CHECKING`-only import or optional/union annotation is invalid. The handler
+must be a plain `async def`. The enhanced Durable app supports ordinary
+Functions and Activity handlers, but HostedSkill must not run inside a replayed
+orchestrator generator.
+
 The app creates a fresh facade for each Function invocation. A facade retains
 only the selected immutable catalog entry and app execution context; it does not
 retain a live MAF Agent, open MCP connection, model client, or session resource.
@@ -156,6 +162,8 @@ invocation completes. A handler that exits before calling either method has no
 HostedSkill resource to clean up. Method calls are independent and safe under
 concurrent Function invocations; retaining the facade in module-level state is
 unsupported even though the facade itself contains no live harness object.
+Application code obtains the facade only through decorator injection. Direct
+construction with its internal catalog and harness inputs is unsupported.
 
 ### 4.2 App types and catalog lifetime
 
@@ -213,6 +221,8 @@ validation. Omission creates a fresh caller-visible ID; supplying the returned
 ID on a later call resumes the selected agent's conversation through the
 existing `(agent_slug, session_id)` history contract. Calls using the same
 agent/session retain the existing serialization and timeout behavior.
+Session validation establishes a safe continuity key, not caller ownership;
+applications must authorize user- or tenant-scoped continuation themselves.
 
 HostedSkill resolves or validates the public session ID before constructing
 per-session capabilities. It passes that exact ID both to
@@ -238,6 +248,9 @@ the same response-format instructions used by HTTP handlers and validates the
 completed output with the same fenced-JSON extraction and JSON Schema rules.
 Invalid output raises `HostedSkillResponseError`; it does not return a partially
 valid `AgentResult`.
+The harness turn has already completed when validation runs, so invalid content
+may already exist in session history. Retrying with the same session ID
+continues that history and does not roll back the failed turn.
 
 ### 4.4 Structured streaming
 
@@ -253,16 +266,13 @@ remain aliases so the initially reviewed HostedSkill API stays source-compatible
 - terminal `done` or `error`.
 
 Structured events are an optional runner capability, separate from the required
-one-shot and leaf-execution backend contract. The MAF adapter implements that
-capability by translating SDK updates into neutral events. A backend without the
-capability, including the Copilot preview harness, does not implement a streaming
-stub; the bound runner rejects streaming centrally with
-`UnsupportedCapabilityError` synchronously when `AgentRunner.run_agent_events()`
-is called, before backend acquisition or execution. The diagnostic states that
-the selected harness does not support streaming without naming an SDK-specific
-recovery path. The public structured iterator retains the existing terminal
-`error` event contract, and the SSE adapter serializes that same event, so callers
-do not receive an `AttributeError` and existing HTTP behavior remains unchanged.
+one-shot and leaf-execution backend contract. Both MAF and Copilot implement it
+by translating SDK updates into neutral events. A future backend without the
+capability is rejected centrally with `UnsupportedCapabilityError` before
+backend acquisition or execution. The public structured iterator retains the
+existing terminal `error` event contract, and the SSE adapter serializes that
+same event, so callers do not receive an `AttributeError` and existing HTTP
+behavior remains unchanged.
 
 The optional capability accepts the same neutral inventories and execution
 metadata as existing SSE execution, including approved `skills`, the full
@@ -299,6 +309,8 @@ its `done` event, using the same complete fenced-JSON extraction and schema
 validation as `run()`. It cannot retract already consumed deltas; validation
 failure emits a non-sensitive response-contract error and suppresses `done`.
 Consumers that need the final JSON must likewise accumulate text events.
+Content emitted before final validation cannot be retracted, and the provider
+turn may already be persisted when validation replaces `done` with `error`.
 
 Explicit generator close and task cancellation reach the runner's existing MAF
 finalization path, which settles usage and provider callbacks; MCP and other
@@ -312,8 +324,8 @@ closes the iterator it owns.
 
 ### 4.5 Provider and Foundry contract
 
-The decorator runs a side-effect-free provider preflight for the selected
-HostedSkill. `ClientManager` gains
+For MAF, the decorator runs a side-effect-free provider preflight for the
+selected HostedSkill. `ClientManager` gains
 `validate_provider_settings(model: str | None) -> None`, whose default is a
 no-op, so a custom manager remains responsible for its own provider contract.
 HostedSkill always calls the active manager's hook. A custom implementation may
@@ -339,25 +351,26 @@ selection and existing autodetection order do not change: an explicit
 `AZURE_FUNCTIONS_AGENTS_PROVIDER` wins; otherwise Azure OpenAI endpoint,
 Foundry project endpoint, then OpenAI key are checked in that order.
 
+Decorator application occurs during Function module import. Missing MAF
+provider settings therefore prevent the whole module from indexing, including
+unrelated deterministic Functions. Copilot instead uses app selection,
+app-wide catalog validation, and bound-runner checks; it does not run MAF
+`ClientManager` preflight.
+
 ### 4.6 Version 1 capability boundary
 
-Version 1 supports the default MAF harness and the selected entry's direct-role
+Version 1 supports the app-bound MAF and Copilot harnesses and the selected entry's direct-role
 filtered user tools, MCP servers, project skills, sandbox, and `web_request`.
 It rejects the following at decorator application rather than silently dropping
 them:
 
 - an entry with chat-time `subagents`;
-- an entry with Dynamic Workflows enabled;
-- an app using the bounded Copilot preview harness.
+- an entry with Dynamic Workflows enabled.
 
 The decorator is a method on an already constructed enhanced app and reads that
-app's frozen harness directly. Copilot rejection is therefore a constant-time
-check with no SDK import or process startup, so HostedSkill never reaches the
-runner's generic absent-stream-capability path. Public runner callers can reach
-that path: `runner.run_agent_events()` catches the bound runner's synchronous
-`UnsupportedCapabilityError` and yields one terminal `error` event, which
-`HostedSkill.stream()` would forward for any future harness accepted by its
-decorator but lacking streaming.
+app's frozen harness directly. `run()` and `stream()` route through that binding
+without reselecting it. Capability errors remain scoped to the relevant method
+and harness adapter rather than disabling the entire facade.
 
 The selected agent may still define its own trigger or built-in endpoint; those
 surfaces coexist and keep their existing behavior. `input_schema` is not applied
@@ -418,6 +431,8 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
 | 15 | Shared catalog safety | Pass mutable lists directly / copy per call | Shallow-copy mutable capability lists before handing them to the runner or SDK | Agent | 2026-10-05 |
 | 16 | Harness streaming contract | Required methods with unsupported stubs / optional neutral event capability / backend-owned SSE | Make neutral event streaming an optional capability implemented by MAF; reject its absence centrally and serialize SSE above backend execution | Human | 2026-10-08 |
 | 17 | Event compatibility names | HostedSkill-specific primary classes / neutral primary classes only / neutral classes with runtime aliases | Supersede the HostedSkill-specific owning names from the original streaming decision with `AgentStreamEvent` and `AgentStreamEventKind`; keep the reviewed HostedSkill names as runtime aliases | Human | 2026-10-08 |
+| 18 | Selected harness support | MAF only / non-streaming Copilot only / both bound harness contracts | Supersede the Copilot rejection in decision 9: route `run()` and `stream()` through the app-bound MAF or Copilot runner | Human | 2026-10-09 |
+| 19 | Harness-specific preflight | Always use `ClientManager` / MAF-only decorator preflight / invocation-only validation | Keep decorator-time provider preflight for MAF, including its whole-module indexing consequence; use Copilot app-selection, catalog-validation, and runner-owned checks instead | Human | 2026-10-09 |
 
 ## 6. Test plan
 
@@ -443,10 +458,12 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
   event kind. It also covers runtime alias identity, full skill inventory and
   new-session forwarding, stream display/surface telemetry, bound optional-
   capability rejection before backend/native acquisition, public conversion to
-  a terminal error event, and close propagation through HostedSkill, runner,
-  and MAF.
+  a terminal error event, and close propagation through HostedSkill and each
+  selected harness.
 - [ ] Unit: decorator application rejects unknown slugs, subagents, workflows,
-  Copilot preview, and missing built-in provider settings with safe diagnostics.
+  and missing built-in MAF provider settings with safe diagnostics; MAF and
+  Copilot both accept and receive their bound harness through `run()` and
+  `stream()`.
 - [ ] Unit: Foundry preflight requires a project endpoint, permits existing
   model fallback, constructs no client or credential, and delegates validation
   to custom managers.
@@ -482,8 +499,10 @@ selection.
   composition example.
 - [ ] `samples/README.md` and `samples/hybrid-hosted-skill/README.md` - index and
   explain a representative sample with no duplicated settings.
-- [ ] `docs/triggers.md` - no change; HostedSkill is not a trigger type.
-- [ ] `docs/front-matter-reference.md` - no change; no schema fields are added.
+- [ ] `docs/triggers.md` - describe endpoint-less agents as valid inert catalog
+  entries and call out the loss of the old missing-surface startup error.
+- [ ] `docs/front-matter-reference.md` - regenerate the trigger requirement text
+  from `eng/scripts/generate_config_reference.py`.
 
 ## 8. Status & sign-off
 
@@ -504,3 +523,8 @@ selection.
   decision-history, generator-closure, and closeable-return-type ambiguities.
   The follow-up review on 2026-10-08 confirmed those findings were resolved and
   the design was ready to return to `Finalized`.
+- **Review refinement:** larohra, 2026-10-08; incorporated 2026-10-09. Superseded
+  the MAF-only HostedSkill boundary in favor of app-bound MAF and Copilot
+  execution, retained MAF decorator-time provider preflight with its whole-app
+  indexing consequence documented, and moved shared execution helpers out of
+  the Azure-aware registration layer.

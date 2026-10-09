@@ -14,11 +14,11 @@ from copilot.session_events import (
 from copilot.tools import ToolInvocation, ToolResult
 from pydantic import BaseModel
 
+from azure_functions_agents._agent_execution import _tool_error_count
 from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import (
     CopilotToolCalls,
     tool_result_text,
 )
-from azure_functions_agents.registration._handlers import _tool_error_count
 
 
 class _JsonResult(BaseModel):

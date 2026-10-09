@@ -464,7 +464,7 @@ def generate_markdown() -> str:
         "",
         "### Agent: `trigger`",
         "",
-        "**Required** unless at least one `builtin_endpoints` value is enabled. Only one trigger per agent file.",
+        "**Optional.** An agent without a trigger or enabled built-in endpoint remains an inert catalog entry for internal selection, such as `@app.hosted_skill` or Sub Agent references. Only one trigger is allowed per agent file.",
         "",
         "**Structure:**",
         "```yaml",

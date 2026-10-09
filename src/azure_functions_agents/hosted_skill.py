@@ -6,13 +6,10 @@ import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
+from ._agent_execution import _set_run_result_attributes, build_sandbox_tools_for_session
 from ._observability import FaultDomain, LifecycleStage, current_span, start_span
 from ._session_id import validate_session_id
 from .harness._harness_binding import AppHarness
-from .registration._handlers import (
-    _set_run_result_attributes,
-    build_sandbox_tools_for_session,
-)
 from .registration.catalog import CatalogEntry
 from .response_contract import (
     HostedSkillResponseError,
@@ -36,7 +33,11 @@ def _resolve_session_id(session_id: str | None) -> tuple[str, bool]:
 
 @dataclass(frozen=True)
 class HostedSkill:
-    """Invoke one composed agent without exposing its underlying harness."""
+    """Invoke one composed agent without exposing its underlying harness.
+
+    Application code obtains this facade through ``@app.hosted_skill`` injection.
+    Direct construction with runtime catalog or harness objects is unsupported.
+    """
 
     _entry: CatalogEntry
     _harness: AppHarness

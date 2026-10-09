@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 
 from azure_functions_agents import runner as _runner
 
+from ..._agent_execution import _looks_like_tool_error
 from ..._agent_identity import agent_id
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
@@ -24,7 +25,6 @@ from ...config.paths import resolve_config_dir as resolve_config_dir
 from ...config.schema import AgentConfiguration
 from ...discovery.mcp import MCPServerDescriptor, discover_mcp_servers
 from ...discovery.tools import discover_user_tools
-from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from ...streaming_events import AgentStreamEvent, AgentStreamEventKind

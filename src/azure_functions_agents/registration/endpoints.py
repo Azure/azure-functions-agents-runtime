@@ -14,6 +14,7 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from .._agent_execution import _set_run_result_attributes, build_sandbox_tools_for_session
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN, validate_session_id
@@ -26,8 +27,6 @@ from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import (
     _SESSION_ID_HEADER,
     _request_header_value,
-    _set_run_result_attributes,
-    build_sandbox_tools_for_session,
 )
 from ._naming import _safe_function_name
 from .capabilities import AgentCapabilities
