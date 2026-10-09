@@ -298,8 +298,10 @@ Use isolated local settings or offline fixtures, not a customer's storage:
    `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` value fails app construction.
 2. **Configured Blob failure** — an invalid or unavailable configured storage
    target surfaces an error rather than writing session files locally.
-3. **Unsupported surfaces** — `/agents/main/chatstream` and
-   `/agents/main/history` return 501 rather than an empty success shape.
+3. **Transcript replay** — `/agents/main/history` returns a 501 JSON error rather
+   than an empty success shape (the Debug UI turns it into a "transcript not
+   restored" notice). `/agents/main/chatstream` supports SSE; a native
+   creation/catalog failure emits terminal `error` without advertising a session.
 
 ## Known limits
 
@@ -313,8 +315,37 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification
   lands (issues #1357 and #1337).
-- Streaming, history projection, delegation, Workflow Sub Agents,
-  workflow-enabled agents, non-HTTP triggers and the debug chat UI remain
-  rejected before inference on the Copilot path.
+- History projection remains unsupported on the Copilot path. Native session
+  files are never projected into MAF history.
+- The inbound built-in MCP tool (`builtin_endpoints.mcp: true`) is enabled
+  through the existing bound runner. It validates `arguments.prompt`, returns
+  the agent's session ID, and normalizes the extension-owned transport
+  `sessionid` (also accepting the existing `sessionId` spelling) for native
+  continuation. This is not a public tool argument for choosing an agent
+  session. A transport ID requests native resume; if no matching native
+  session exists, the error is returned without retry-as-create. Omitted
+  transport IDs create fresh sessions.
+  The Functions MCP extension owns `/runtime/webhooks/mcp` and its system-key
+  authentication (`x-functions-key`); `builtin_endpoints.http_auth` controls
+  HTTP chat only, not this webhook. This is distinct from outbound `mcp.json`
+  tools. Broader endpoint/session API improvements are deferred to
+  [Azure/azure-functions-bucees-planning#1366](https://github.com/Azure/azure-functions-bucees-planning/issues/1366).
+- Registered non-HTTP triggers and the built-in Debug UI (live chat, streaming,
+  and continuation by pasting or picking a session ID) are enabled through the
+  shared registration and runner path. Resuming an explicit ID continues the
+  native session without restoring earlier transcript messages; the UI says so.
+  A failed resume is an error and never creates a replacement session. These
+  surfaces and inbound MCP have offline unit/component coverage only.
+  Core Tools/local-host evidence would separately establish indexing,
+  actual binding delivery, and extension transport/auth behavior; none was
+  collected for this change. Deployed-host evidence is a separate category
+  and was not collected either. **Not live-qualified** describes these
+  evidence gaps, not an unsupported runtime verdict. A missing binding
+  extension that prevents host indexing is a setup/integration failure,
+  not something the runtime must recover from.
+- HTTP streaming, declared delegates, Workflow Sub Agents, and workflow management
+  are supported by the local adapter. Leaf state is isolated locally and deleted;
+  it does not use the primary persistent storage route. These adapter tests do
+  not qualify hosted execution or real-provider/service parity.
 - Same-session serialization is process-local only. Callers must avoid
   cross-worker overlap; SDK recovery does not provide exactly-once tool effects.

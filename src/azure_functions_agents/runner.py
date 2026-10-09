@@ -192,13 +192,14 @@ def _build_delegate_tool(
     *,
     coordinator_deadline: float,
     tracker: _DelegateErrorTracker,
-    _harness: AppHarness | None = None,
+    harness: AppHarness | None = None,
 ) -> ToolDescriptor:
+    """Build one host-authorized specialist tool with its coordinator's deadline."""
     resolved = entry.resolved
     capabilities = (
         entry.capabilities
-        if _harness is None
-        else replace(entry.capabilities, _harness=_harness)
+        if harness is None
+        else replace(entry.capabilities, _harness=harness)
     )
     slug = ref.agent
 
@@ -221,7 +222,11 @@ def _build_delegate_tool(
             return _record_delegate_timeout(span, tracker, slug, timeout, exc)
         try:
             result = await run_leaf_agent_task(
-                resolved, capabilities, task, timeout=timeout, execution_role="delegate"
+                resolved,
+                capabilities,
+                task,
+                timeout=timeout,
+                execution_role="delegate",
             )
         except asyncio.CancelledError:
             record_delegate_call(error=False)
@@ -245,7 +250,7 @@ async def build_subagent_tools(
     catalog: AgentCatalog | None,
     *,
     coordinator_deadline: float,
-    _harness: AppHarness | None = None,
+    harness: AppHarness | None = None,
 ) -> tuple[list[ToolDescriptor], _DelegateErrorTracker]:
     """Build neutral delegate tools; each invocation creates an independent leaf."""
     tracker = _DelegateErrorTracker()
@@ -259,7 +264,7 @@ async def build_subagent_tools(
         delegates.append(
             _build_delegate_tool(
                 ref, entry, coordinator_deadline=coordinator_deadline, tracker=tracker,
-                _harness=_harness,
+                harness=harness,
             )
         )
     return delegates, tracker
@@ -483,6 +488,7 @@ async def run_agent_stream(
     skills: Sequence[SkillDescriptor] | None = None,
     skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
+    _session_is_new: bool = False,
 ) -> AsyncIterator[str]:
     """Yield the existing SSE vocabulary under the selected app context."""
     events = run_agent_events(
@@ -509,6 +515,7 @@ async def run_agent_stream(
         catalog=catalog,
         workflow_policy=workflow_policy,
         _harness=_harness,
+        _session_is_new=_session_is_new,
     )
     async with aclosing(events) as events:
         async for event in events:

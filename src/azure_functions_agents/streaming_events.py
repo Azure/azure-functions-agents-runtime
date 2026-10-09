@@ -18,6 +18,7 @@ class AgentStreamEventKind(StrEnum):
     INTERMEDIATE = "intermediate"
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
+    STREAM_TRUNCATED = "stream_truncated"
     DONE = "done"
     ERROR = "error"
 
@@ -33,6 +34,7 @@ class AgentStreamEvent:
     tool_name: str | None = None
     arguments: Any = None
     result: Any = None
+    dropped_events: int | None = None
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> AgentStreamEvent:
@@ -45,6 +47,7 @@ class AgentStreamEvent:
             tool_name=payload.get("tool_name"),
             arguments=payload.get("arguments"),
             result=payload.get("result"),
+            dropped_events=payload.get("dropped_events"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,6 +78,8 @@ class AgentStreamEvent:
                     "result": self.result,
                 }
             )
+        elif self.kind is AgentStreamEventKind.STREAM_TRUNCATED:
+            payload["dropped_events"] = self.dropped_events
         return payload
 
 

@@ -13,6 +13,7 @@ from azure_functions_agents import runner
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
+from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor, discover_mcp_servers
 from azure_functions_agents.discovery.skills import (
     SkillDescriptor,
@@ -233,7 +234,7 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
 
 
 @pytest.mark.asyncio
-async def test_copilot_unsupported_streaming_and_leaf_reject_before_native_acquisition(
+async def test_copilot_unsupported_configuration_rejects_before_native_acquisition(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     harness = AppHarness(HarnessKind.COPILOT, tmp_path)
@@ -242,29 +243,18 @@ async def test_copilot_unsupported_streaming_and_leaf_reject_before_native_acqui
     monkeypatch.setattr(_copilot_runtime, "get_runtime", get_runtime)
     monkeypatch.setattr(_copilot_execution, "run", native_run)
 
-    selected = _agent_runner.get_agent_runner(harness)
-    with pytest.raises(UnsupportedCapabilityError, match="does not support streaming"):
-        selected.run_agent_events("prompt", timeout=1.0)
-
-    structured = [
-        event
-        async for event in runner.run_agent_events(
-            "prompt",
-            timeout=1.0,
-            _harness=harness,
-        )
-    ]
-    assert [event.kind for event in structured] == [HostedSkillEventKind.ERROR]
-
     events = [
         json.loads(chunk.removeprefix("data: ").strip())
-        async for chunk in runner.run_agent_stream("prompt", timeout=1.0, _harness=harness)
+        async for chunk in runner.run_agent_stream(
+            "prompt", timeout=1.0, _harness=harness,
+            agent_configuration=AgentConfiguration(max_output_tokens=32),
+        )
     ]
     assert [event["type"] for event in events] == ["error"]
 
-    with pytest.raises(ValueError, match="workflow_subagent"):
+    with pytest.raises(ValueError, match="max_output_tokens"):
         await runner.run_leaf_agent_task(
-            SimpleNamespace(slug="billing"),
+            SimpleNamespace(slug="billing", agent_configuration=AgentConfiguration(max_output_tokens=32)),
             AgentCapabilities(_harness=harness),
             "work",
             timeout=1.0,

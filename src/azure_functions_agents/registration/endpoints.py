@@ -245,6 +245,7 @@ def _run_builtin_agent_stream(
         subagents=resolved.subagents,
         catalog=catalog,
         _harness=harness,
+        _session_is_new=session_id is None,
     )
 
 
@@ -424,11 +425,6 @@ def _register_http_chat_stream(
             auth_error = authorize_entra_request(req.headers.get, auth)
             if auth_error is not None:
                 return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
-            if capabilities._harness is not None and capabilities._harness.name is HarnessKind.COPILOT:
-                return _sse_error_response(
-                    "Copilot preview does not support streaming; use the non-streaming chat route.",
-                    status_code=501,
-                )
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = _request_header_value(req, _SESSION_ID_HEADER)

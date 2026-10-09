@@ -112,8 +112,8 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/harness/_harness_lifecycle.py` | Acquired-owner shutdown callbacks only; visits every registered owner even if cleanup fails, without backend discovery/imports. | `_register_shutdown()`, `_unregister_shutdown()`, `_shutdown_harnesses()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_preview.py` | Copilot dependency/provider/hosting qualification, effective-capability validation, and neutral custom-tool qualification. Rejects unsupported preview contracts before effects, without fallback. | `select_copilot_harness()`, `validate_copilot_agent()`, `prepare_tools()`, `CopilotPreviewError` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_providers.py` | Copilot provider interface, registry, sanitized settings and frozen OpenAI / Azure OpenAI / Foundry mappings. SDK provider config is built lazily. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_runner.py` | Copilot-local implementation of the required one-shot/leaf backend contract. It maps neutral inputs through the single request factory and forwards supported execution without event or SSE stubs; the SDK-free facade rejects the absent optional stream capability before native/provider acquisition. | `create_runner()` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_execution.py` | Invocation-owned session and SessionFs create/resume, neutral custom/MCP/skill capabilities, conditional custom-only catalog validation, send-scoped synchronous `session.on`, result/usage translation and bounded immediate cleanup. Unsubscribe precedes disconnect, which precedes filesystem close; original failures/cancellation remain authoritative. | `run()` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_runner.py` | Copilot-local implementation of the required one-shot/leaf backend and optional neutral-event contracts. It qualifies preview capabilities before effects, maps inputs through the shared request factory, and composes direct, streaming, delegate, and workflow-subagent execution with bound workflow-management tools and approved MCP/skill inventories. | `create_runner()` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_execution.py` | Invocation-owned session and SessionFs create/resume, neutral custom/MCP/skill capabilities, conditional custom-only catalog validation, send-scoped synchronous `session.on`, result/usage translation, neutral event forwarding, isolated leaf-session cleanup, and bounded immediate teardown that preserves original failures/cancellation. | `run()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_capabilities.py` | Maps SDK-neutral capabilities into source-qualified availability, remote MCP configuration, individual approved skill directories/disabled names, and MCP-only/scoped-helper permissions. | Copilot capability projection |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_tool_calls.py` | Accounts for generic native events, including denials, once per tool-call ID; deduplicates custom wrapper records, preserves success evidence, and redacts protected headers without exposing native envelopes. | `CopilotToolCalls`, `tool_result_text()` |
 | `azure_functions_agents/_skill_policy.py` | SDK-free default-deny helper policy. Most-specific canonical discovered-root ownership permits only approved skill resources and narrow literal script invocations; excluded roots remain ownership metadata. Not an OS sandbox or skill-origin attestation. | `SkillPolicy` |
@@ -356,11 +356,84 @@ tool-call accounting contracts; MAF usage decoding remains local to MAF, and
 Copilot result/event conversion remains local to Copilot.
 
 The current preview stays intentionally narrow. It is local-only, requires a
-single Functions worker, and supports the direct-role subset rather than every
-runtime surface. Unsupported behavior fails explicitly rather than degrading
-quietly. Operational setup, supported script forms, inspection, and cleanup
-details live in
-[copilot-preview-operations.md](copilot-preview-operations.md).
+single Functions worker, and fails unsupported behavior explicitly rather than
+degrading quietly.
+
+The supported local execution subset includes primary HTTP chat and SSE,
+chat-time delegates, Workflow Sub Agent Activities, Dynamic Workflow
+management, configured MCP servers, and approved project skills. Primary
+SDK-owned sessions are backed by local files or Blob storage. The direct tool
+catalog is composed in the same order as the MAF direct path: filtered explicit
+user tools, the per-request ACA `execute_python` tool when configured, then the
+configured `web_request` tool (default-on unless the app or agent opts out).
+These are the existing host tool descriptors, so sync/async invocation,
+Pydantic validation-before-effect, web policy, and ACA public-session scoping
+remain host-owned. Tool exceptions become recoverable model-visible failures;
+cancellation propagates. Workflow management tools and `delegate_<slug>` tools
+follow the static/system tools in that order. Management closures retain the
+public session ID, Durable client, coordinator slug, and per-agent policy.
+Workflow-enabled direct roles receive the packaged `data-driven-workflows`
+skill through the same filtered skill inventory passed through the selected
+harness. The host keeps the short workflow addendum separate from that skill
+and never reads `SKILL.md` into instructions. Catalog entries and leaf roles
+keep their project-only skill inventories, so delegates and Workflow Sub Agent
+leaves do not inherit the runtime-only workflow skill.
+
+Delegates and Workflow Sub Agents retain their parent app binding and run with
+fresh UUID native identities and specialist-local instructions/model/tools.
+They do not inherit history, sandbox, workflow management, or nested delegates.
+Their SessionFs uses an isolated local ephemeral tree, never the primary Blob
+route, and cleanup removes both native session and host files. Unique leaves
+do not enter the persistent session-lock registry. Cleanup errors do not replace
+body cancellation or deadline failures; deletion failure after success is an error.
+
+SSE advertises the public session only after native create/resume and any
+applicable custom-tool catalog verification, emits host `tool_start`/`tool_end`
+events in invocation order, filters child assistant deltas, and emits `done`
+only after a successful, non-interrupted SDK result and session disconnect.
+Its bounded 128-event buffer drops the oldest queued events under backpressure
+without cancelling execution, then emits `stream_truncated` and the complete
+final `message` before `done`. Closing the stream cancels and aborts the active
+turn, then re-raises cancellation without stopping the app's shared client.
+Resume trusts the SDK's `send_and_wait(...)` wait/error contract and rejects
+final results when the request-local live stream reports `AbortData`,
+`AgentInterruptedData`, or `idle(aborted=True)`. This remains an event-level
+acceptance barrier, not file parsing, rollback, recovery, or exactly-once
+execution.
+
+Authored HTTP-trigger input validation, response-format prompting, JSON
+extraction, `response_schema` validation, `AgentResult`, response bodies and
+public session headers remain in `registration/_handlers.py`; no SDK
+structured-output feature replaces or weakens that host validation. Built-in
+chat is a distinct surface: `registration/endpoints.py` validates its own
+`prompt` envelope and returns the chat result envelope, but does not apply an
+agent's authored `input_schema`, `response_example`, or `response_schema`.
+
+Registered non-HTTP triggers and the built-in Debug UI use the existing
+registration, serialization, and shared-runner contracts; each trigger delivery
+gets one fresh native session. The Debug UI supports live chat, streaming, and
+explicit continuation with the Copilot native session ID, which is resumed and
+never recreated on failure. The history route keeps returning a 501 JSON error
+(no native-file projection into MAF history), and the UI shows a notice that
+earlier transcript messages are not restored. Trigger and Debug UI behavior is
+not live-qualified until a real Functions host exercises it; offline tests do
+not qualify a binding. The inbound built-in MCP endpoint also uses the bound
+runner, preserving prompt validation, extension-owned transport `sessionid`
+normalization, and error responses without fallback. This transport identity
+is not a public argument for choosing an agent session; missing native state
+on resume remains an error. Its `/runtime/webhooks/mcp` transport and
+system-key authentication are owned by the Functions MCP extension;
+`builtin_endpoints.http_auth` does not govern it. This endpoint is enabled but
+not live-qualified. Offline adapter tests, Core Tools/local-host evidence,
+and deployed-host evidence are distinct; only offline tests were collected
+for these entrypoint changes. Missing extensions causing host indexing
+failures are setup/integration failures, not runtime capability rejection.
+The SDK owns compaction and its artifacts; the host adds no
+summarizer or recovery controller. Operational setup, supported script forms,
+inspection, and cleanup details live in
+[copilot-preview-operations.md](copilot-preview-operations.md), and the runnable
+subset remains documented in the
+[sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/copilot-preview).
 
 Delegated and Workflow Sub Agent roles use the specialist's own resolved configuration, never the
 coordinator's overrides. Leaf roles remain fresh and single-task: specialists receive no persistent
@@ -371,10 +444,11 @@ For each workflow-enabled agent, `workflows/integration.py` uses the cataloged i
 `WorkflowPlanPolicy` to generate model guidance and agent-scoped management
 tools. Built-in chat/MCP handlers receive the chat addendum; declared-trigger
 handlers receive the trigger addendum, Durable client, workflow-agent slug, and policy.
-MAF exposes the packaged `data-driven-workflows` skill's narrow selection
-description normally and loads its detailed grammar only on demand. The shared
-workflow addendum does not mention the skill: keeping the selection pointer in
-skill metadata avoids prompting fixed-DAG turns to load it speculatively.
+Workflow-enabled direct roles expose the packaged `data-driven-workflows`
+skill's narrow selection description normally, and the selected SDK loads its
+detailed grammar only on demand. The shared workflow addendum does not mention
+the skill: keeping the selection pointer in skill metadata avoids prompting
+fixed-DAG turns to load it speculatively.
 `start_workflow` validates the submitted plan against that policy and **persists** the
 owner's allowed tool/Sub Agent sets into the Durable client input, so the orchestrator
 re-validates every materialized `for_each` instance's static target against the identical
@@ -701,7 +775,7 @@ This design keeps global config declarative: shared config says what exists, whi
 
 ### Other notable boundaries
 
-- **Skills:** shared discovery finds directory candidates without parsing `SKILL.md`; registration filters directory identities into frozen `AgentCapabilities`. Grouping directories are supported through two child levels below each search input. A root's nested documents remain part of that skill unless separately supplied as explicit search inputs. SDKs own advertising, metadata validation, name/directory matching, duplicate selection, instruction loading, and supported resource/script mechanisms; a discovered candidate is not a confirmed loaded skill. MAF retains `load_skill` / `read_skill_resource` and nested resource recursion. Copilot receives selected paths without a host-generated catalog; authored instructions and replace prompt mode are unchanged. Native advertising under replace mode remains unqualified. Helper permissions retain canonical most-specific ownership for independently supplied overlapping roots. The packaged `data-driven-workflows` skill remains a MAF workflow-only addition to the direct capability copy, never the project catalog or delegated roles.
+- **Skills:** shared discovery finds directory candidates without parsing `SKILL.md`; registration filters directory identities into frozen `AgentCapabilities`. Grouping directories are supported through two child levels below each search input. A root's nested documents remain part of that skill unless separately supplied as explicit search inputs. SDKs own advertising, metadata validation, name/directory matching, duplicate selection, instruction loading, and supported resource/script mechanisms; a discovered candidate is not a confirmed loaded skill. MAF retains `load_skill` / `read_skill_resource` and nested resource recursion. Copilot receives selected paths without a host-generated catalog; authored instructions and replace prompt mode are unchanged. Native advertising under replace mode remains unqualified. Helper permissions retain canonical most-specific ownership for independently supplied overlapping roots. The packaged `data-driven-workflows` skill remains a runtime-owned addition only on the shallow direct-role capability copy used for workflow-enabled MAF and Copilot registrations. It is delivered through approved SDK skill paths, never merged back into the project catalog or delegated/Workflow Sub Agent leaf roles.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector-triggered agents use `trigger.type: connector_trigger`.
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 - **Multi-agent delegation:** `subagents:` is itself an extension point of sorts — it lets an agent's own front matter opt other, already-registered agents into its tool set without any code changes. See Section 5.
