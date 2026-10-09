@@ -5,7 +5,7 @@ import errno
 import shutil
 from contextlib import suppress
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import get_args, get_type_hints
@@ -24,6 +24,7 @@ from azure_functions_agents.client_manager import (
     set_client_manager,
 )
 from azure_functions_agents.config import paths
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness import (
     _harness_binding as _harness,
 )
@@ -62,6 +63,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import
     resolve_route,
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
@@ -148,10 +150,13 @@ def _fake_client():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("new_session", [False, True])
-async def test_sdk_owns_create_and_resume_without_history_probes(preview, monkeypatch, new_session):
+async def test_sdk_owns_create_and_resume_without_history_scans(preview, monkeypatch, new_session):
     import copilot
 
     client = _fake_client()
+    client.create_session.return_value.get_events.side_effect = AssertionError(
+        "Host must not load native history."
+    )
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         result = await _copilot.run(preview, _request(new_session=new_session))
@@ -167,6 +172,8 @@ async def test_sdk_owns_create_and_resume_without_history_probes(preview, monkey
         client.get_session_metadata.assert_not_awaited()
         session.rpc.tools.get_current_metadata.assert_awaited_once()
         session.get_events.assert_not_awaited()
+        if not new_session:
+            assert client.resume_session.call_args.kwargs["continue_pending_work"] is False
         session.disconnect.assert_awaited_once()
     finally:
         await _lifecycle._shutdown_harnesses()
@@ -298,9 +305,9 @@ async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_tur
     finally:
         await _lifecycle._shutdown_harnesses()
 
-
 def test_native_sdk_identity_is_readable_and_agent_scoped():
     assert _copilot._copilot_session_id("main", "example") == "main-example"
+    assert _copilot._copilot_session_id("main", "one.two-three") == "main-one.two-three"
     assert _copilot._copilot_session_id("main", "one.two-three") == "main-one.two-three"
     assert _copilot._copilot_session_id("billing", "shared") != _copilot._copilot_session_id("support", "shared")
 
@@ -316,12 +323,12 @@ def test_tool_result_text_preserves_plain_text_and_rejects_sdk_content():
         ])
 
 
-async def _invoke_native_tool(function, arguments):
+async def _invoke_native_tool(function, arguments, event_sink=None):
     from copilot.tools import ToolInvocation
 
-    [descriptor] = _preview.prepare_tools([function])
     calls = CopilotToolCalls()
-    native_tool = _copilot._tool(descriptor, calls)
+    descriptor = function
+    native_tool = _copilot._tool(descriptor, calls, event_sink)
     assert native_tool.handler is not None
     result = await native_tool.handler(
         ToolInvocation(
@@ -414,6 +421,49 @@ async def test_tool_adapter_returns_recoverable_failure():
     assert "private tool detail" not in result.text_result_for_llm
     assert calls[0]["result"] == result.text_result_for_llm
     assert calls[0]["success"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raises", "expected_result", "expected_type"),
+    [
+        (False, "done", "success"),
+        (True, '{"error":"Custom tool failed or returned unsupported content."}', "failure"),
+    ],
+)
+async def test_tool_adapter_emits_sink_events_in_start_end_order(raises, expected_result, expected_type):
+    events = []
+
+    if raises:
+
+        @tool(name="broken")
+        def candidate() -> str:
+            raise RuntimeError("private tool detail")
+
+    else:
+
+        @tool(name="ok")
+        def candidate() -> str:
+            return "done"
+
+    result, calls = await _invoke_native_tool(candidate, {}, events.append)
+
+    assert result.result_type == expected_type
+    assert events == [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-1",
+            "tool_name": candidate.name,
+            "arguments": {},
+        },
+        {
+            "type": "tool_end",
+            "tool_call_id": "call-1",
+            "tool_name": candidate.name,
+            "result": expected_result,
+        },
+    ]
+    assert calls[0]["result"] == expected_result
 
 
 @pytest.mark.asyncio
@@ -714,6 +764,48 @@ async def test_native_skill_exposure_matches_approved_inventory_on_create_and_re
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_authored_skill", [False, True])
+async def test_native_workflow_skill_directories_follow_approved_inventory(
+    preview, monkeypatch, include_authored_skill,
+):
+    import copilot
+
+    authored_skills = _skill_inventory(preview.app_root)
+    runtime_skill = SkillDescriptor.create(
+        name="data-driven-workflows",
+        path=data_driven_workflows_skill_path(),
+    )
+    approved = (runtime_skill,)
+    catalog = (*authored_skills, runtime_skill)
+    expected_directories = [str(runtime_skill.path)]
+    expected_disabled = {"approved", "excluded"}
+    if include_authored_skill:
+        approved = (authored_skills[0], runtime_skill)
+        expected_directories = [str(authored_skills[0].path), str(runtime_skill.path)]
+        expected_disabled = {"excluded"}
+
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        await _copilot.run(preview, replace(
+            _request(),
+            instructions="Base instructions.\n\nShort workflow guidance.",
+            skills=approved,
+            skill_catalog=catalog,
+        ))
+        options = client.create_session.call_args.kwargs
+        assert options["enable_skills"] is True
+        assert options["skill_directories"] == expected_directories
+        assert set(options["disabled_skills"]) == expected_disabled
+        assert options["system_message"] == {
+            "mode": "replace",
+            "content": "Base instructions.\n\nShort workflow guidance.",
+        }
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("new_session", [False, True])
 async def test_mcp_authentication_failure_stops_before_native_session_without_retry(
     preview, monkeypatch, new_session,
@@ -890,6 +982,160 @@ async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_me
         _set_run_result_attributes(span, result)
         span.set_attribute.assert_any_call("af.agent.tool_call_count", 5)
         span.set_attribute.assert_any_call("af.agent.tool_error_count", 2)
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_event_sink_uses_call_provenance_for_native_and_custom_tool_events(
+    preview, monkeypatch,
+):
+    import copilot
+    from copilot.session_events import (
+        SessionEventType,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteResult,
+        ToolExecutionCompleteToolDescription,
+        ToolExecutionStartData,
+    )
+    from copilot.tools import ToolInvocation
+
+    @tool(name="bash")
+    def custom_bash(command: str) -> str:
+        return f"custom:{command}"
+
+    [descriptor] = _preview.prepare_tools([custom_bash])
+    client = _fake_client()
+    session = client.create_session.return_value
+    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+        tools=[SimpleNamespace(name=descriptor.name)]
+    )
+    events = []
+
+    async def send(*_args, **_kwargs):
+        [on_event] = session.handlers
+        [native_tool] = client.create_session.call_args.kwargs["tools"]
+
+        def emit(event_type, data):
+            on_event(_sdk_event(event_type, data))
+
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="mcp-bash",
+            tool_name="bash",
+            arguments={"command": "pwd"},
+            mcp_server_name="selected",
+            mcp_tool_name="bash",
+        ))
+        assert events[-1]["type"] == "tool_start"
+        assert events[-1]["tool_call_id"] == "mcp-bash"
+        for content in ("mcp:first", "mcp:duplicate"):
+            emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+                tool_call_id="mcp-bash",
+                success=True,
+                result=ToolExecutionCompleteResult(content=content),
+            ))
+
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="completion-only-bash",
+            success=True,
+            result=ToolExecutionCompleteResult(content="native:completion-only"),
+            tool_description=ToolExecutionCompleteToolDescription(name="bash"),
+        ))
+
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="custom-bash",
+            tool_name="bash",
+            arguments={"command": "echo hello"},
+        ))
+        await native_tool.handler(ToolInvocation(
+            session_id="native",
+            tool_call_id="custom-bash",
+            tool_name="bash",
+            arguments={"command": "echo hello"},
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="custom-bash",
+            success=True,
+            result=ToolExecutionCompleteResult(content="native:duplicate"),
+        ))
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(
+            preview,
+            replace(_request(), tools=(descriptor,), event_sink=events.append),
+        )
+
+        assert result.tool_calls == [
+            {
+                "type": "tool_start",
+                "tool_call_id": "mcp-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "pwd"},
+                "result": "mcp:first",
+                "success": True,
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "completion-only-bash",
+                "tool_name": "bash",
+                "arguments": None,
+                "result": "native:completion-only",
+                "success": True,
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "custom-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "echo hello"},
+                "result": "custom:echo hello",
+                "success": True,
+            },
+        ]
+        assert events == [
+            {
+                "type": "session",
+                "session_id": "example",
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "mcp-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "pwd"},
+            },
+            {
+                "type": "tool_end",
+                "tool_call_id": "mcp-bash",
+                "tool_name": "bash",
+                "result": "mcp:first",
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "completion-only-bash",
+                "tool_name": "bash",
+                "arguments": {},
+            },
+            {
+                "type": "tool_end",
+                "tool_call_id": "completion-only-bash",
+                "tool_name": "bash",
+                "result": "native:completion-only",
+            },
+            {
+                "type": "tool_start",
+                "tool_call_id": "custom-bash",
+                "tool_name": "bash",
+                "arguments": {"command": "echo hello"},
+            },
+            {
+                "type": "tool_end",
+                "tool_call_id": "custom-bash",
+                "tool_name": "bash",
+                "result": "custom:echo hello",
+            },
+        ]
     finally:
         await _lifecycle._shutdown_harnesses()
 
@@ -1682,7 +1928,9 @@ async def test_same_session_wait_is_bounded_while_other_sessions_remain_concurre
         assert (await _copilot.run(preview, _request(new_session=False))).content == "synthetic reply"
         assert client.resume_session.await_count == 4
         assert {call.args[0] for call in client.resume_session.await_args_list} == {
-            "main-example", "main-other", "billing-example",
+            _copilot._copilot_session_id("main", "example"),
+            _copilot._copilot_session_id("main", "other"),
+            _copilot._copilot_session_id("billing", "example"),
         }
     finally:
         release.set()
@@ -1792,6 +2040,64 @@ async def test_failed_adapter_close_is_reported_without_owner_retention(preview,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["abort", "agent_interrupted", "idle_aborted"])
+async def test_live_interruption_events_reject_successful_sdk_return(
+    preview, monkeypatch, event_type
+):
+    import copilot
+    from copilot.session_events import (
+        AbortData,
+        AbortReason,
+        AgentInterruptedActivity,
+        AgentInterruptedData,
+        AssistantMessageData,
+        SessionEvent,
+        SessionEventType,
+        SessionIdleData,
+    )
+
+    def event(kind, data):
+        return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=kind)
+
+    interruption = {
+        "abort": event(SessionEventType.ABORT, AbortData(reason=AbortReason.USER_ABORT)),
+        "agent_interrupted": event(
+            SessionEventType.AGENT_INTERRUPTED,
+            AgentInterruptedData(
+                activity=AgentInterruptedActivity.MODEL_CALL,
+                elapsed=timedelta(seconds=1),
+                turn=1,
+            ),
+        ),
+        "idle_aborted": event(
+            SessionEventType.SESSION_IDLE,
+            SessionIdleData(aborted=True),
+        ),
+    }[event_type]
+    client = _fake_client()
+    session = client.create_session.return_value
+
+    async def send(*_args, **_kwargs):
+        session.handlers[0](interruption)
+        final = event(
+            SessionEventType.ASSISTANT_MESSAGE,
+            AssistantMessageData(content="final reply", message_id="final"),
+        )
+        session.handlers[0](final)
+        return final
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="interrupted"):
+            await _copilot.run(preview, _request())
+        session.abort.assert_awaited_once()
+        session.disconnect.assert_awaited_once()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "outcome", ["success", "sdk_timeout", "send_failure", "empty", "no_reply", "late_token"]
 )
@@ -1880,7 +2186,7 @@ async def test_send_scope_observes_usage_once_and_unsubscribes(preview, monkeypa
         session.on.assert_called_once()
         session.unsubscribe.assert_called_once()
         recorder.emit_counts.assert_called_once_with(input_tokens=7, output_tokens=10)
-        assert session.abort.await_count == (outcome in {"sdk_timeout", "send_failure"})
+        assert session.abort.await_count == (outcome != "success")
         session.disconnect.assert_awaited_once()
         client.stop.assert_not_awaited()
     finally:

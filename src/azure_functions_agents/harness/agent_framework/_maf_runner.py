@@ -120,6 +120,7 @@ class _MAFHarnessRunner:
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
         workflow_policy: WorkflowPlanPolicy | None = None,
+        session_is_new: bool = False,
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
     ) -> AsyncGenerator[str]:
@@ -128,7 +129,7 @@ class _MAFHarnessRunner:
             prompt,
             instructions=instructions,
             session_id=session_id,
-            session_is_new=False,
+            session_is_new=session_is_new,
             deadline=deadline,
             tools=tools,
             mcp_tools=mcp_tools,

@@ -98,6 +98,16 @@ Discovery and registration emit immutable SDK-free capability descriptors:
 | MCP server | name, URL, transport, static headers, tool filter, optional Entra scope/client ID | SDK transport/client objects, live tokens |
 | Skill | canonical candidate directory path, directory-name identity | parsed `SKILL.md`, authored description, loaded content |
 
+The concrete runner facade is cached once per bound app context, alongside the
+existing lazy native-runtime resource cell, so public runner helpers do not
+repeat per-operation harness branching after selection. Creating that facade does
+not itself acquire native processes, credentials, history providers, or session
+filesystems. Those remain lazy backend responsibilities, and unsupported
+Copilot configuration must still fail before native/provider acquisition.
+Direct, streaming, and leaf execution share that binding. Public helper
+signatures, deadline timing, SSE error boundaries, and cleanup guarantees stay
+unchanged.
+
 `HarnessRequest` carries only these descriptors plus scalar execution settings.
 It does not carry MAF or Copilot SDK types.
 
@@ -221,6 +231,64 @@ Store Copilot files under:
 not invent a second identity layer. Session ID validation and path containment
 rules stay shared.
 
+The Copilot preview remains local-only and requires a single Functions worker.
+Azure Functions hosting, structured-response parity, full system-tool parity,
+and cross-worker session overlap are unsupported in this preview unless
+separately qualified. Local HTTP SSE, declared delegates, Workflow Sub Agents,
+Dynamic Workflow management, configured MCP servers, and approved project
+skills use the existing host contracts. Workflow-enabled direct roles receive
+the packaged `data-driven-workflows` skill through the same approved native
+skill-directory path as authored skills; the host keeps the concise workflow
+addendum separate and does not read `SKILL.md` into instructions. Leaves use
+disposable local SessionFs trees even when primary sessions select Blob, do
+not inherit the runtime-only workflow skill, and never acquire a persistent
+session lock. SSE emits its session after native/catalog acceptance and `done`
+only after a successful, non-interrupted SDK result plus disconnect. If the
+SDK reports an interruption or abort during the turn, the host aborts that turn
+and returns an error instead of synthesizing success or `done`; the final
+disconnect/adapter cleanup still runs. An HTTP client disconnect likewise
+cancels only the in-flight turn, aborts it, and leaves the shared native client
+usable for later requests. Resume uses SDK-owned continuation without host-side
+history scans and rejects live abort/interruption signals observed before
+returning a final reply. The SDK still owns opaque file formats, compaction,
+and recovery. Unsupported capabilities fail explicitly without fallback.
+Configured output caps are rejected because this path does not yet expose a
+verified provider generation cap mapping.
+
+**Entrypoint qualification**
+
+Non-HTTP trigger entrypoints use the existing registration, JSON-safe binding
+serialization, and shared runner contracts. Each Functions invocation creates
+one fresh Copilot session, including a batch delivery. These source-level
+contracts do not by themselves qualify a trigger: support claims require a
+real Functions host to register the binding, deliver a test event, and verify
+the serialized input reaches inference. Track offline unit/component tests,
+Core Tools/local-host indexing and binding delivery, and deployed-host
+evidence separately. Missing extensions that prevent host indexing are
+setup/integration failures, not runtime unsupported-capability verdicts.
+Durable activity/orchestration/entity triggers, warm-up triggers,
+assistant-skill/MCP triggers, aliases, and dotted connector names remain
+outside the supported agent-trigger set under the existing authoring rules.
+
+The intended built-in Debug UI contract is live chat, streaming, and
+continuation with the explicit Copilot native session ID. It displays a clear
+notice that earlier transcript messages are not restored. The Copilot history
+endpoint does not read or project native session files as MAF transcripts; MAF
+history behavior remains unchanged. A failed native resume is surfaced as an
+error and is never retried as a new session. Debug UI and per-trigger support
+claims also require real Functions-host qualification.
+
+The inbound built-in MCP endpoint uses the same bound runner and existing
+prompt validation and transport session-ID normalization. Calls without a
+transport ID create a native session; the extension-owned `sessionid`
+requests continuation, with errors surfaced without retry-as-create (including
+when no corresponding native session exists). It is not a public tool
+argument for selecting an agent session. Broader endpoint/session API
+improvements are outside this contract. The Functions MCP extension owns the transport and
+system-key authentication; HTTP endpoint auth settings do not alter that
+boundary. Inbound MCP behavior remains unqualified until exercised on a real
+Functions host.
+
 **Ownership**
 
 - The SDK owns session contents, continuation, compaction, recovery, and format
@@ -257,6 +325,8 @@ Still outside this FRD's supported preview contract:
 - silent compatibility shims for unsupported tool callables or tool options;
 - silent provider/client-manager fallback; and
 - claims that unqualified native advertising/loading behavior is production-ready.
+- Azure-hosted deployment and any trigger or Debug UI behavior not yet qualified
+  on a real Functions host.
 
 Client-manager compatibility remains narrow: MAF keeps its existing extension
 behavior, while the Copilot preview accepts only the runtime's built-in manager.
@@ -280,6 +350,11 @@ still govern the feature.
 | 8 | Persistence boundary | host session protocol / thin SessionFs adapter | Reuse existing storage settings, use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, and keep contents/continuation/compaction/recovery fully SDK-owned. | Human (larohra) | 2026-10-02 |
 | 9 | Execution/result normalization | shared cross-SDK behavior / adapter-local conversion with shared public result contract | Keep MAF usage decoding local to MAF, Copilot result conversion local to Copilot, and normalize only the public `AgentResult`/tool-call accounting contract in shared code. | Human (larohra) | 2026-10-06 |
 | 10 | Failure and cleanup precedence | deferred retry registries / immediate bounded cleanup preserving original failure | Keep one app-owned native client plus request-owned SessionFs adapters, and preserve the original execution or cancellation error over later transport, disconnect, filesystem, or credential cleanup failures. | Human (larohra) | 2026-10-05 |
+| 11 | Local role parity and turn acceptance | reject streaming/leaves / retain host role contracts | Support local SSE, chat delegates, Workflow Sub Agent Activities, workflow-management tools, and the same filtered MCP/skill inventories through the bound runner. Workflow-enabled direct roles also keep the packaged `data-driven-workflows` skill as an approved native skill directory while leaves retain project-only skills. Preserve isolated disposable leaves, host tool ordering, cancellation/deadlines, and completed-turn event barriers before continuation and successful SSE completion. | Human (larohra) | 2026-10-06 |
+| 12 | Turn acceptance follow-up after SDK contract review | host history scans rejecting any prior aborted turn / request-local live interruption check with SDK-owned resume-waiting | Grounded in the SDK-contract follow-up in this PR, supersede only row 11's turn-acceptance clause: keep `continue_pending_work=False`; delegate resume/idle waiting to the SDK without host history scans or rejecting prior aborted history; reject only a live abort/interruption observed during the current request before a successful result/`done`; cancellation still aborts and rethrows; SSE still emits no success/`done` on interruption. | Human (larohra) | 2026-10-07 |
+| 13 | Debug UI history under Copilot | unsupported UI / live-only / native continuation with MAF transcript replay | Support live chat, streaming, and explicit native-session continuation. Show that prior transcript messages are not restored; do not project Copilot native files into MAF history; surface resume failures without creating a replacement session. MAF history stays unchanged. | Human (larohra) | 2026-10-07 |
+| 14 | Inbound built-in MCP endpoint | reject under Copilot / reuse bound runner | Enable the existing MCP handler with prompt validation, native continuation, honest errors without fallback, and Functions-extension-owned system-key authentication. Keep real-host qualification separate from offline adapter evidence. | Human (larohra, relayed by coordinator) | 2026-10-07 |
+| 15 | SSE backpressure | cancel execution / drop oldest buffered events and complete the run | Keep at most 128 queued events; when a slow client falls behind, drop the oldest queued events, report the dropped count with `stream_truncated`, and send the complete final message before `done`. Client disconnect still cancels execution. | Human (larohra) | 2026-10-07 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -292,6 +367,9 @@ still govern the feature.
 | MCP/auth/helpers | Cover existing per-agent/per-server filters, blank-scope normalization, generated bearer precedence, native MCP/helper event accounting, and scoped helper permission denials. |
 | Persistence | Exercise SessionFs read/write/append/stat/list/mkdir/remove/rename behavior on local and Blob backends, selected-harness-only initialization, and shared `agent_id` path routing. |
 | Lifecycle/errors | Verify request cleanup ordering and that execution/cancellation failures remain authoritative over later disconnect, filesystem, transport, or credential cleanup errors. |
+| Debug UI/history | Verify live chat/streaming and native continuation, display the no-transcript-restore notice, preserve MAF transcript replay, and surface native resume failures without retry-as-create. |
+| Non-HTTP entrypoints | Exercise each existing binding serializer and shared-handler contract offline; separately qualify each trigger on a real Functions host with actual binding delivery before marking it supported. Resource-blocked triggers remain unqualified, not unsupported. |
+| Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, and errors without replacement sessions. Real-host transport and system-key auth qualification remains separate. |
 
 ## 7. Docs impact
 

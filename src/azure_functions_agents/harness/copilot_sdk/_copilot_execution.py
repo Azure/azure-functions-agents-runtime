@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
-from typing import TYPE_CHECKING, TypedDict
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager, nullcontext
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 from ..._logger import logger
 from ..._skill_policy import SkillPolicy
@@ -20,7 +22,8 @@ from ._copilot_capabilities import (
 from ._copilot_preview import CopilotPreviewError, validate_copilot_client_manager
 from ._copilot_runtime import CopilotRuntime, get_runtime
 from ._copilot_session_fs import open_session_fs
-from ._copilot_session_identity import CopilotSessionError
+from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
+from ._copilot_session_local import LocalSessionFileBackend
 from ._copilot_tool_calls import CopilotToolCalls, tool_result_text
 
 if TYPE_CHECKING:
@@ -28,6 +31,7 @@ if TYPE_CHECKING:
     from copilot.session import (
         CopilotSession,
         CreateSessionFsHandler,
+        InfiniteSessionConfig,
         MCPServerConfig,
         PermissionInvocation,
         PermissionRequestResult,
@@ -63,6 +67,15 @@ class _SessionOptions(TypedDict):
     skill_directories: list[str]
     disabled_skills: list[str]
     create_session_fs_handler: CreateSessionFsHandler
+    infinite_sessions: NotRequired[InfiniteSessionConfig]
+
+
+type _EventSink = Callable[[dict[str, Any]], None]
+
+
+def _emit_event(event_sink: _EventSink | None, event: dict[str, Any] | None) -> None:
+    if event_sink is not None and event is not None:
+        event_sink(event)
 
 
 def _copilot_session_id(agent_slug: str, session_id: str) -> str:
@@ -93,12 +106,74 @@ class _RequestTokenSource:
         self._error = None
         return error
 
+@dataclass(frozen=True)
+class _ExecutionLifecycle:
+    copilot_id: str
+    session_storage: StorageRoute | None
+    session_storage_id: str
+    leaf: bool
 
-def _tool(function: ToolDescriptor, calls: CopilotToolCalls) -> Tool:
+    @classmethod
+    def create(
+        cls, harness: AppHarness, owner: CopilotRuntime, request: HarnessRequest
+    ) -> _ExecutionLifecycle:
+        leaf = request.execution_role != "primary"
+        if leaf and not request.new_session:
+            raise CopilotPreviewError("Copilot specialist sessions cannot be resumed.")
+        copilot_id = (
+            str(uuid.uuid4())
+            if leaf
+            else _copilot_session_id(request.agent_slug, request.session_id)
+        )
+        return cls(
+            copilot_id=copilot_id,
+            session_storage=StorageRoute(owner.native_root / "ephemeral")
+            if leaf
+            else harness.session_storage,
+            session_storage_id=copilot_id if leaf else request.session_id,
+            leaf=leaf,
+        )
+
+    def session_lock(self, request: HarnessRequest) -> AbstractAsyncContextManager[None]:
+        if self.leaf:
+            return nullcontext()
+        return _harness_execution._session_lock_bounded_by(
+            request.session_id, request.deadline, agent_slug=request.agent_slug
+        )
+
+    def leaf_cleanup(
+        self, owner: CopilotRuntime, route: StorageRoute, agent_slug: str
+    ) -> AbstractAsyncContextManager[None]:
+        if not self.leaf:
+            return nullcontext()
+        return _bounded_cleanup(
+            lambda: _delete_leaf(owner, self.copilot_id, route, agent_slug),
+            "Copilot could not delete ephemeral specialist state.",
+        )
+
+    def apply_session_options(self, options: _SessionOptions) -> None:
+        if self.leaf:
+            from copilot.session import InfiniteSessionConfig
+
+            options["infinite_sessions"] = InfiniteSessionConfig(enabled=False)
+
+    def timeout_error(self) -> TimeoutError | CopilotPreviewError:
+        if self.leaf:
+            return TimeoutError("Copilot specialist timed out.")
+        return CopilotPreviewError("Copilot request exceeded its deadline.")
+
+
+def _tool(
+    function: ToolDescriptor,
+    calls: CopilotToolCalls,
+    event_sink: _EventSink | None = None,
+) -> Tool:
     from copilot.tools import Tool, ToolResult
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
         calls.start_custom(invocation)
+        start_event = calls.start_event(invocation.tool_call_id)
+        _emit_event(event_sink, dict(start_event) if start_event is not None else None)
         try:
             result = await function.invoke(
                 arguments=invocation.arguments,
@@ -109,8 +184,10 @@ def _tool(function: ToolDescriptor, calls: CopilotToolCalls) -> Tool:
             logger.warning("Copilot custom tool failed: tool=%s", function.name)
             text = '{"error":"Custom tool failed or returned unsupported content."}'
             calls.complete_custom(invocation.tool_call_id, text, success=False)
+            _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
             return ToolResult(text_result_for_llm=text, result_type="failure")
         calls.complete_custom(invocation.tool_call_id, text, success=True)
+        _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
         return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
@@ -149,6 +226,17 @@ async def _abort(session: CopilotSession) -> None:
 
 async def _close_storage(storage: CopilotSessionFs) -> None:
     await asyncio.wait_for(storage.close(), timeout=5)
+
+
+async def _delete_leaf(
+    owner: CopilotRuntime, session_id: str, route: StorageRoute, agent_slug: str
+) -> None:
+    try:
+        if owner._client is not None:
+            await owner._client.delete_session(session_id)
+    finally:
+        parent = LocalSessionFileBackend(route.local_dir)
+        await parent.rm(session_prefix(route, agent_slug, session_id), recursive=True, force=True)
 
 
 @asynccontextmanager
@@ -204,7 +292,10 @@ async def _open_session(
             session_id=session_id, on_permission_request=on_permission_request, **options
         )
     return await client.resume_session(
-        session_id, on_permission_request=on_permission_request, **options
+        session_id,
+        on_permission_request=on_permission_request,
+        continue_pending_work=False,
+        **options,
     )
 
 
@@ -246,7 +337,7 @@ async def _send_turn(
 ) -> SessionEvent | None:
     try:
         return await session.send_and_wait(
-            prompt,
+            prompt=prompt,
             timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
         )
     except BaseException:
@@ -267,6 +358,27 @@ def _final_reply_content(response: SessionEvent | None) -> str:
             )
 
 
+async def _finalize_turn_response(
+    session: CopilotSession,
+    response: SessionEvent | None,
+    *,
+    interrupted: bool,
+    token_source: _RequestTokenSource,
+) -> str:
+    try:
+        token_error = token_source.take_error()
+        if token_error is not None:
+            raise token_error
+        if interrupted:
+            raise CopilotPreviewError(
+                "Copilot interrupted the turn before producing a usable final reply."
+            )
+        return _final_reply_content(response)
+    except BaseException:
+        await _abort(session)
+        raise
+
+
 async def _run_session_turn(
     session: CopilotSession,
     *,
@@ -277,13 +389,28 @@ async def _run_session_turn(
     get_usage: Callable[[], tuple[int | None, int | None]],
     token_source: _RequestTokenSource,
 ) -> str:
-    with _event_subscription(session, on_event):
+    from copilot.session_events import AbortData, AgentInterruptedData, SessionIdleData
+
+    interrupted = False
+
+    def observe(event: SessionEvent) -> None:
+        nonlocal interrupted
+        match event.data:
+            case AbortData() | AgentInterruptedData():
+                interrupted = True
+            case SessionIdleData(aborted=True):
+                interrupted = True
+        on_event(event)
+
+    with _event_subscription(session, observe):
         try:
             response = await _send_turn(session, prompt=prompt, deadline=deadline)
-            token_error = token_source.take_error()
-            if token_error is not None:
-                raise token_error
-            return _final_reply_content(response)
+            return await _finalize_turn_response(
+                session,
+                response,
+                interrupted=interrupted,
+                token_source=token_source,
+            )
         finally:
             input_tokens, output_tokens = get_usage()
             recorder.emit_counts(input_tokens=input_tokens, output_tokens=output_tokens)
@@ -299,6 +426,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
     from copilot.session_events import (
         AssistantMessageData,
+        AssistantMessageDeltaData,
+        AssistantReasoningDeltaData,
         AssistantUsageData,
         ToolExecutionCompleteData,
         ToolExecutionStartData,
@@ -307,14 +436,14 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from ...runner import AgentResult
 
     owner = get_runtime(harness)
-    copilot_id = _copilot_session_id(request.agent_slug, request.session_id)
+    lifecycle = _ExecutionLifecycle.create(harness, owner, request)
     calls = CopilotToolCalls()
     messages: list[str] = []
     input_tokens: int | None = None
     output_tokens: int | None = None
     recorder = _harness_execution._AgentUsageRecorder(
         agent_name=request.agent_slug,
-        execution_role="primary",
+        execution_role=request.execution_role,
         inference_target=InferenceTarget(
             harness.provider.kind if harness.provider is not None else None,
             request.model,
@@ -324,7 +453,12 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     def on_event(event: SessionEvent) -> None:
         nonlocal input_tokens, output_tokens
         match event.data:
-            case AssistantMessageData(content=content) if content:
+            case AssistantMessageDeltaData(delta_content=delta, parent_tool_call_id=None) if delta:
+                _emit_event(request.event_sink, {"type": "delta", "content": delta})
+            case AssistantReasoningDeltaData(delta_content=delta) if delta:
+                _emit_event(request.event_sink, {"type": "intermediate", "content": delta})
+        match event.data:
+            case AssistantMessageData(content=content, parent_tool_call_id=None) if content:
                 messages.append(content)
             case AssistantUsageData(input_tokens=used_input, output_tokens=used_output):
                 if used_input is not None:
@@ -333,16 +467,30 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     output_tokens = (output_tokens or 0) + used_output
             case ToolExecutionStartData() as started:
                 calls.start_native(started)
+                if not calls.is_custom(started.tool_call_id):
+                    start_event = calls.start_event(started.tool_call_id)
+                    _emit_event(
+                        request.event_sink,
+                        dict(start_event) if start_event is not None else None,
+                    )
             case ToolExecutionCompleteData() as completed:
                 calls.complete_native(completed)
+                if not calls.is_custom(completed.tool_call_id):
+                    start_event = calls.start_event(
+                        completed.tool_call_id, synthesize_arguments=True
+                    )
+                    _emit_event(
+                        request.event_sink,
+                        dict(start_event) if start_event is not None else None,
+                    )
+                    _emit_event(request.event_sink, calls.end_event(completed.tool_call_id))
 
     token_source = _RequestTokenSource(owner)
     try:
         provider = _provider(harness, token_source, request.model)
-        async with _harness_execution._session_lock_bounded_by(
-            request.session_id, request.deadline, agent_slug=request.agent_slug
-        ), asyncio.timeout_at(request.deadline):
-            if harness.session_storage is None:
+        async with lifecycle.session_lock(request), asyncio.timeout_at(request.deadline):
+            route = lifecycle.session_storage
+            if route is None:
                 raise CopilotPreviewError("Native session storage is not configured.")
             skill_policy = SkillPolicy.create(
                 approved=request.skills,
@@ -350,17 +498,19 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 working_directory=owner.workspace,
             )
             storage = await open_session_fs(
-                harness.session_storage,
+                route,
                 request.agent_slug,
-                request.session_id,
+                lifecycle.session_storage_id,
                 workspace_path=str(owner.workspace),
                 deadline=request.deadline,
                 skill_policy=skill_policy,
             )
-            async with _bounded_cleanup(
+            storage_cleanup = _bounded_cleanup(
                 lambda: _close_storage(storage),
                 "Copilot session storage could not be closed.",
-            ):
+            )
+            leaf_cleanup = lifecycle.leaf_cleanup(owner, route, request.agent_slug)
+            async with storage_cleanup, leaf_cleanup:
                 mcp_servers = await mcp_configuration(
                     request.mcp_servers, protect_headers=calls.protect_headers
                 )
@@ -368,13 +518,13 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 client = await _acquire_client(owner, request.deadline)
                 options = _SessionOptions(
                     model=request.model,
-                    tools=[_tool(function, calls) for function in request.tools],
+                    tools=[_tool(function, calls, request.event_sink) for function in request.tools],
                     available_tools=available_tools(request),
                     system_message=SystemMessageReplaceConfig(
                         mode="replace", content=request.instructions or ""
                     ),
                     provider=provider,
-                    streaming=False,
+                    streaming=request.event_sink is not None,
                     enable_config_discovery=False,
                     enable_session_telemetry=False,
                     request_extensions=False,
@@ -387,9 +537,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     disabled_skills=list(skill_policy.disabled_names),
                     create_session_fs_handler=lambda _session: storage,
                 )
+                lifecycle.apply_session_options(options)
                 session = await _open_session(
                     client,
-                    copilot_id,
+                    lifecycle.copilot_id,
                     new_session=request.new_session,
                     options=options,
                     on_permission_request=on_permission_request,
@@ -399,6 +550,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 ):
                     if not request.mcp_servers and not request.skills:
                         await _verify_tool_catalog(session, request.tools)
+                    _emit_event(request.event_sink, {"type": "session", "session_id": request.session_id})
                     logger.info(
                         "Copilot request target: provider=%s model=%s",
                         harness.provider.kind if harness.provider is not None else None,
@@ -426,7 +578,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         token_error = token_source.take_error()
         if token_error is not None:
             raise token_error from None
-        raise CopilotPreviewError("Copilot request exceeded its deadline.") from None
+        raise lifecycle.timeout_error() from None
     except (CopilotPreviewError, CopilotSessionError):
         raise
     except Exception:

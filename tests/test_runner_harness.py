@@ -730,7 +730,7 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         received_catalog: Any,
         *,
         coordinator_deadline: float,
-        _harness: Any = None,
+        harness: Any = None,
     ) -> tuple[list[Any], runner._DelegateErrorTracker]:
         captured_delegate_options.append(
             (received_subagents, received_catalog, coordinator_deadline)

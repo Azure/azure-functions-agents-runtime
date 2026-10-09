@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from .._logger import logger
 from .._tool_descriptor import ToolDescriptor
@@ -74,6 +75,8 @@ class HarnessRequest:
     mcp_servers: tuple[MCPServerDescriptor, ...] = ()
     skills: tuple[SkillDescriptor, ...] = ()
     skill_catalog: tuple[SkillDescriptor, ...] = ()
+    execution_role: ExecutionRole = "primary"
+    event_sink: Callable[[dict[str, Any]], None] | None = None
 
 
 _HARNESSES: dict[Path, AppHarness] = {}
