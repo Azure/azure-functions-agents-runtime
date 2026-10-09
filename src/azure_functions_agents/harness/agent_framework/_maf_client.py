@@ -14,7 +14,6 @@ from .._provider_config import (
     provider_rule,
     resolve_inference_target,
 )
-from ._maf_warnings import suppress_experimental_warnings
 
 if TYPE_CHECKING:
     from agent_framework.foundry import FoundryChatClient
@@ -94,5 +93,4 @@ def build_chat_client(model: str | None) -> tuple[MAFChatClient, InferenceTarget
     target = resolve_inference_target(model)
     provider, resolved_model = target.require()
     logger.info("MAF provider=%s model=%s", provider, resolved_model)
-    with suppress_experimental_warnings():
-        return _CLIENT_BUILDERS[provider](resolved_model), target
+    return _CLIENT_BUILDERS[provider](resolved_model), target

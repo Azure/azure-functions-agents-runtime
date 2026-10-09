@@ -6,11 +6,9 @@ import inspect
 from collections.abc import Sequence
 from typing import Any
 
-from ..._tool_descriptor import ToolCallable, ToolDescriptor
-from ._maf_warnings import suppress_experimental_warnings
+from agent_framework import FunctionTool
 
-with suppress_experimental_warnings():
-    from agent_framework import FunctionTool
+from ..._tool_descriptor import ToolCallable, ToolDescriptor
 
 
 def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:

@@ -330,9 +330,11 @@ Still outside this FRD's supported preview contract:
 
 The approved harness-boundary cleanup removes public custom chat-client
 injection. Shared configuration retains portable model/provider settings, while
-MAF owns concrete client construction, warning policy, instrumentation setup,
-and history projection. The common runtime retains neutral observability,
-registration, and request behavior. The retired
+MAF owns concrete client construction, narrow `ExperimentalWarning` suppression
+for `create_harness_agent()`/`FileSystemAgentFileStore` and
+`FileHistoryProvider`, instrumentation setup, and history projection. The
+common runtime retains neutral observability, registration, and request
+behavior. The retired
 `agent_configuration.agent_framework.compaction.max_context_window_tokens`
 field warns and is ignored; MAF uses its native model-aware default. Failed
 requests always return caller-supplied session IDs, and return generated IDs

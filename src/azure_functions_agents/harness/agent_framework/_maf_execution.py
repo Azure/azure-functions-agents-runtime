@@ -224,20 +224,19 @@ def _resolve_sessions_dir(agent_slug: str) -> Path:
 
 def _build_history_provider(agent_slug: str) -> Any:
     """Choose MAF Blob history when configured, otherwise scoped local JSONL."""
-    with suppress_experimental_warnings():
-        from ._maf_blob_history import build_blob_provider_from_environment
+    from ._maf_blob_history import build_blob_provider_from_environment
 
-        blob_provider = build_blob_provider_from_environment(agent_slug=agent_slug)
-        if blob_provider is not None:
-            return blob_provider
+    blob_provider = build_blob_provider_from_environment(agent_slug=agent_slug)
+    if blob_provider is not None:
+        return blob_provider
 
-        from ._maf_file_history import ScopedFileHistoryProvider
+    from ._maf_file_history import ScopedFileHistoryProvider
 
-        scoped_dir = _resolve_sessions_dir(agent_slug)
-        return ScopedFileHistoryProvider(
-            storage_root=scoped_dir.parent,
-            agent_slug=agent_slug,
-        )
+    scoped_dir = _resolve_sessions_dir(agent_slug)
+    return ScopedFileHistoryProvider(
+        storage_root=scoped_dir.parent,
+        agent_slug=agent_slug,
+    )
 
 
 def _build_chat_options_from_environment() -> _ChatOptions | None:
@@ -318,25 +317,25 @@ def _build_role_agent(
     agent_configuration: AgentConfiguration,
 ) -> Agent[Any]:
     """Build one conservatively configured MAF harness agent for any role."""
-    with suppress_experimental_warnings():
-        from agent_framework import SkillsProvider, create_harness_agent
+    from agent_framework import SkillsProvider, create_harness_agent
 
-        adapted_tools = [
-            build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
-            for candidate in tools
-        ]
-        skills_provider = (
-            SkillsProvider.from_paths(
-                list(skill_paths),
-                disable_load_skill_approval=True,
-                disable_read_skill_resource_approval=True,
-                disable_run_skill_script_approval=True,
-            )
-            if skill_paths
-            else None
+    adapted_tools = [
+        build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
+        for candidate in tools
+    ]
+    skills_provider = (
+        SkillsProvider.from_paths(
+            list(skill_paths),
+            disable_load_skill_approval=True,
+            disable_read_skill_resource_approval=True,
+            disable_run_skill_script_approval=True,
         )
-        site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
-        maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
+        if skill_paths
+        else None
+    )
+    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
+    maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
+    with suppress_experimental_warnings():
         return create_harness_agent(
             chat_client,
             id=agent_id(agent_name or "main"),
@@ -463,8 +462,7 @@ async def _build_agent_session(
     session_state: HarnessSessionState | None = None,
 ) -> tuple[Agent[Any], AgentSession, str, _runner._DelegateErrorTracker | None, InferenceTarget]:
     """Construct the existing fresh MAF agent/session and invocation metadata."""
-    with suppress_experimental_warnings():
-        from agent_framework import AgentSession
+    from agent_framework import AgentSession
 
     resolved_config = agent_configuration or AgentConfiguration()
     chat_client, inference_target = build_chat_client(model)
