@@ -29,6 +29,9 @@ from .hybrid_config import HYBRID_SANDBOX_GROUP_ENV
 DTS_TASK_HUB_DASHBOARD_URL_ENV = "DTS_TASK_HUB_DASHBOARD_URL"
 APPLICATIONINSIGHTS_RESOURCE_ID_ENV = "APPLICATIONINSIGHTS_RESOURCE_ID"
 TASK_HUB_NAME_ENV = "TASKHUB_NAME"
+DURABLE_CHAT_ALLOWED_ORIGINS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_CHAT_ALLOWED_ORIGINS"
+)
 _DTS_CONNECTION_NAME_DEFAULT = "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
 _HOST_DURABLE_PROVIDER_TYPE_ENV = (
     "AzureFunctionsJobHost__extensions__durableTask__storageProvider__type"
@@ -92,6 +95,7 @@ class DurableChatSettings:
     enabled: bool
     dts: DurableChatDtsSettings
     application_insights: DurableChatApplicationInsightsSettings
+    standalone_origins_configured: bool = False
     sandbox_group_resource_id: str | None = None
 
     @classmethod
@@ -105,6 +109,21 @@ class DurableChatSettings:
         """Resolve the optional shell and its display-only integrations."""
         source = os.environ if environment is None else environment
         enabled = DurableLoopSettings.from_environment(source) is not None
+        try:
+            standalone_origins_configured = (
+                _standalone_origins_configured(
+                    _configured_environment_value(
+                        source,
+                        DURABLE_CHAT_ALLOWED_ORIGINS_ENV,
+                    )
+                )
+                if enabled
+                else False
+            )
+        except ValueError as exc:
+            raise DurableChatConfigurationError(
+                f"{DURABLE_CHAT_ALLOWED_ORIGINS_ENV} is invalid"
+            ) from exc
         host = _load_host_configuration(app_root)
         dts = _resolve_dts_settings(source, host)
         application_insights = _resolve_application_insights_settings(
@@ -115,10 +134,22 @@ class DurableChatSettings:
         )
         return cls(
             enabled=enabled,
+            standalone_origins_configured=standalone_origins_configured,
             sandbox_group_resource_id=_resolve_sandbox_group_resource_id(source),
             dts=dts,
             application_insights=application_insights,
         )
+
+    def validate_auth_mode(self, auth_mode: str) -> None:
+        """Reject standalone access when HTTP auth is not anonymous."""
+        if self.standalone_origins_configured and auth_mode != "anonymous":
+            raise DurableChatConfigurationError(
+                f"{DURABLE_CHAT_ALLOWED_ORIGINS_ENV} requires anonymous HTTP auth"
+            )
+
+    def standalone_anonymous(self, auth_mode: str) -> bool:
+        """Return whether bootstrap may enable the standalone anonymous client."""
+        return self.enabled and self.standalone_origins_configured and auth_mode == "anonymous"
 
     def integration_metadata(self) -> DurableChatIntegrationMetadataV1:
         """Return the shell-safe availability projection."""
@@ -456,6 +487,17 @@ def _configured_environment_value(
                 raise DurableChatConfigurationError(f"{name} must be a string.")
             return value.strip()
     return None
+
+
+def _standalone_origins_configured(value: str | None) -> bool:
+    if value is None:
+        return False
+    parsed = json.loads(value)
+    if not isinstance(parsed, list) or any(
+        not isinstance(origin, str) or not origin.strip() for origin in parsed
+    ):
+        raise ValueError("durable-chat allowed origins must be a JSON array of strings")
+    return bool(parsed)
 
 
 def _nested_string(source: Mapping[str, object], *path: str) -> str:

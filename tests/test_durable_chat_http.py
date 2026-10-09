@@ -12,6 +12,7 @@ from azure_functions_agents.config.schema import EndpointAuthConfig, EntraAuthCo
 from azure_functions_agents.experimental import durable_chat_http, durable_loop_http
 from azure_functions_agents.experimental.durable_chat_config import (
     _HOST_HTTP_ROUTE_PREFIX_ENV,
+    DURABLE_CHAT_ALLOWED_ORIGINS_ENV,
     DurableChatSettings,
 )
 from azure_functions_agents.experimental.durable_chat_http import (
@@ -119,10 +120,13 @@ def _resolved(*, auth: EndpointAuthConfig) -> SimpleNamespace:
 def _settings(
     *,
     sandbox_group_resource_id: str | None = None,
+    allowed_origins: str | None = None,
 ) -> DurableChatSettings:
     environment = {DURABLE_LOOP_ENABLED_ENV: "true"}
     if sandbox_group_resource_id is not None:
         environment[HYBRID_SANDBOX_GROUP_ENV] = sandbox_group_resource_id
+    if allowed_origins is not None:
+        environment[DURABLE_CHAT_ALLOWED_ORIGINS_ENV] = allowed_origins
     return DurableChatSettings.from_environment(
         environment,
         observability_enabled=False,
@@ -222,9 +226,27 @@ async def test_anonymous_bootstrap_has_a_distinct_shared_history_namespace() -> 
         assert response.status_code == 200
         assert str(app.routes["durable_chat_bootstrap_v1"]["auth_level"]).lower() == mode
         assert response.headers["cache-control"] == "no-store"
-        namespaces[mode] = json.loads(response.body)["history_namespace"]
+        body = json.loads(response.body)
+        assert body["standalone_anonymous"] is False
+        namespaces[mode] = body["history_namespace"]
     assert namespaces["anonymous"] != namespaces["function"]
     assert namespaces["function"] == namespaces["admin"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_advertises_explicit_standalone_anonymous_access() -> None:
+    app = _App()
+    register_durable_chat_http_routes(
+        app,  # type: ignore[arg-type]
+        resolved=_resolved(auth=EndpointAuthConfig(mode="anonymous")),
+        settings=DurableLoopSettings(),
+        chat_settings=_settings(allowed_origins='["https://frontend.example.test"]'),
+    )
+
+    response = await app.handlers["durable_chat_bootstrap_v1"](_Request())
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["standalone_anonymous"] is True
 
 
 @pytest.mark.asyncio

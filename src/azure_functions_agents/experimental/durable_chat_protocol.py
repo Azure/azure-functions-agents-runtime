@@ -419,6 +419,7 @@ class DurableChatBootstrapV1(_DurableChatModel):
     ]
     default_sandbox_profile: SandboxExecutionProfile
     foreground_streaming_available: bool
+    standalone_anonymous: bool = False
     sandbox_group_resource_id: _ResourceId | None = None
     integrations: DurableChatIntegrationMetadataV1 | None = None
     history_namespace: _Sha256

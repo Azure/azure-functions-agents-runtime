@@ -15,6 +15,7 @@ from azure_functions_agents.experimental.durable_chat_config import (
     _HOST_HTTP_ROUTE_PREFIX_ENV,
     APPLICATIONINSIGHTS_RESOURCE_ID_ENV,
     DTS_TASK_HUB_DASHBOARD_URL_ENV,
+    DURABLE_CHAT_ALLOWED_ORIGINS_ENV,
     TASK_HUB_NAME_ENV,
     DurableChatConfigurationError,
     DurableChatSettings,
@@ -82,6 +83,36 @@ def test_sandbox_group_metadata_is_optional_and_validated() -> None:
     assert frozen.sandbox_group_resource_id == _SANDBOX_GROUP_RESOURCE_ID
     assert missing.sandbox_group_resource_id is None
     assert invalid.sandbox_group_resource_id is None
+
+
+def test_standalone_allowed_origins_require_json_and_anonymous_auth() -> None:
+    settings = DurableChatSettings.from_environment(
+        {
+            DURABLE_LOOP_ENABLED_ENV: "true",
+            DURABLE_CHAT_ALLOWED_ORIGINS_ENV: '["https://frontend.example.test"]',
+        },
+        observability_enabled=False,
+    )
+
+    assert settings.standalone_origins_configured
+    assert settings.standalone_anonymous("anonymous")
+    assert not settings.standalone_anonymous("function")
+    with pytest.raises(DurableChatConfigurationError, match="requires anonymous HTTP auth"):
+        settings.validate_auth_mode("function")
+
+
+def test_invalid_standalone_allowed_origins_are_rejected() -> None:
+    with pytest.raises(
+        DurableChatConfigurationError,
+        match="AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_CHAT_ALLOWED_ORIGINS is invalid",
+    ):
+        DurableChatSettings.from_environment(
+            {
+                DURABLE_LOOP_ENABLED_ENV: "true",
+                DURABLE_CHAT_ALLOWED_ORIGINS_ENV: '{"origin":"https://frontend.example.test"}',
+            },
+            observability_enabled=False,
+        )
 
 
 def test_route_prefix_defaults_to_api_and_honors_explicit_safe_overrides() -> None:

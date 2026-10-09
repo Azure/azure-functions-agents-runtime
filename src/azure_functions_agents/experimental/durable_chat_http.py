@@ -101,6 +101,7 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
     if not chat_settings.enabled:
         return
     auth = resolved.builtin_endpoints.http_auth
+    chat_settings.validate_auth_mode(auth.mode)
     auth_level = resolve_endpoint_auth_level(auth)
 
     async def get_shell(req: Request) -> Response:
@@ -127,6 +128,7 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
             supported_sandbox_profiles=_supported_sandbox_profiles(settings),
             default_sandbox_profile=_default_sandbox_profile(),
             foreground_streaming_available=not settings.background_model_enabled,
+            standalone_anonymous=chat_settings.standalone_anonymous(auth.mode),
             sandbox_group_resource_id=chat_settings.sandbox_group_resource_id,
             integrations=chat_settings.integration_metadata(),
             history_namespace=_history_namespace(
