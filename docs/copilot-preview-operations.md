@@ -25,6 +25,34 @@ production qualification.
 The SDK owns continuation, recovery and compaction. The host does not promise
 transactional turns or exactly-once tool effects.
 
+The Copilot extra pins `github-copilot-sdk==1.0.16`. The published Python wheel
+pins native runtime `1.0.90`. The wheel is available through the approved package
+feed in the test environment. No SDK source overlay or datetime patch is needed
+for the tested skill/view path. Keep the exact tested package, native version,
+and live-service results in test reports. Offline checks do not prove that a
+live MCP search succeeds.
+
+The Windows live check used Core Tools `4.15.2`, Azure OpenAI Entra, and the
+`o4-mini` deployment. The skill check passed. The first MCP search failed.
+A second search and `view` of its saved output succeeded. The verifier still
+reports a failure because all tool calls must succeed. The cause of the first
+failure is not confirmed. This is not a fully passing MCP check.
+
+For offline native tests, first put an approved, complete native bundle in
+`.tmp-validation/runtime-1.0.90/prebuilds/<platform>/`. The bundle must include
+the runtime executable, `runtime.node`, and `.hostless-runtime-assets-v2`.
+The tests select that executable directly and never download it.
+Then run these commands from the repository root:
+
+```powershell
+$env:AZURE_FUNCTIONS_AGENTS_TEST_NATIVE_COPILOT = "1"
+python -m pytest tests\test_copilot_execution_native.py tests\test_copilot_execution_restore.py -q
+```
+
+The skill/view regression uses a handler that rejects model inference. Other
+native execution tests use a synthetic provider. Missing approved assets cause
+a skip, not a successful native check.
+
 ## Opt in and opt out
 
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only harness selector and is read
@@ -52,7 +80,10 @@ shared configuration does not initialize or probe the other implementation.
 These are outbound capabilities of the existing direct, non-streaming HTTP
 preview, not new triggers or endpoint support. Keep the local, single-worker
 hosting limit and the same `SessionFs`, lock, and create/resume/disconnect
-lifecycle. The checked-in sample does not require MCP credentials or skills.
+lifecycle. The checked-in sample enables a public Microsoft Learn MCP server
+without MCP credentials and a local reference-reading skill. Its
+`verify.py --phase capabilities` check requires successful MCP and native
+skill/view evidence. See the sample README for setup and opt-out steps.
 
 ### MCP configuration and auth
 
@@ -192,6 +223,17 @@ handling the SDK's declared host-path convention. The adapter does not parse
 file contents to resolve paths or restrict persistence to known filenames.
 Only the exact current host workspace is accepted. Unknown paths recorded by
 the SDK are denied; restoring after a workspace change is not qualified.
+These checks apply to filesystem callbacks. They are not a host resume gate:
+the SDK can resume without a callback for a previously recorded workspace.
+
+On Windows, the SDK can request `<workspace-drive>:\session-state\temp`.
+The host maps that exact same-drive root and its descendants to the virtual
+`/session-state` root. For example, a `Q:\app\workspace` workspace permits
+`Q:\session-state\temp` as a session-storage path. This does not permit access
+to the physical `Q:\session-state` directory. Wrong drives, UNC state aliases,
+sibling prefixes, traversal, and reserved names stay denied. The SDK's public
+documentation shows a POSIX virtual-root example; it does not settle ownership
+of this Windows path conversion. Confirm that contract before an upstream report.
 
 MAF history uses its own provider and `agent-sessions/` namespace. Neither
 harness imports, initializes, probes or cleans up the other's persistence.

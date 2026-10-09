@@ -72,6 +72,22 @@ class SessionPathPolicy(ABC):
 
 
 class WindowsSessionPathPolicy(SessionPathPolicy):
+    def normalize(self, path: str, workspace_path: str = "") -> str:
+        subject = self.separators(path)
+        workspace = self.separators(workspace_path).rstrip("/")
+        compared = self.comparison_key(subject)
+        physical_workspace = workspace and (
+            compared == self.comparison_key(workspace)
+            or compared.startswith(self.comparison_key(workspace) + "/")
+        )
+        drive, remainder = ntpath.splitdrive(workspace)
+        if not physical_workspace and re.fullmatch(r"[A-Za-z]:", drive) and remainder.startswith("/"):
+            state_root = drive + SESSION_STATE_ROOT
+            state_key = self.comparison_key(state_root)
+            if compared == state_key or compared.startswith(state_key + "/"):
+                path = SESSION_STATE_ROOT + subject[len(state_root):]
+        return super().normalize(path, workspace_path)
+
     def separators(self, path: str) -> str:
         return path.replace("\\", "/")
 

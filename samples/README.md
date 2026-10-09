@@ -31,7 +31,9 @@ Development tooling samples:
 For the separate **local-only, default-off Copilot harness experiment**, use
 [`copilot-preview`](copilot-preview/README.md). Its pinned setup and two-turn
 receipt verifier exercise a real Functions-host restart; it is not an `azd up`
-deployment sample and does not require Azurite.
+deployment sample and does not require Azurite. It also includes a public
+Microsoft Learn MCP server and a reference-reading skill, with explicit
+tool-evidence checks.
 
 ## Run Locally (optional)
 

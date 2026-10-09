@@ -1,4 +1,4 @@
-"""Real SDK/native filesystem boundaries without inference or downloads."""
+"""Real SDK/native files with a synthetic provider and no downloads."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def runtime_is_cached() -> bool:
     """Report whether the pinned runtime bundle is already present; never download it."""
     from copilot._cli_version import get_runtime_platform
 
-    bundle = REPO_ROOT / ".tmp-validation" / "runtime-1.0.85" / "prebuilds" / get_runtime_platform()
+    bundle = REPO_ROOT / ".tmp-validation" / "runtime-1.0.90" / "prebuilds" / get_runtime_platform()
     wrapper = "copilot-runtime.exe" if os.name == "nt" else "copilot-runtime"
     return all((bundle / name).is_file() for name in (
         wrapper, "runtime.node", ".hostless-runtime-assets-v2"
@@ -27,16 +27,18 @@ def runtime_is_cached() -> bool:
 
 def run_worker(
     phase: int, session_dir: Path, storage_root: Path, out: Path, cwd: Path,
-    *, expected_exit: int = 0,
+    *, expected_exit: int = 0, probe_path: str = "",
 ) -> dict:
     environment = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "src")]),
+        "PYTHONPATH": os.pathsep.join([
+            str(REPO_ROOT), str(REPO_ROOT / "src"), os.environ.get("PYTHONPATH", ""),
+        ]),
         "COPILOT_SKIP_CLI_DOWNLOAD": "1",
     }
     completed = subprocess.run(
         [sys.executable, "-m", "tests._copilot_restore_worker", str(phase), str(session_dir),
-         str(storage_root), str(out)],
+         str(storage_root), str(out), probe_path],
         cwd=str(cwd),
         env=environment,
         capture_output=True,
@@ -66,6 +68,7 @@ def test_replacement_process_uses_the_same_known_workspace_with_opaque_files(tmp
     created = run_worker(1, session_dir, tmp_path / "root-a", tmp_path / "a.json", first_cwd)
     assert created["outcome"] == "ok", created.get("error")
     assert "session-state/opaque.sdk" in created["files"]
+    assert created["event_count"] > 0
     assert created["denied_paths"] == []
 
     resumed = run_worker(2, session_dir, tmp_path / "root-a", tmp_path / "b.json", second_cwd)
@@ -73,19 +76,21 @@ def test_replacement_process_uses_the_same_known_workspace_with_opaque_files(tmp
     assert resumed["pid"] != created["pid"]
     assert resumed["cwd"] != created["cwd"]
     assert resumed["workspace"] == created["workspace"]
+    assert resumed["event_count"] >= created["event_count"]
     assert resumed["denied_paths"] == []
     assert "session-state/opaque.sdk" in resumed["files"]
     assert any(path.startswith("/session-state") for path in resumed["paths"])
 
 
-def test_recorded_unknown_workspace_is_denied_without_suffix_adoption(tmp_path):
+def test_callback_for_recorded_unknown_workspace_is_denied_without_suffix_adoption(tmp_path):
     session_dir = tmp_path / "sessions"
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     created = run_worker(1, session_dir, tmp_path / "root-a", tmp_path / "a.json", cwd)
     assert created["outcome"] == "ok", created.get("error")
     resumed = run_worker(
-        2, session_dir, tmp_path / "root-b", tmp_path / "b.json", cwd, expected_exit=1
+        2, session_dir, tmp_path / "root-b", tmp_path / "b.json", cwd,
+        expected_exit=1, probe_path=created["workspace"],
     )
     assert resumed["outcome"] == "error"
     assert resumed["workspace"] != created["workspace"]
