@@ -1,6 +1,6 @@
 # Local Copilot preview
 
-This **default-off** Functions sample exercises non-streaming Copilot chat and
+This **default-off** Functions sample exercises Copilot HTTP chat and
 the authored `/preview` HTTP route with `make_receipt` and `web_request`
 (limited to `example.com`). It also includes the public Microsoft Learn MCP
 server and a `preview-check` skill with a reference file. The SDK owns sessions and their opaque files;
@@ -228,8 +228,13 @@ restart the host. Set `skills: false` to disable the skill check. Do not change
 the nested `builtin_endpoints.mcp` field: that field controls an inbound endpoint,
 not the outbound server. See the [MCP and scoped skills guide](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills).
 
-This local preview does not support streaming, delegation,
-workflows or deployed hosting. Custom `ClientManager`
+The local adapter also supports SSE chat, declared chat delegates, Workflow
+Sub Agents, and Dynamic Workflow management when authored in an agent app.
+This sample remains a single-agent tool demonstration and does not configure
+those optional capabilities. Deployed hosting remains unsupported in this
+preview. The built-in debug chat UI and non-HTTP triggers are enabled but not
+live-qualified; the UI does not restore earlier transcript messages when you
+resume a session. Custom `ClientManager`
 instances are MAF-only and are rejected when Copilot is on. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.

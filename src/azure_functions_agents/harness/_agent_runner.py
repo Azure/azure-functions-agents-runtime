@@ -80,6 +80,7 @@ class _HarnessRunner(Protocol):
         workflow_policy: WorkflowPlanPolicy | None = None,
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
+        session_is_new: bool = False,
     ) -> AsyncGenerator[str]: ...
 
     async def run_leaf_agent_task(
@@ -181,6 +182,7 @@ class AgentRunner:
         workflow_policy: WorkflowPlanPolicy | None = None,
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
+        session_is_new: bool = False,
     ) -> AsyncGenerator[str]:
         effective_deadline = deadline
         if effective_deadline is None:
@@ -209,6 +211,7 @@ class AgentRunner:
             workflow_policy=workflow_policy,
             skills=skills,
             skill_catalog=skill_catalog,
+            session_is_new=session_is_new,
         )
 
     async def run_leaf_agent_task(

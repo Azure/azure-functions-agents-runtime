@@ -499,7 +499,7 @@ async def _build_agent_session(
             else asyncio.get_running_loop().time() + _runner.DEFAULT_TIMEOUT
         )
         delegate_tools, delegate_error_tracker = await _runner.build_subagent_tools(
-            subagents, catalog, coordinator_deadline=effective_deadline, _harness=_harness
+            subagents, catalog, coordinator_deadline=effective_deadline, harness=_harness
         )
 
     resolved_tools, effective_instructions = assemble_agent_inputs(

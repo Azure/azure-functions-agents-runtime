@@ -224,6 +224,13 @@ the span ERROR with `af.fault_domain=web_request`.
 
 ### Span `execute_tool delegate_<slug>` (chat-time sub-agent delegation)
 
+The span tree below is the default MAF path. The local Copilot preview does
+not enable SDK telemetry or claim native child spans: it retains the host
+delegate metrics, sanitized failure accounting, role-specific usage records,
+and the request's existing runtime span. The public SSE envelope is translated
+from SDK callbacks and host-authorized tool calls; specialist native session
+events do not appear in the coordinator's public stream.
+
 Chat-time delegation ([FRD 0007](./frds/0007-multi-agent-delegation.md)) needs **no new span** —
 the `delegate_<slug>` tool's handler calls the specialist's plain, non-streaming `Agent.run(task)`
 directly, and MAF already traces every `Agent.run()` and

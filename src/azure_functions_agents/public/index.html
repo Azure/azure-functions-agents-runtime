@@ -1676,7 +1676,10 @@
 					: "Copilot";
 				setBubbleText(streamingBubble.bubble, "copilot", result.text);
 				setBubbleIntermediates(streamingBubble.bubble, []);
-				setBubbleMeta(streamingBubble.bubble, copilotMeta);
+				setBubbleMeta(
+					streamingBubble.bubble,
+					result.streamTruncated ? `${copilotMeta} • live updates truncated` : copilotMeta
+				);
 				liveDetails.responseIntermediate = result.details.responseIntermediate;
 				liveDetails.toolCalls = result.details.toolCalls;
 				attachBubbleDetails(streamingBubble.bubble, liveDetails);
@@ -1756,6 +1759,7 @@
 						restoredGreetingContent.textContent =
 							"Welcome back — reconnected to your previous session. Active workflows will appear below within a few seconds.";
 					}
+					void loadSessionHistory(state.sessionId, { announce: false, replaceView: false });
 				}
 			} catch (_err) {
 				// Network error during probe — leave capability "unknown" so
@@ -2185,6 +2189,10 @@
 			historyReplayInFlight = false;
 		}
 
+		const HISTORY_UNAVAILABLE_NOTICE =
+			"Earlier transcript messages are not restored for this session. " +
+			"Your next message still continues it.";
+
 		// Fetch and repaint a session's prior transcript from the server so a
 		// resumed/restored session shows its history instead of an empty
 		// window. Best-effort: older servers (no /history route), storage that
@@ -2217,8 +2225,16 @@
 						method: "GET",
 						headers: { "x-ms-session-id": requestedId, "Accept": "application/json" },
 					});
-					// A 404 means this server predates the history endpoint —
-					// stay silent and leave whatever is already on screen.
+					// A 501 means this app's harness does not expose transcripts.
+					// Say so for the still-current session; other failures (e.g. a
+					// 404 from a server that predates the endpoint) stay silent.
+					if (resp.status === 501) {
+						if (state.sessionId === requestedId && generation === historyReplayGeneration) {
+							renderBubble("copilot", HISTORY_UNAVAILABLE_NOTICE, "History");
+							scrollChatToBottom();
+						}
+						return;
+					}
 					if (!resp.ok) return;
 					payload = await resp.json();
 				} catch (_e) {
@@ -2596,6 +2612,7 @@
 			let streamText = "";
 			let finalMessage = "";
 			let doneReceived = false;
+			let streamTruncated = false;
 			const intermediateResponses = [];
 			const toolCalls = [];
 			const seenToolStartKeys = new Set();
@@ -2751,6 +2768,11 @@
 					throw new Error(typeof event?.content === "string" && event.content.trim() ? event.content : "Streaming request failed.");
 				}
 
+				if (type === "stream_truncated") {
+					streamTruncated = true;
+					return;
+				}
+
 				if (type === "done") {
 					doneReceived = true;
 				}
@@ -2809,8 +2831,11 @@
 			});
 
 			return {
-				text: finalMessage || streamText || "(No response body)",
+				text: streamTruncated
+					? finalMessage || "(No response body)"
+					: finalMessage || streamText || "(No response body)",
 				sessionId: state.sessionId,
+				streamTruncated,
 				details
 			};
 		}
@@ -2887,7 +2912,10 @@
 					: "assistant";
 				setBubbleText(streamingBubble.bubble, "assistant", result.text);
 				setBubbleIntermediates(streamingBubble.bubble, []);
-				setBubbleMeta(streamingBubble.bubble, assistantMeta);
+				setBubbleMeta(
+					streamingBubble.bubble,
+					result.streamTruncated ? `${assistantMeta} • live updates truncated` : assistantMeta
+				);
 				liveDetails.responseIntermediate = result.details.responseIntermediate;
 				liveDetails.toolCalls = result.details.toolCalls;
 				attachBubbleDetails(streamingBubble.bubble, liveDetails);

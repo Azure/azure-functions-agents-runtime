@@ -461,6 +461,79 @@ def native(monkeypatch, tmp_path, request):
 
 
 @pytest.mark.asyncio
+async def test_real_native_public_sse_tool_order_resume_and_completion(native):
+    from copilot.session_events import AssistantTurnEndData
+
+    app = create_function_app(native.root)
+    functions = {item.get_function_name(): item.get_user_function() for item in app.get_functions()}
+    stream = functions["agent_main_builtin_chatstream"]
+    try:
+        response = await stream(SimpleNamespace(
+            headers={},
+            json=AsyncMock(return_value={"prompt": "Call make_receipt with tag 'native-stream'."}),
+        ))
+        assert response.status_code == 200
+        events = [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in response.body_iterator
+        ]
+        kinds = [event["type"] for event in events]
+        assert kinds[0] == "session"
+        assert kinds[-1] == "done"
+        assert "error" not in kinds
+        assert "tool_start" in kinds
+        assert kinds.index("tool_start") < kinds.index("tool_end") < kinds.index("done")
+        assert any(isinstance(event.data, AssistantTurnEndData) for event in native.histories[0])
+        resumed = await stream(SimpleNamespace(
+            headers={"x-ms-session-id": events[0]["session_id"]},
+            json=AsyncMock(return_value={"prompt": "Recall the previous receipt, without tools."}),
+        ))
+        resumed_events = [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in resumed.body_iterator
+        ]
+        assert resumed_events[0]["session_id"] == events[0]["session_id"]
+        assert resumed_events[-1]["type"] == "done"
+        assert native.resumed == native.created
+    finally:
+        await shutdown_client_manager()
+
+
+@pytest.mark.asyncio
+async def test_real_native_sse_disconnect_aborts_only_affected_turn(native):
+    app = create_function_app(native.root)
+    functions = {item.get_function_name(): item.get_user_function() for item in app.get_functions()}
+    stream_route = functions["agent_main_builtin_chatstream"]
+    chat = functions["agent_main_builtin_chat"]
+    stream = await stream_route(SimpleNamespace(
+        headers={}, json=AsyncMock(return_value={"prompt": "STALL_NATIVE_TEST"}),
+    ))
+    iterator = stream.body_iterator
+    first = json.loads((await anext(iterator)).removeprefix("data: "))
+    assert first["type"] == "session"
+    pending = asyncio.create_task(anext(iterator))
+    try:
+        await asyncio.wait_for(native.stalled.wait(), timeout=30)
+        client = native.clients[0]
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await iterator.aclose()
+        await asyncio.wait_for(native.cancelled.wait(), timeout=10)
+        peer = await chat(SimpleNamespace(
+            headers={},
+            json=AsyncMock(return_value={"prompt": "Call make_receipt with tag 'stream-peer'."}),
+        ))
+        assert peer.status_code == 200, peer.body.decode()
+        assert json.loads(peer.body)["response"].startswith("receipt-")
+        assert native.clients == [client]
+    finally:
+        if not pending.done():
+            pending.cancel()
+        await shutdown_client_manager()
+
+
+@pytest.mark.asyncio
 async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
     from copilot.session_events import (
         AssistantMessageData,
