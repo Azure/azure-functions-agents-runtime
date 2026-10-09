@@ -43,3 +43,7 @@ extends:
       - stage: Build
         jobs:
           - template: /eng/templates/official/jobs/build-artifacts.yml@self
+          - template: /eng/templates/jobs/build-vally-executor.yml@self
+            parameters:
+              poolName: 1es-pool-azfunc
+              artifactName: drop

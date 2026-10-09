@@ -282,6 +282,7 @@ async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_tur
 
         assert first.content == "reply-1"
         assert second.content == "reply-2"
+        assert first.model == second.model == "gpt-4.1-mini"
         assert first.content_intermediate == second.content_intermediate == []
         assert len(first.tool_calls) == len(second.tool_calls) == 1
         assert first.tool_calls[0]["arguments"] == {"turn": 1}
@@ -289,6 +290,8 @@ async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_tur
         assert first.tool_calls[0]["result"] == "first-result"
         assert first.tool_calls[0]["success"] is True
         assert second.tool_calls[0]["success"] is False
+        assert "turn_id" not in first.tool_calls[0]
+        assert "turn_id" not in second.tool_calls[0]
         assert _tool_error_count(first.tool_calls) == 0
         assert _tool_error_count(second.tool_calls) == 1
         assert "first-result" not in repr(second.tool_calls)
