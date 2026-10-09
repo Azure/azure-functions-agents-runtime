@@ -28,6 +28,13 @@ from .durable_chat_journal import (
     DurableChatJournalError,
     get_durable_chat_journal,
 )
+from .durable_chat_origin import (
+    DurableChatOriginPolicy,
+    durable_chat_cors_headers,
+    durable_chat_cors_preflight,
+    durable_chat_preflight_headers,
+    durable_chat_request_origin,
+)
 from .durable_chat_protocol import (
     MAX_DURABLE_CHAT_REPLAY_EVENTS,
     DurableChatAgentIdentityV1,
@@ -103,6 +110,7 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
     auth = resolved.builtin_endpoints.http_auth
     chat_settings.validate_auth_mode(auth.mode)
     auth_level = resolve_endpoint_auth_level(auth)
+    origin_policy = chat_settings.origin_policy
 
     async def get_shell(req: Request) -> Response:
         if _needs_shell_slash_redirect(req):
@@ -268,7 +276,7 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
         _CONFIG_ROUTE,
         ["GET"],
         auth_level,
-        get_bootstrap,
+        _with_durable_chat_origin_policy(get_bootstrap, origin_policy),
         durable_client=False,
     )
     _register_route(
@@ -277,7 +285,7 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
         _EVENTS_ROUTE,
         ["GET"],
         auth_level,
-        get_events,
+        _with_durable_chat_origin_client_policy(get_events, origin_policy),
         durable_client=True,
     )
     _register_route(
@@ -286,9 +294,34 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
         _DIAGNOSTICS_ROUTE,
         ["GET"],
         auth_level,
-        get_diagnostics,
+        _with_durable_chat_origin_client_policy(get_diagnostics, origin_policy),
         durable_client=True,
     )
+    if origin_policy.enabled:
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_bootstrap_preflight_v1",
+            _CONFIG_ROUTE,
+            frozenset({"GET"}),
+            auth_level,
+            origin_policy,
+        )
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_events_preflight_v1",
+            _EVENTS_ROUTE,
+            frozenset({"GET"}),
+            auth_level,
+            origin_policy,
+        )
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_diagnostics_preflight_v1",
+            _DIAGNOSTICS_ROUTE,
+            frozenset({"GET"}),
+            auth_level,
+            origin_policy,
+        )
 
 
 def _asset_handler(asset_name: str) -> Callable[[Request], Awaitable[Response]]:
@@ -334,6 +367,69 @@ def _register_route(
             client_name="client",
         )
     app.route(route=route, methods=methods, auth_level=auth_level)(decorated)
+
+
+def _with_durable_chat_origin_policy(
+    handler: Callable[[Request], Awaitable[Response]],
+    origin_policy: DurableChatOriginPolicy,
+) -> Callable[[Request], Awaitable[Response]]:
+    async def guarded(req: Request) -> Response:
+        decision = durable_chat_request_origin(req, origin_policy)
+        if not decision.permitted:
+            return _chat_json_response(
+                {"error": "cross_origin_request_rejected"},
+                status_code=403,
+            )
+        response = await handler(req)
+        response.headers.update(durable_chat_cors_headers(decision))
+        return response
+
+    return guarded
+
+
+def _with_durable_chat_origin_client_policy(
+    handler: Callable[[Request, df.DurableOrchestrationClient], Awaitable[Response]],
+    origin_policy: DurableChatOriginPolicy,
+) -> Callable[[Request, df.DurableOrchestrationClient], Awaitable[Response]]:
+    async def guarded(
+        req: Request,
+        client: df.DurableOrchestrationClient,
+    ) -> Response:
+        decision = durable_chat_request_origin(req, origin_policy)
+        if not decision.permitted:
+            return _chat_json_response(
+                {"error": "cross_origin_request_rejected"},
+                status_code=403,
+            )
+        response = await handler(req, client)
+        response.headers.update(durable_chat_cors_headers(decision))
+        return response
+
+    return guarded
+
+
+def _register_cors_preflight_route(
+    app: func.FunctionApp,
+    name: str,
+    route: str,
+    allowed_methods: frozenset[str],
+    auth_level: func.AuthLevel,
+    origin_policy: DurableChatOriginPolicy,
+) -> None:
+    async def options(req: Request) -> Response:
+        preflight = durable_chat_cors_preflight(req, origin_policy, allowed_methods)
+        if preflight is None:
+            return Response(status_code=403, headers=_DATA_HEADERS)
+        return Response(
+            status_code=204,
+            headers={
+                **_DATA_HEADERS,
+                **durable_chat_preflight_headers(preflight, allowed_methods),
+            },
+        )
+
+    options.__name__ = name
+    app.route(route=route, methods=["OPTIONS"], auth_level=auth_level)(options)
 
 
 def _static_response(asset_name: str) -> Response:

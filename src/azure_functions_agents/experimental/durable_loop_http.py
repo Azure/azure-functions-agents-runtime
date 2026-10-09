@@ -9,7 +9,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlsplit
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -29,6 +28,14 @@ from .durable_chat_config import DurableChatSettings, durable_chat_route
 from .durable_chat_journal import (
     DurableChatInitializationError,
     get_durable_chat_journal,
+)
+from .durable_chat_origin import (
+    DurableChatOriginPolicy,
+    durable_chat_cors_headers,
+    durable_chat_cors_preflight,
+    durable_chat_mutation_origin,
+    durable_chat_preflight_headers,
+    durable_chat_request_origin,
 )
 from .durable_chat_protocol import DurableChatRunInitializationV1
 from .durable_loop import create_run_identity
@@ -111,6 +118,13 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
     )
     auth = resolved.builtin_endpoints.http_auth
     auth_level = resolve_endpoint_auth_level(auth)
+    origin_policy = (
+        chat_settings.origin_policy
+        if chat_settings is not None
+        else DurableChatOriginPolicy.disabled()
+    )
+    if chat_settings is not None:
+        chat_settings.validate_auth_mode(auth.mode)
 
     async def start_run(  # noqa: PLR0912, PLR0915
         req: Request,
@@ -119,7 +133,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         owner = _authorized_owner(req, auth)
         if isinstance(owner, Response):
             return owner
-        csrf_failure = _same_origin_mutation_failure(req)
+        csrf_failure = _same_origin_mutation_failure(req, origin_policy=origin_policy)
         if csrf_failure is not None:
             return csrf_failure
         try:
@@ -457,7 +471,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized
-        csrf_failure = _same_origin_mutation_failure(req)
+        csrf_failure = _same_origin_mutation_failure(req, origin_policy=origin_policy)
         if csrf_failure is not None:
             return csrf_failure
         status, durable_input = authorized
@@ -517,7 +531,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized
-        csrf_failure = _same_origin_mutation_failure(req)
+        csrf_failure = _same_origin_mutation_failure(req, origin_policy=origin_policy)
         if csrf_failure is not None:
             return csrf_failure
         status, durable_input = authorized
@@ -795,14 +809,21 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             }
         )
 
-    _register_route(app, "durable_agent_run_start_v1", _ROUTE_BASE, ["POST"], auth_level, start_run)
+    _register_route(
+        app,
+        "durable_agent_run_start_v1",
+        _ROUTE_BASE,
+        ["POST"],
+        auth_level,
+        _with_durable_chat_origin_policy(start_run, origin_policy),
+    )
     _register_route(
         app,
         "durable_agent_run_status_v1",
         f"{_ROUTE_BASE}/{{run_id}}",
         ["GET"],
         auth_level,
-        get_status,
+        _with_durable_chat_origin_policy(get_status, origin_policy),
     )
     _register_route(
         app,
@@ -810,7 +831,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         f"{_ROUTE_BASE}/{{run_id}}/result",
         ["GET"],
         auth_level,
-        get_result,
+        _with_durable_chat_origin_policy(get_result, origin_policy),
     )
     _register_route(
         app,
@@ -826,7 +847,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         f"{_ROUTE_BASE}/{{run_id}}/cancel",
         ["POST"],
         auth_level,
-        cancel_run,
+        _with_durable_chat_origin_policy(cancel_run, origin_policy),
     )
     _register_route(
         app,
@@ -834,7 +855,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         f"{_ROUTE_BASE}/{{run_id}}/input/{{request_id}}",
         ["GET"],
         auth_level,
-        get_human_input,
+        _with_durable_chat_origin_policy(get_human_input, origin_policy),
     )
     _register_route(
         app,
@@ -842,8 +863,49 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         f"{_ROUTE_BASE}/{{run_id}}/input/{{request_id}}",
         ["POST"],
         auth_level,
-        submit_human_input,
+        _with_durable_chat_origin_policy(submit_human_input, origin_policy),
     )
+    if origin_policy.enabled:
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_start_preflight_v1",
+            _ROUTE_BASE,
+            frozenset({"POST"}),
+            auth_level,
+            origin_policy,
+        )
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_status_preflight_v1",
+            f"{_ROUTE_BASE}/{{run_id}}",
+            frozenset({"GET"}),
+            auth_level,
+            origin_policy,
+        )
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_result_preflight_v1",
+            f"{_ROUTE_BASE}/{{run_id}}/result",
+            frozenset({"GET"}),
+            auth_level,
+            origin_policy,
+        )
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_cancel_preflight_v1",
+            f"{_ROUTE_BASE}/{{run_id}}/cancel",
+            frozenset({"POST"}),
+            auth_level,
+            origin_policy,
+        )
+        _register_cors_preflight_route(
+            app,
+            "durable_chat_human_input_preflight_v1",
+            f"{_ROUTE_BASE}/{{run_id}}/input/{{request_id}}",
+            frozenset({"GET", "POST"}),
+            auth_level,
+            origin_policy,
+        )
 
 
 def _register_route(
@@ -861,6 +923,51 @@ def _register_route(
         client_name="client",
     )
     app.route(route=route, methods=methods, auth_level=auth_level)(decorated)
+
+
+def _with_durable_chat_origin_policy(
+    handler: Any,
+    origin_policy: DurableChatOriginPolicy,
+) -> Any:
+    async def guarded(
+        req: Request,
+        client: df.DurableOrchestrationClient,
+    ) -> Response:
+        decision = durable_chat_request_origin(req, origin_policy)
+        if not decision.permitted:
+            return _json_response(
+                {"error": "cross_origin_request_rejected"},
+                status_code=403,
+            )
+        response = await handler(req, client)
+        response.headers.update(durable_chat_cors_headers(decision))
+        return response
+
+    return guarded
+
+
+def _register_cors_preflight_route(
+    app: func.FunctionApp,
+    name: str,
+    route: str,
+    allowed_methods: frozenset[str],
+    auth_level: func.AuthLevel,
+    origin_policy: DurableChatOriginPolicy,
+) -> None:
+    async def options(req: Request) -> Response:
+        preflight = durable_chat_cors_preflight(req, origin_policy, allowed_methods)
+        if preflight is None:
+            return Response(status_code=403, headers=_DURABLE_DATA_HEADERS)
+        return Response(
+            status_code=204,
+            headers={
+                **_DURABLE_DATA_HEADERS,
+                **durable_chat_preflight_headers(preflight, allowed_methods),
+            },
+        )
+
+    options.__name__ = name
+    app.route(route=route, methods=["OPTIONS"], auth_level=auth_level)(options)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1501,65 +1608,16 @@ def _authorized_owner(req: Request, auth: EndpointAuthConfig) -> _DurableOwner |
     return owner
 
 
-def _same_origin_mutation_failure(req: Request) -> Response | None:
+def _same_origin_mutation_failure(
+    req: Request,
+    *,
+    origin_policy: DurableChatOriginPolicy | None = None,
+) -> Response | None:
     """Reject browser-origin mutations that do not target this exact origin."""
-    origin = req.headers.get("Origin")
-    if origin is None:
-        return None
-    # The Functions streaming proxy overwrites forwarded headers and replaces Host.
-    host = req.headers.get("X-Forwarded-Host", req.headers.get("Host"))
-    if not host or "," in host or any(character.isspace() for character in host):
-        return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
-    forwarded = req.headers.get("X-Forwarded-Proto")
-    expected_scheme = (
-        forwarded.strip().casefold()
-        if forwarded
-        else _request_scheme(req)
-    )
-    try:
-        parsed = urlsplit(origin)
-        expected_host = urlsplit(f"//{host}")
-        origin_port = parsed.port
-        expected_port = expected_host.port
-    except ValueError:
-        return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
-    if (
-        expected_scheme not in {"http", "https"}
-        or parsed.scheme not in {"http", "https"}
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-        or expected_host.hostname is None
-        or expected_host.username is not None
-        or expected_host.password is not None
-        or expected_host.path
-        or expected_host.query
-        or expected_host.fragment
-        or parsed.hostname is None
-        or parsed.hostname.casefold() != expected_host.hostname.casefold()
-        or _effective_port(parsed.scheme, origin_port)
-        != _effective_port(expected_scheme, expected_port)
-    ):
-        return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
-    if parsed.scheme.casefold() != expected_scheme:
+    policy = origin_policy or DurableChatOriginPolicy.disabled()
+    if not durable_chat_mutation_origin(req, policy).permitted:
         return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
     return None
-
-
-def _request_scheme(req: Request) -> str:
-    url = getattr(req, "url", None)
-    scheme = getattr(url, "scheme", None)
-    if isinstance(scheme, str) and scheme.casefold() in {"http", "https"}:
-        return scheme.casefold()
-    return "https"
-
-
-def _effective_port(scheme: str, port: int | None) -> int:
-    if port is not None:
-        return port
-    return 443 if scheme.casefold() == "https" else 80
 
 
 def _owner_hash(owner: _DurableOwner) -> str:

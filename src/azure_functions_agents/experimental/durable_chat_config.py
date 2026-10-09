@@ -8,13 +8,18 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from .._observability import is_observability_enabled
 from ..config.paths import get_app_root
+from .durable_chat_origin import (
+    DurableChatOriginError,
+    DurableChatOriginPolicy,
+    parse_durable_chat_allowed_origins,
+)
 from .durable_chat_protocol import (
     DurableChatDiagnosticLinkV1,
     DurableChatFrozenDiagnosticsV1,
@@ -95,7 +100,9 @@ class DurableChatSettings:
     enabled: bool
     dts: DurableChatDtsSettings
     application_insights: DurableChatApplicationInsightsSettings
-    standalone_origins_configured: bool = False
+    origin_policy: DurableChatOriginPolicy = field(
+        default_factory=DurableChatOriginPolicy.disabled
+    )
     sandbox_group_resource_id: str | None = None
 
     @classmethod
@@ -110,17 +117,17 @@ class DurableChatSettings:
         source = os.environ if environment is None else environment
         enabled = DurableLoopSettings.from_environment(source) is not None
         try:
-            standalone_origins_configured = (
-                _standalone_origins_configured(
+            origin_policy = (
+                parse_durable_chat_allowed_origins(
                     _configured_environment_value(
                         source,
                         DURABLE_CHAT_ALLOWED_ORIGINS_ENV,
                     )
                 )
                 if enabled
-                else False
+                else DurableChatOriginPolicy.disabled()
             )
-        except ValueError as exc:
+        except DurableChatOriginError as exc:
             raise DurableChatConfigurationError(
                 f"{DURABLE_CHAT_ALLOWED_ORIGINS_ENV} is invalid"
             ) from exc
@@ -134,22 +141,27 @@ class DurableChatSettings:
         )
         return cls(
             enabled=enabled,
-            standalone_origins_configured=standalone_origins_configured,
+            origin_policy=origin_policy,
             sandbox_group_resource_id=_resolve_sandbox_group_resource_id(source),
             dts=dts,
             application_insights=application_insights,
         )
 
+    @property
+    def standalone_origins_configured(self) -> bool:
+        """Return whether standalone cross-origin access is configured."""
+        return self.origin_policy.enabled
+
     def validate_auth_mode(self, auth_mode: str) -> None:
         """Reject standalone access when HTTP auth is not anonymous."""
-        if self.standalone_origins_configured and auth_mode != "anonymous":
+        if self.origin_policy.enabled and auth_mode != "anonymous":
             raise DurableChatConfigurationError(
                 f"{DURABLE_CHAT_ALLOWED_ORIGINS_ENV} requires anonymous HTTP auth"
             )
 
     def standalone_anonymous(self, auth_mode: str) -> bool:
         """Return whether bootstrap may enable the standalone anonymous client."""
-        return self.enabled and self.standalone_origins_configured and auth_mode == "anonymous"
+        return self.enabled and self.origin_policy.enabled and auth_mode == "anonymous"
 
     def integration_metadata(self) -> DurableChatIntegrationMetadataV1:
         """Return the shell-safe availability projection."""
@@ -487,19 +499,6 @@ def _configured_environment_value(
                 raise DurableChatConfigurationError(f"{name} must be a string.")
             return value.strip()
     return None
-
-
-def _standalone_origins_configured(value: str | None) -> bool:
-    if value is None:
-        return False
-    parsed = json.loads(value)
-    if not isinstance(parsed, list) or any(
-        not isinstance(origin, str) or not origin.strip() for origin in parsed
-    ):
-        raise ValueError("durable-chat allowed origins must be a JSON array of strings")
-    return bool(parsed)
-
-
 def _nested_string(source: Mapping[str, object], *path: str) -> str:
     current: object = source
     for key in path:

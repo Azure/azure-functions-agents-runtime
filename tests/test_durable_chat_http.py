@@ -250,6 +250,144 @@ async def test_bootstrap_advertises_explicit_standalone_anonymous_access() -> No
 
 
 @pytest.mark.asyncio
+async def test_standalone_bootstrap_and_preflight_are_exactly_origin_scoped() -> None:
+    app = _App()
+    allowed_origin = "https://frontend.example.test"
+    register_durable_chat_http_routes(
+        app,  # type: ignore[arg-type]
+        resolved=_resolved(auth=EndpointAuthConfig(mode="anonymous")),
+        settings=DurableLoopSettings(),
+        chat_settings=_settings(allowed_origins=f'["{allowed_origin}"]'),
+    )
+
+    bootstrap = await app.handlers["durable_chat_bootstrap_v1"](
+        _Request(headers={"Origin": allowed_origin})
+    )
+    preflight = await app.handlers["durable_chat_bootstrap_preflight_v1"](
+        _Request(
+            headers={
+                "Origin": allowed_origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "Accept",
+            }
+        )
+    )
+    denied = await app.handlers["durable_chat_bootstrap_preflight_v1"](
+        _Request(
+            headers={
+                "Origin": allowed_origin,
+                "Access-Control-Request-Method": "POST",
+            }
+        )
+    )
+
+    assert bootstrap.status_code == 200
+    assert bootstrap.headers["access-control-allow-origin"] == allowed_origin
+    assert bootstrap.headers["vary"] == "Origin"
+    assert "access-control-allow-credentials" not in bootstrap.headers
+    assert preflight.status_code == 204
+    assert preflight.headers["access-control-allow-origin"] == allowed_origin
+    assert preflight.headers["access-control-allow-methods"] == "GET"
+    assert preflight.headers["access-control-allow-headers"] == "Accept"
+    assert preflight.headers["vary"] == (
+        "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+    )
+    assert denied.status_code == 403
+    assert "access-control-allow-origin" not in denied.headers
+
+
+@pytest.mark.asyncio
+async def test_durable_loop_preflight_is_route_scoped_and_excludes_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        durable_loop_http,
+        "configure_durable_loop_execution_binding",
+        lambda **_kwargs: None,
+    )
+    allowed_origin = "https://frontend.example.test"
+    app = _App()
+    durable_loop_http.register_durable_loop_http_routes(
+        app,  # type: ignore[arg-type]
+        resolved=SimpleNamespace(
+            builtin_endpoints=SimpleNamespace(
+                http_auth=EndpointAuthConfig(mode="anonymous")
+            ),
+            enabled_mcp_names=(),
+            tools_disabled=False,
+        ),
+        settings=DurableLoopSettings(),
+        chat_settings=_settings(allowed_origins=f'["{allowed_origin}"]'),
+    )
+
+    expected_preflights = {
+        "durable_chat_start_preflight_v1",
+        "durable_chat_status_preflight_v1",
+        "durable_chat_result_preflight_v1",
+        "durable_chat_cancel_preflight_v1",
+        "durable_chat_human_input_preflight_v1",
+    }
+    assert expected_preflights <= app.handlers.keys()
+    assert "durable_chat_sandbox_preflight_v1" not in app.handlers
+    assert all(app.routes[name]["methods"] == ["OPTIONS"] for name in expected_preflights)
+
+    start = await app.handlers["durable_chat_start_preflight_v1"](
+        _Request(
+            headers={
+                "Origin": allowed_origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type, Idempotency-Key",
+            }
+        )
+    )
+    human = await app.handlers["durable_chat_human_input_preflight_v1"](
+        _Request(
+            headers={
+                "Origin": allowed_origin,
+                "Access-Control-Request-Method": "GET",
+            }
+        )
+    )
+    denied = await app.handlers["durable_chat_start_preflight_v1"](
+        _Request(
+            headers={
+                "Origin": allowed_origin,
+                "Access-Control-Request-Method": "DELETE",
+            }
+        )
+    )
+    denied_start_client = _Client()
+    denied_start = await app.handlers["durable_agent_run_start_v1"](
+        _Request(
+            body={"prompt": "denied", "request_id": "request-1"},
+            headers={"Origin": "https://attacker.example.test"},
+        ),
+        denied_start_client,
+    )
+    allowed_status_client = _Client()
+    allowed_status = await app.handlers["durable_agent_run_status_v1"](
+        _Request(
+            headers={"Origin": allowed_origin},
+            path_params={"run_id": "run-1"},
+        ),
+        allowed_status_client,
+    )
+
+    assert start.status_code == 204
+    assert start.headers["access-control-allow-methods"] == "POST"
+    assert human.status_code == 204
+    assert human.headers["access-control-allow-methods"] == "GET, POST"
+    assert denied.status_code == 403
+    assert "access-control-allow-origin" not in denied.headers
+    assert denied_start.status_code == 403
+    assert denied_start_client.status_calls == 0
+    assert allowed_status.status_code == 404
+    assert allowed_status_client.status_calls == 1
+    assert allowed_status.headers["access-control-allow-origin"] == allowed_origin
+    assert allowed_status.headers["vary"] == "Origin"
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_exposes_the_validated_configured_sandbox_group() -> None:
     app = _App()
     register_durable_chat_http_routes(
@@ -624,6 +762,7 @@ def test_chat_routes_register_with_only_the_existing_durable_loop_gate() -> None
 
     assert "durable_chat_shell_v1" in app.handlers
     assert "durable_chat_bootstrap_v1" in app.handlers
+    assert "durable_chat_bootstrap_preflight_v1" not in app.handlers
 
 
 def test_ui_start_payload_is_gated_and_legacy_payload_is_unmodified() -> None:
