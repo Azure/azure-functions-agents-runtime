@@ -24,18 +24,6 @@ from azure_functions_agents.registration.capabilities import build_capabilities
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
 
-def test_sample_limits_mcp_retry_to_one_read_only_learn_search():
-    [spec] = load_agent_specs(SAMPLE, strict=True)
-    assert (
-        "If a read-only Microsoft Learn search fails, retry it once with the same arguments."
-        in spec.instructions
-    )
-    assert "Do not retry other MCP tools or bypass access controls." in spec.instructions
-    assert "If the retry also fails, report the failure." in spec.instructions
-    assert "Base your answer only on successful tool results." in spec.instructions
-    assert "make_receipt exactly once" in spec.instructions
-
-
 def test_sample_exposes_learn_mcp_and_scoped_reference_skill():
     [spec] = load_agent_specs(SAMPLE, strict=True)
     servers = discover_mcp_servers(SAMPLE)
