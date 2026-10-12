@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
+from ..._observability import (
+    LifecycleStage,
+    RuntimeSpan,
+    record_timed_span,
+    start_span,
+)
 from ..._tool_descriptor import is_harness_object
 from .._stream_events import ToolEndEvent, ToolStartEvent
 from ._tool_result import tool_result_text as _ordinary_tool_result_text
@@ -13,12 +24,31 @@ from ._tool_result import tool_result_text as _ordinary_tool_result_text
 if TYPE_CHECKING:
     from copilot.session_events import ToolExecutionCompleteData, ToolExecutionStartData
     from copilot.tools import ToolInvocation
+    from opentelemetry.context import Context
 
     from ...runner import ToolCallEvidence
 
 
 _NATIVE_TOOL_FAILURE = '{"error":"Native tool failed or was denied."}'
 _REDACTED = "[REDACTED]"
+_METADATA_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]")
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _safe_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    return _METADATA_NAME_PATTERN.sub("_", value)[:128]
+
+
+def _timestamp_ns(value: datetime | None) -> int | None:
+    if value is None or value.tzinfo is None or value.utcoffset() is None:
+        return None
+    delta = value.astimezone(UTC) - _EPOCH
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
+        + delta.microseconds * 1_000
+    )
 
 
 def _reject_harness_result(value: object) -> None:
@@ -45,6 +75,14 @@ class _ToolCall:
     success: bool | None = None
     start_emitted: bool = False
     end_emitted: bool = False
+    telemetry_reserved: bool = False
+    telemetry_custom_started: bool = False
+    telemetry_native_start_id: UUID | None = None
+    telemetry_native_start_ns: int | None = None
+    telemetry_native_start_ambiguous: bool = False
+    telemetry_native_complete: bool = False
+    telemetry_native_event_ids: set[UUID] = field(default_factory=set)
+    telemetry_incomplete_emitted: bool = False
 
     def public_record(self) -> ToolCallEvidence:
         record: ToolCallEvidence = {
@@ -63,9 +101,18 @@ class _ToolCall:
 class CopilotToolCalls:
     """Correlate native events and custom wrappers without counting metadata."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        parent_context: Context | None = None,
+        run_span: RuntimeSpan | None = None,
+        custom_tool_names: tuple[str, ...] = (),
+    ) -> None:
         self._records: dict[str, _ToolCall] = {}
         self._protected_values: set[str] = set()
+        self._parent_context = parent_context
+        self._run_span = run_span or RuntimeSpan(None)
+        self._custom_tool_names = frozenset(custom_tool_names)
 
     @property
     def calls(self) -> list[ToolCallEvidence]:
@@ -145,13 +192,35 @@ class CopilotToolCalls:
             result=record.result or "",
         )
 
-    def start_custom(self, invocation: ToolInvocation) -> None:
+    def start_custom(self, invocation: ToolInvocation) -> bool:
         record = self._record(invocation.tool_call_id)
         record.tool_name = invocation.tool_name
         record.arguments = invocation.arguments
         record.result = None
         record.custom = True
         record.started = True
+        record.telemetry_reserved = True
+        claimed = not record.telemetry_custom_started
+        record.telemetry_custom_started = True
+        return claimed
+
+    @contextmanager
+    def custom_span(self, invocation: ToolInvocation, *, claimed: bool) -> Iterator[RuntimeSpan]:
+        if not claimed:
+            yield RuntimeSpan(None)
+            return
+        name = _safe_name(invocation.tool_name) or "unknown"
+        with start_span(
+            f"execute_tool {name}",
+            lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
+            parent_context=self._parent_context,
+            record_exception=False,
+            attributes={
+                "af.tool.name": name,
+                "af.tool.source": "copilot.wrapper",
+            },
+        ) as span:
+            yield span
 
     def complete_custom(
         self, tool_call_id: str, result: str, *, success: bool | None = None
@@ -161,16 +230,64 @@ class CopilotToolCalls:
         record.completed = True
         record.success = success
 
-    def start_native(self, data: ToolExecutionStartData) -> None:
+    def start_native(
+        self,
+        data: ToolExecutionStartData,
+        *,
+        event_id: UUID | None = None,
+        timestamp: datetime | None = None,
+    ) -> None:
         record = self._record(data.tool_call_id)
+        if data.tool_name in self._custom_tool_names:
+            record.telemetry_reserved = True
+        self._observe_native_event(record, event_id)
+        if event_id is None and not record.telemetry_reserved:
+            self._mark_incomplete(record, "missing_event_id")
+        if (
+            not record.telemetry_reserved
+            and not record.telemetry_native_complete
+            and event_id is not None
+        ):
+            if record.telemetry_native_start_id is None:
+                record.telemetry_native_start_id = event_id
+                record.telemetry_native_start_ns = _timestamp_ns(timestamp)
+            elif record.telemetry_native_start_id != event_id:
+                record.telemetry_native_start_ambiguous = True
         if record.custom or record.started:
             return
         record.tool_name = data.tool_name
         record.arguments = self._redacted(data.arguments)
         record.started = True
 
-    def complete_native(self, data: ToolExecutionCompleteData) -> None:
+    def complete_native(
+        self,
+        data: ToolExecutionCompleteData,
+        *,
+        event_id: UUID | None = None,
+        timestamp: datetime | None = None,
+    ) -> None:
         record = self._record(data.tool_call_id)
+        if data.tool_description is not None and data.tool_description.name in self._custom_tool_names:
+            record.telemetry_reserved = True
+        unique_event = self._observe_native_event(record, event_id)
+        if event_id is None and not record.telemetry_reserved:
+            record.telemetry_native_complete = True
+            self._mark_incomplete(record, "missing_event_id")
+        elif (
+            not unique_event
+            and not record.telemetry_reserved
+            and not record.telemetry_custom_started
+            and not record.telemetry_native_complete
+        ):
+            record.telemetry_native_complete = True
+            self._mark_incomplete(record, "duplicate_event_id")
+        if (
+            unique_event
+            and not record.telemetry_reserved
+            and not record.telemetry_custom_started
+            and not record.telemetry_native_complete
+        ):
+            self._record_native_span(record, data, event_id, timestamp)
         if record.custom or record.completed:
             return
         if record.tool_name is None and data.tool_description is not None:
@@ -183,3 +300,83 @@ class CopilotToolCalls:
         )
         record.completed = True
         record.success = data.success and data.error is None
+
+    def finish_telemetry(self) -> None:
+        for record in self._records.values():
+            if (
+                not record.telemetry_reserved
+                and not record.telemetry_custom_started
+                and record.telemetry_native_start_id is not None
+                and not record.telemetry_native_complete
+            ):
+                reason = (
+                    "invalid_interval"
+                    if record.telemetry_native_start_ns is None
+                    else "missing_completion"
+                )
+                self._mark_incomplete(record, reason)
+
+    @staticmethod
+    def _observe_native_event(record: _ToolCall, event_id: UUID | None) -> bool:
+        if event_id is None:
+            return False
+        if event_id in record.telemetry_native_event_ids:
+            return False
+        record.telemetry_native_event_ids.add(event_id)
+        return True
+
+    def _record_native_span(
+        self,
+        record: _ToolCall,
+        data: ToolExecutionCompleteData,
+        event_id: UUID | None,
+        timestamp: datetime | None,
+    ) -> None:
+        record.telemetry_native_complete = True
+        if self._parent_context is None:
+            return
+        start_ns = record.telemetry_native_start_ns
+        end_ns = _timestamp_ns(timestamp)
+        if record.telemetry_native_start_ambiguous:
+            self._mark_incomplete(record, "ambiguous_start_events")
+            return
+        if (
+            record.telemetry_native_start_id is None
+            or event_id is None
+            or event_id == record.telemetry_native_start_id
+            or start_ns is None
+            or end_ns is None
+            or end_ns <= start_ns
+        ):
+            self._mark_incomplete(record, "invalid_interval")
+            return
+        name = _safe_name(record.tool_name) or "unknown"
+        emitted = record_timed_span(
+            f"execute_tool {name}",
+            parent_context=self._parent_context,
+            start_time_ns=start_ns,
+            end_time_ns=end_ns,
+            lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
+            attributes={
+                "af.tool.name": name,
+                "af.tool.source": "copilot.native",
+                "af.tool.outcome": (
+                    "success" if data.success and data.error is None else "error"
+                ),
+            },
+        )
+        if not emitted:
+            self._mark_incomplete(record, "unavailable_interval")
+
+    def _mark_incomplete(self, record: _ToolCall, reason: str) -> None:
+        if record.telemetry_incomplete_emitted:
+            return
+        record.telemetry_incomplete_emitted = True
+        name = _safe_name(record.tool_name)
+        self._run_span.add_event(
+            "af.copilot.tool.incomplete",
+            {
+                "af.tool.name": name,
+                "af.tool.incomplete_reason": reason,
+            },
+        )

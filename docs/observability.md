@@ -89,6 +89,12 @@ Where a standard OpenTelemetry attribute already exists we reuse it instead of i
 name — for example `server.address` for the session-pool host. MAF keeps emitting its own
 `gen_ai.*` spans (agent invocation, chat, tool calls, token usage); we don't touch those.
 
+The Copilot preview addendum reuses the active turn's existing session-event
+subscription, the current OpenTelemetry provider, and the runtime's custom-tool
+wrapper. It does **not** add a second receiver, new telemetry settings, event
+caps, extra exporters, flush/shutdown hooks, or create/resume session-open
+telemetry. MAF behavior is unchanged.
+
 ## Spans and attributes we emit today
 
 ### Cross-cutting `af.*` (any runtime span)
@@ -119,13 +125,21 @@ spans and the sandbox/`web_request` tool spans together.
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
-In the default-off Copilot preview, native MCP and `skill` / `view` / `bash` calls,
-including permission denials, populate `AgentResult.tool_calls` and the existing
-tool/error counts from public SDK `tool.execution_start` / `tool.execution_complete`
-events once per `toolCallId`. Custom wrapper calls are deduplicated;
-`skill.invoked` metadata is not an extra call. The same sensitive-data policy
-applies; raw native envelopes, MCP headers, and credentials are not exposed.
-Counting once is not a guarantee of exactly-once tool effects.
+In the default-off Copilot preview, turn-scoped tool accounting comes from the
+active turn's public SDK events rather than a second receiver. Native MCP and
+`skill` / `view` / `bash` calls, including permission denials, populate
+`AgentResult.tool_calls` and the existing tool/error counts only from coherent
+`tool.execution_start` / `tool.execution_complete` pairs that share native
+call-ID ownership and matched timestamps; incomplete pairs stay incomplete
+rather than being guessed. The custom wrapper restores captured host context
+before invocation, owns each wrapped call ID, and deduplicates native metadata
+so one wrapped call is counted once. Each unique public `ASSISTANT_USAGE` event
+becomes its own usage observation on the owning `agent.run`, with model and
+duration attached only when the SDK reports them. Those observations stay
+separate from the existing once-only eight-field invocation totals.
+`skill.invoked` metadata is not an extra tool call. The same sensitive-data
+policy applies, and counting once is not a guarantee of exactly-once tool
+effects.
 
 #### Stable agent ID
 
@@ -182,6 +196,19 @@ runtime milestones rather than duplicating tool/model spans.
   failed schema validation; includes `af.fault_domain=app`.
 - `af.agent.invoke.completed` — `_run_agent(...)` returned successfully and the runtime is handling
   the final response contract.
+
+#### Copilot preview source coverage
+
+These expectations apply only to the default-off Copilot preview's turn-scoped
+telemetry:
+
+| Source | Expectation |
+| --- | --- |
+| Direct HTTP and built-in chat UI turns | One `agent.run` summary span per completed turn, with native tool accounting and `ASSISTANT_USAGE` observations attached only from public turn events. |
+| `/chatstream` SSE | The stream reflects translated SDK callbacks for the same turn; it does not imply full native child-session hierarchy or session-open telemetry. |
+| `delegate_<slug>` calls | The host preserves the nested `agent.run -> execute_tool delegate_<slug> -> child agent.run` trace shape. Coordinator SSE still exposes only the delegate tool boundary and final child text. |
+| Workflow Sub Agent leaves | Each leaf is observed as its own run. Model and duration appear only when the SDK reports them; no model spans or timing are fabricated. |
+| Non-HTTP triggers, inbound MCP, and Debug UI continuation | When they route through the shared runner, they follow the same turn-scoped accounting rules. This remains offline-covered behavior, not live host/Application Insights qualification. |
 
 ### Span `dynamic_session.execute`
 
@@ -310,11 +337,16 @@ Microsoft Agent Framework, **default off**.
 - **On:** content attributes are attached (bounded in length): `af.agent.input`, `af.agent.response`,
   `af.dynamic_session.code` / `.stdout` / `.stderr`, `af.delegate.task` / `.result`, plus MAF
   prompt/response/tool-arg content (via `enable_instrumentation(enable_sensitive_data=True)`).
+- **Copilot addendum:** optional tool arguments/results still follow the same switch, but only after
+  field-level bounded sanitization. Skill telemetry keeps the sanitized skill name only.
 - **Never captured, regardless of the flag:** secrets — MCP `Authorization` headers/tokens,
-  connection strings, and the ACA system key. Endpoints are reduced to host only. The `web_request`
-  span never carries the full request URL (query string or userinfo stripped), request/response
-  bodies, or header values — it is host/status/size metadata only, unaffected by
-  `ENABLE_SENSITIVE_DATA`.
+  connection strings, raw native envelopes, stack traces, prompts, reasoning text, skill paths or
+  content, and the ACA system key. Endpoints are reduced to host only. The `web_request` span never
+  carries the full request URL (query string or userinfo stripped), request/response bodies, or
+  header values — it is host/status/size metadata only, unaffected by `ENABLE_SENSITIVE_DATA`.
+
+Best-effort diagnostics and telemetry cleanup are intentionally non-throwing:
+they must not change request results, cancellations, or SSE termination.
 
 ## Noise & cost control
 

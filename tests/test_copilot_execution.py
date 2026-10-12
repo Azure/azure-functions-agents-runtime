@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import shutil
 from contextlib import suppress
 from dataclasses import replace
@@ -970,6 +971,103 @@ async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_me
         span.set_attribute.assert_any_call("af.agent.tool_error_count", 2)
     finally:
         await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+async def test_usage_events_deduplicate_counters_and_exclude_skill_content(
+    preview, monkeypatch, caplog, capture_sensitive_data,
+):
+    import logging
+
+    import copilot
+    from copilot.session_events import (
+        AssistantUsageData,
+        SessionEvent,
+        SessionEventType,
+        SkillInvokedData,
+    )
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-usage-events-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    client = _fake_client()
+    session = client.create_session.return_value
+    usage = SessionEvent(
+        data=AssistantUsageData(
+            model="reported-model",
+            input_tokens=0,
+            output_tokens=8,
+            reasoning_tokens=3,
+            cache_read_tokens=0,
+            cache_write_tokens=2,
+            duration=timedelta(seconds=1.25),
+        ),
+        id=uuid4(),
+        timestamp=datetime.now(UTC),
+        type=SessionEventType.ASSISTANT_USAGE,
+    )
+    skill = SessionEvent(
+        data=SkillInvokedData(
+            content="private skill instructions",
+            name="review/skill",
+            path="C:/private/skills/review/SKILL.md",
+            allowed_tools=["private-tool"],
+            description="private skill description",
+        ),
+        id=uuid4(),
+        timestamp=datetime.now(UTC),
+        type=SessionEventType.SKILL_INVOKED,
+    )
+
+    async def send(*_args, **_kwargs):
+        [on_event] = session.handlers
+        on_event(usage)
+        on_event(usage)
+        on_event(skill)
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    parent = tracer.start_span("agent.run primary")
+    try:
+        with (
+            trace.use_span(parent, end_on_exit=True),
+            caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
+        ):
+            await _copilot.run(preview, _request())
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    [run_span] = exporter.get_finished_spans()
+    usage_events = [event for event in run_span.events if event.name == "af.copilot.model.usage"]
+    skill_events = [event for event in run_span.events if event.name == "af.copilot.skill.invoked"]
+    assert len(usage_events) == 1
+    assert usage_events[0].attributes["gen_ai.request.model"] == "reported-model"
+    assert usage_events[0].attributes["af.copilot.usage.input_tokens"] == 0
+    assert usage_events[0].attributes["af.copilot.usage.output_tokens"] == 8
+    assert usage_events[0].attributes["af.copilot.usage.reasoning_tokens"] == 3
+    assert usage_events[0].attributes["af.copilot.usage.cache_read_tokens"] == 0
+    assert usage_events[0].attributes["af.copilot.usage.duration_ms"] == 1250
+    assert len(skill_events) == 1
+    assert skill_events[0].attributes == {"af.skill.name": "review_skill"}
+    assert "private" not in repr(run_span.events)
+    usage_logs = [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("Agent token usage:")
+    ]
+    assert len(usage_logs) == 1
+    assert json.loads(usage_logs[0].partition(": ")[2])["output_tokens"] == 8
 
 
 @pytest.mark.asyncio

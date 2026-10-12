@@ -378,3 +378,182 @@ def test_quiet_noisy_loggers_respects_explicit_level() -> None:
 
     assert logging.getLogger(name).level == logging.DEBUG
     logging.getLogger(name).setLevel(logging.NOTSET)  # reset for other tests
+
+
+def _install_test_tracer(monkeypatch):  # type: ignore[no-untyped-def]
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(obs, "_enabled", True)
+    monkeypatch.setattr(obs, "get_tracer", lambda: provider.get_tracer("observability.tests"))
+    return provider, exporter
+
+
+def test_capture_current_context_requires_valid_active_span(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    provider, _exporter = _install_test_tracer(monkeypatch)
+    assert obs.capture_current_context() is None
+
+    with provider.get_tracer("observability.tests").start_as_current_span("active"):
+        context = obs.capture_current_context()
+        assert context is not None
+        from opentelemetry import trace
+
+        assert trace.get_current_span(context).get_span_context().is_valid
+    assert obs.capture_current_context() is None
+
+
+def test_start_span_uses_explicit_parent_context_across_context_switches(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    provider, exporter = _install_test_tracer(monkeypatch)
+    tracer = provider.get_tracer("context.switch.tests")
+    with tracer.start_as_current_span("captured.parent") as captured_parent:
+        captured_context = obs.capture_current_context()
+        assert captured_context is not None
+        captured_parent_id = captured_parent.get_span_context().span_id
+
+    with tracer.start_as_current_span("ambient.parent"), obs.start_span(
+        "explicit.child", parent_context=captured_context
+    ) as child:
+        assert child._span is not None
+        assert child._span.parent is not None
+        assert child._span.parent.span_id == captured_parent_id
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert spans["explicit.child"].parent is not None
+    assert spans["explicit.child"].parent.span_id == captured_parent_id
+
+
+def test_record_timed_span_preserves_parent_and_epoch_nanosecond_timing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    provider, exporter = _install_test_tracer(monkeypatch)
+    tracer = provider.get_tracer("timed.span.tests")
+    start_time_ns = 1_800_000_000_000_000_000
+    end_time_ns = start_time_ns + 250_000_000
+
+    with tracer.start_as_current_span("timed.parent") as parent:
+        parent_context = obs.capture_current_context()
+        assert parent_context is not None
+        parent_span_id = parent.get_span_context().span_id
+        assert obs.record_timed_span(
+            "timed.child",
+            parent_context=parent_context,
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
+            lifecycle_stage=obs.LifecycleStage.AGENT_RUN,
+            attributes={"kind": "copilot"},
+        )
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    child = spans["timed.child"]
+    assert child.parent is not None
+    assert child.parent.span_id == parent_span_id
+    assert child.start_time == start_time_ns
+    assert child.end_time == end_time_ns
+    assert child.attributes["kind"] == "copilot"
+    assert child.attributes[obs.ATTR_LIFECYCLE_STAGE] == obs.LifecycleStage.AGENT_RUN
+
+
+@pytest.mark.parametrize(
+    ("start_time_ns", "end_time_ns"),
+    [
+        (100, 100),
+        (200, 100),
+        (0.5, 10),
+        (True, 10),
+        (100, 1.5),
+    ],
+)
+def test_record_timed_span_rejects_invalid_intervals(
+    monkeypatch, caplog, start_time_ns, end_time_ns
+) -> None:  # type: ignore[no-untyped-def]
+    from opentelemetry.context import Context
+
+    _provider, exporter = _install_test_tracer(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
+        result = obs.record_timed_span(
+            "invalid.interval",
+            parent_context=Context(),
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
+        )
+
+    assert result is False
+    assert "invalid time interval" in caplog.text
+    assert not exporter.get_finished_spans()
+
+
+def test_record_timed_span_rejects_missing_or_invalid_context(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    from opentelemetry.context import Context
+
+    _provider, exporter = _install_test_tracer(monkeypatch)
+    for invalid_context in (None, Context()):
+        with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
+            result = obs.record_timed_span(
+                "invalid.context",
+                parent_context=invalid_context,
+                start_time_ns=100,
+                end_time_ns=200,
+            )
+
+        assert result is False
+        assert "invalid parent" in caplog.text
+    assert not exporter.get_finished_spans()
+
+
+def test_record_timed_span_logs_content_free_diagnostic_on_otel_failure(
+    monkeypatch, caplog
+) -> None:  # type: ignore[no-untyped-def]
+    provider, _exporter = _install_test_tracer(monkeypatch)
+    with provider.get_tracer("failure.tests").start_as_current_span("parent"):
+        parent_context = obs.capture_current_context()
+    assert parent_context is not None
+
+    class _FailedTracer:
+        def start_span(self, *_args, **_kwargs):
+            raise RuntimeError("private exception details")
+
+    monkeypatch.setattr(obs, "get_tracer", lambda: _FailedTracer())
+    with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
+        emitted = obs.record_timed_span(
+            "failed.emission",
+            parent_context=parent_context,
+            start_time_ns=100,
+            end_time_ns=200,
+        )
+
+    assert emitted is False
+    assert "OpenTelemetry span emission failed" in caplog.text
+    assert "private exception details" not in caplog.text
+
+
+def test_start_span_exception_recording_defaults_to_existing_behavior(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _provider, exporter = _install_test_tracer(monkeypatch)
+    with pytest.raises(ValueError, match="sensitive details"), obs.start_span(
+        "default.exception"
+    ):
+        raise ValueError("sensitive details")
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "default.exception")
+    exception_events = [event for event in span.events if event.name == "exception"]
+    assert exception_events
+    assert exception_events[0].attributes["exception.message"] == "sensitive details"
+
+
+def test_start_span_can_suppress_raw_exception_recording(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _provider, exporter = _install_test_tracer(monkeypatch)
+    with pytest.raises(ValueError, match="sensitive details"), obs.start_span(
+        "content.free.exception",
+        fault_domain=obs.FaultDomain.RUNTIME,
+        record_exception=False,
+    ):
+        raise ValueError("sensitive details")
+
+    span = next(
+        span for span in exporter.get_finished_spans() if span.name == "content.free.exception"
+    )
+    assert all(event.name != "exception" for event in span.events)
+    assert span.status.status_code.name == "ERROR"
+    assert span.status.description in (None, "")
+    assert span.attributes[obs.ATTR_FAULT_DOMAIN] == obs.FaultDomain.RUNTIME

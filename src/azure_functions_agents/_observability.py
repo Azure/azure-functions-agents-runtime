@@ -22,10 +22,13 @@ import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._logger import logger
 from .config.env import EnvVar, _to_bool, runtime_env_value
+
+if TYPE_CHECKING:
+    from opentelemetry.context import Context
 
 # ---------------------------------------------------------------------------
 # Conventions
@@ -297,6 +300,20 @@ def current_operation_id() -> str | None:
     return None
 
 
+def capture_current_context() -> Context | None:
+    """Capture the current OTel context only when it contains a valid span."""
+    try:
+        from opentelemetry import trace
+        from opentelemetry.context import get_current
+
+        context = get_current()
+        if trace.get_current_span(context).get_span_context().is_valid:
+            return context
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return None
+
+
 def bounded_content(value: str) -> str:
     """Trim content attached to telemetry so cost/PII blast radius stays capped."""
     if len(value) <= _CONTENT_ATTR_MAX_CHARS:
@@ -354,14 +371,24 @@ class RuntimeSpan:
             attrs = {k: v for k, v in (attributes or {}).items() if v is not None}
             self._span.add_event(name, attributes=attrs or None)
 
-    def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
+    def record_exception(
+        self,
+        exc: BaseException,
+        *,
+        fault_domain: str | None = None,
+        include_exception: bool = True,
+    ) -> None:
         if self._span is None:
             return
         try:
             from opentelemetry.trace import Status, StatusCode
 
-            self._span.record_exception(exc)
-            self._span.set_status(Status(StatusCode.ERROR, str(exc)))
+            if include_exception:
+                self._span.record_exception(exc)
+                message = str(exc)
+            else:
+                message = ""
+            self._span.set_status(Status(StatusCode.ERROR, message))
             self._span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain or FaultDomain.UNKNOWN)
         except Exception:  # pragma: no cover - defensive
             pass
@@ -385,11 +412,15 @@ def start_span(
     fault_domain: str | None = None,
     lifecycle_stage: str | None = None,
     attributes: Mapping[str, Any] | None = None,
+    parent_context: Context | None = None,
+    record_exception: bool = True,
 ) -> Iterator[RuntimeSpan]:
     """Start a current span, degrading to a no-op when no telemetry provider is active or tracing is unavailable.
 
     ``fault_domain`` is the domain attributed if the span exits with an exception. It is not set on
-    success — only failing spans carry :data:`ATTR_FAULT_DOMAIN`.
+    success — only failing spans carry :data:`ATTR_FAULT_DOMAIN`. ``parent_context`` overrides the
+    active context when provided. ``record_exception=False`` retains error status and fault-domain
+    attribution without recording exception details.
     """
     # Gate on the runtime's resolved state: `_enabled` is true only when a real OpenTelemetry
     # provider is active (the Azure Monitor exporter we configured, or one the Functions
@@ -400,7 +431,13 @@ def start_span(
     raw_span: Any = None
     if tracer is not None:
         try:
-            manager = tracer.start_as_current_span(name)
+            span_options: dict[str, Any] = {}
+            if parent_context is not None:
+                span_options["context"] = parent_context
+            if not record_exception:
+                span_options["record_exception"] = False
+                span_options["set_status_on_exception"] = False
+            manager = tracer.start_as_current_span(name, **span_options)
             raw_span = manager.__enter__()
         except Exception:  # pragma: no cover - defensive
             manager = None
@@ -416,7 +453,11 @@ def start_span(
     try:
         yield span
     except BaseException as exc:
-        span.record_exception(exc, fault_domain=fault_domain)
+        span.record_exception(
+            exc,
+            fault_domain=fault_domain,
+            include_exception=record_exception,
+        )
         if manager is not None:
             with suppress(Exception):  # pragma: no cover - defensive
                 manager.__exit__(type(exc), exc, exc.__traceback__)
@@ -426,6 +467,65 @@ def start_span(
         if manager is not None:
             with suppress(Exception):  # pragma: no cover - defensive
                 manager.__exit__(None, None, None)
+
+
+def record_timed_span(
+    name: str,
+    *,
+    parent_context: Context | None,
+    start_time_ns: int,
+    end_time_ns: int,
+    lifecycle_stage: str | None = None,
+    attributes: Mapping[str, Any] | None = None,
+) -> bool:
+    """Emit a span with explicit parent and epoch-nanosecond timing; return whether it was emitted."""
+
+    def diagnose(reason: str) -> None:
+        with suppress(Exception):  # pragma: no cover - defensive
+            logger.warning("Timed OpenTelemetry span emission skipped: %s", reason)
+
+    if (
+        isinstance(start_time_ns, bool)
+        or not isinstance(start_time_ns, int)
+        or isinstance(end_time_ns, bool)
+        or not isinstance(end_time_ns, int)
+        or end_time_ns <= start_time_ns
+    ):
+        diagnose("invalid time interval")
+        return False
+    if not _enabled:
+        diagnose("observability is disabled")
+        return False
+
+    try:
+        from opentelemetry import trace
+        from opentelemetry.context import Context as OtelContext
+
+        if not isinstance(parent_context, OtelContext):
+            diagnose("missing or invalid parent context")
+            return False
+        if not trace.get_current_span(parent_context).get_span_context().is_valid:
+            diagnose("missing or invalid parent span")
+            return False
+
+        tracer = get_tracer()
+        if tracer is None:
+            diagnose("tracer unavailable")
+            return False
+        span_attributes = dict(attributes or {})
+        if lifecycle_stage is not None:
+            span_attributes[ATTR_LIFECYCLE_STAGE] = lifecycle_stage
+        span = tracer.start_span(
+            name,
+            context=parent_context,
+            start_time=start_time_ns,
+            attributes=span_attributes or None,
+        )
+        span.end(end_time=end_time_ns)
+    except Exception:  # pragma: no cover - defensive
+        diagnose("OpenTelemetry span emission failed")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

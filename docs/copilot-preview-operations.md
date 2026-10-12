@@ -227,6 +227,42 @@ cleanup, reports cleanup failures immediately, and clears cached handles so a
 stopped or closing resource is never reused. This preview does **not** claim
 that every host termination awaits that async shutdown path.
 
+## Telemetry addendum
+
+Copilot telemetry reuses the active turn's existing public session-event
+subscription, the current OpenTelemetry provider, and the custom-tool wrapper.
+It adds no new settings, caps, receiver, exporter, flush/shutdown hook, or
+create/resume session-open telemetry. MAF behavior stays unchanged.
+
+Each unique public `ASSISTANT_USAGE` event is recorded as a separate
+observation on the owning `agent.run`. The existing once-only eight-field
+invocation totals stay unchanged. Reported model and duration appear only when
+the SDK reports them; missing hierarchy or timing is left incomplete rather
+than invented.
+
+Native-only tool accounting uses coherent id/timestamp-matched
+`tool.execution_start` / `tool.execution_complete` pairs. Custom tools restore
+captured host context before invocation, and the wrapper owns each wrapped call
+ID so one wrapped call is counted once. This preserves the host's nested
+`agent.run -> execute_tool delegate_<slug> -> child agent.run` trace shape for
+delegates while leaving coordinator-visible SSE limited to the delegate tool
+boundary and final child text.
+
+| Source | Expectation |
+| --- | --- |
+| Direct HTTP and built-in chat UI turns | Use the same turn-scoped `agent.run` span, tool accounting, and usage observations. |
+| `/chatstream` SSE | Mirrors translated callbacks for the current turn only; it is not evidence of full native child-span hierarchy. |
+| Delegates | Preserve the nested host trace shape above; native specialist session events do not appear as a second coordinator stream. |
+| Workflow Sub Agent leaves | Each leaf is observed as its own run; model/duration appear only when reported by the SDK. |
+| Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
+
+The existing `ENABLE_SENSITIVE_DATA` switch still gates optional arguments and
+results, with field-level sanitization. Credentials, authorization headers,
+raw event envelopes, stack traces, prompts, reasoning text, and skill paths or
+content are never exported; skill telemetry uses the sanitized skill name only.
+Diagnostics and telemetry cleanup stay best-effort and non-throwing so they do
+not change request outcomes, cancellation, or SSE termination.
+
 ## Inspecting a session
 
 Use the app's shared agent identity and returned session ID to identify only

@@ -341,6 +341,33 @@ requests always return caller-supplied session IDs, and return generated IDs
 only after resumability is confirmed, consistently across response surfaces.
 `shutdown_runtime()` is the public async cleanup entry point.
 
+### 4.9 Copilot telemetry addendum
+
+This addendum extends the Copilot execution contract; it does not change MAF.
+
+- Reuse the active turn's existing session-event subscription and custom-tool
+  wrapper with the existing OpenTelemetry provider and Application Insights
+  destination. Do not add a subscription, settings, sampling, caps, exporters,
+  flush/shutdown calls, or create/resume telemetry; keep
+  `continue_pending_work=False`.
+- Emit each unique public `ASSISTANT_USAGE` event as a model-usage observation
+  on its owning `agent.run`, with reported model and duration when available.
+  Keep observations separate from unchanged, once-only eight-field invocation
+  totals; expose extra measures only when unambiguous and separately labeled.
+- Capture and reactivate host context before custom-tool invocation. Native
+  custom events are metadata-only; the wrapper owns each custom call ID.
+  Native-only tools use coherent ID/timestamp-matched events or remain
+  incomplete. Preserve the nested
+  `agent.run -> execute_tool delegate_<slug> -> child agent.run` trace.
+- Export only allowlisted telemetry. Tool arguments/results are content gated
+  by the existing sensitive-data switch and field-level bounded sanitization;
+  credentials, authorization headers, raw envelopes, stacks, prompts, reasoning
+  text, and skill content/paths are never exported. Skill events identify the
+  sanitized name only. Content-free diagnostics and best-effort telemetry
+  cleanup must not change results, errors, cancellation, or SSE termination.
+- Coverage is turn-scoped. Do not fabricate model spans or missing timing,
+  claim complete native hierarchy, or promise recovery of lost events.
+
 ## 5. Decisions log
 
 This cleanup intentionally consolidates earlier iterative rows into the durable
@@ -371,6 +398,17 @@ still govern the feature.
 | 19 | Failed-turn session IDs | echo generated ID on any failure / echo only resumable generated IDs | Always return caller-supplied IDs; return generated IDs only when the runtime confirms the session is resumable, consistently across HTTP, chat, and SSE surfaces. | Human (larohra) | 2026-10-07 |
 | 20 | Public shutdown API | keep manager-specific name / use neutral runtime name | Remove `shutdown_client_manager()` and expose `shutdown_runtime()` for acquired harness-owned resources. | Human (larohra) | 2026-10-07 |
 
+### Approved telemetry addendum decisions
+
+These decisions govern the telemetry addendum only; they do not revise the
+previously approved harness decisions above.
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 21 | Telemetry source and scope | new receiver / existing turn events and wrapper | Reuse the existing provider, active-turn subscription, and custom-tool wrapper; add no telemetry settings, event caps, or session-opening coverage. | Human (@larohra) | 2026-10-12 |
+| 22 | Trace and tool ownership | native callback context / explicit host context and wrapper ownership | Restore captured host context before custom invocation; preserve nested delegate run/tool/leaf spans, with matched native events only for native-only tools. | Human (@larohra) | 2026-10-12 |
+| 23 | Usage and privacy | merge observations into totals / separate observations and allowlisted telemetry | Deduplicate reported usage observations separately from unchanged invocation totals; omit ambiguous fields and isolate telemetry failures from request outcomes. | Human (@larohra) | 2026-10-12 |
+
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |
@@ -386,11 +424,12 @@ still govern the feature.
 | Non-HTTP entrypoints | Exercise each existing binding serializer and shared-handler contract offline; separately qualify each trigger on a real Functions host with actual binding delivery before marking it supported. Resource-blocked triggers remain unqualified, not unsupported. |
 | Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, and errors without replacement sessions. Real-host transport and system-key auth qualification remains separate. |
 | Harness cleanup | Verify selected-harness-only provider, warning, observability, and history ownership; legacy compaction warning/default behavior; public shutdown; and failed-turn session IDs on HTTP, chat, and SSE. |
+| Copilot telemetry | Cover direct/SSE, delegates, workflow leaves, non-HTTP and UI ingress; usage deduplication/accounting, tool ownership and ordering, incomplete timing, cancellation/error cleanup, both privacy modes, and unchanged MAF behavior. |
 
 ## 7. Docs impact
 
 - `docs/architecture.md` documents the harness boundary, neutral capability
-  model, and selected-harness persistence split at the architecture level.
+  model, selected-harness persistence split, and Copilot telemetry ownership.
 - `docs/front-matter-spec.md` documents unchanged authoring surfaces and calls
   out that Copilot reuses the same MCP/skill filtering fields.
 - The cleanup amendment removes public custom-client injection, documents the
@@ -399,6 +438,10 @@ still govern the feature.
 - `README.md` and operational docs may describe the bounded preview and storage
   namespace, but should defer detailed operational behavior to dedicated preview
   documentation rather than expanding this FRD.
+- `docs/observability.md` and `docs/copilot-preview-operations.md` document
+  telemetry semantics, limits, privacy, and operator setup; align
+  `README.md`, `docs/index.md`, and `docs/getting-started.md` if preview
+  observability expectations change.
 
 ## 8. Status & sign-off
 
@@ -406,6 +449,9 @@ still govern the feature.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.
+- **Telemetry addendum:** @larohra approved this addendum on 2026-10-12 after
+  independent architecture review passed. The addendum decisions below govern
+  Copilot telemetry only and do not alter the prior harness decisions.
 - **Scope note:** This FRD records the durable feature contract only. It does
   not preserve superseded iteration history, review churn, or qualification
   narratives that no longer change the product boundary.

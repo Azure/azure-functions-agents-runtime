@@ -327,29 +327,48 @@ class _CopilotHarnessRunner:
         resolved_model = resolved.model or self._harness.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-        result = await _copilot_execution.run(
-            self._harness,
-            HarnessRequest(
-                prompt=task,
-                instructions=resolved.instructions,
-                agent_slug=resolved.slug,
-                session_id=uuid.uuid4().hex,
-                new_session=True,
-                model=resolved_model,
-                tools=_copilot_preview.prepare_tools(
-                    [
-                        *list(capabilities.filtered_user_tools or []),
-                        *list(capabilities.web_request_tools or []),
-                    ]
-                ),
-                max_output_tokens=resolved.agent_configuration.max_output_tokens,
-                deadline=asyncio.get_running_loop().time() + timeout,
-                mcp_servers=tuple(capabilities.filtered_mcp_tools or ()),
-                skills=tuple(capabilities.skills or ()),
-                skill_catalog=tuple(capabilities.skill_catalog or ()),
-                execution_role=execution_role,
-            ),
-        )
+        session_id = uuid.uuid4().hex
+        with start_span(
+            f"agent.run {resolved.slug}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            record_exception=False,
+            attributes={
+                "af.agent.name": resolved.slug,
+                "af.agent.execution_role": execution_role,
+                "af.agent.model": resolved_model,
+            },
+        ) as span:
+            try:
+                result = await _copilot_execution.run(
+                    self._harness,
+                    HarnessRequest(
+                        prompt=task,
+                        instructions=resolved.instructions,
+                        agent_slug=resolved.slug,
+                        session_id=session_id,
+                        new_session=True,
+                        model=resolved_model,
+                        tools=_copilot_preview.prepare_tools(
+                            [
+                                *list(capabilities.filtered_user_tools or []),
+                                *list(capabilities.web_request_tools or []),
+                            ]
+                        ),
+                        max_output_tokens=resolved.agent_configuration.max_output_tokens,
+                        deadline=asyncio.get_running_loop().time() + timeout,
+                        mcp_servers=tuple(capabilities.filtered_mcp_tools or ()),
+                        skills=tuple(capabilities.skills or ()),
+                        skill_catalog=tuple(capabilities.skill_catalog or ()),
+                        execution_role=execution_role,
+                    ),
+                )
+            except asyncio.CancelledError:
+                span.set_attribute("af.agent.outcome", "cancelled")
+                raise
+            except Exception:
+                span.set_attribute("af.agent.outcome", "error")
+                raise
+            span.set_attribute("af.agent.outcome", "success")
         return result.content
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
