@@ -1,6 +1,6 @@
 jobs:
   - job: "Build"
-    displayName: 'Build Azure Functions Agent Runtime'
+    displayName: 'Build Azure Functions Agent Runtime Python library'
 
     pool:
       name: 1es-pool-azfunc-public
