@@ -38,6 +38,7 @@ from .harness._agent_runner import get_agent_runner
 from .harness._harness_binding import (
     AppHarness,
     HarnessRequest,
+    HarnessSessionState,
     get_harness,
 )
 from .harness._history_identity import validate_agent_slug
@@ -302,6 +303,7 @@ def _request(
     workflow_agent_slug: str | None,
     agent_configuration: AgentConfiguration | None,
     deadline: float,
+    session_state: HarnessSessionState | None = None,
 ) -> HarnessRequest:
     descriptors = describe_tools(
         (
@@ -342,6 +344,8 @@ def _request(
         skill_catalog=_merge_skill_descriptors(discovered, approved),
         max_output_tokens=configuration.max_output_tokens,
         deadline=deadline,
+        session_state=session_state
+        or HarnessSessionState(caller_supplied=session_id is not None),
     )
 
 
@@ -370,6 +374,7 @@ async def run_agent(
     skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
+    _session_state: HarnessSessionState | None = None,
 ) -> AgentResult:
     """Execute a prompt; None inventories discover, explicit empty inventories disable."""
     validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
@@ -400,6 +405,7 @@ async def run_agent(
         catalog=catalog,
         workflow_policy=workflow_policy,
         session_is_new=_session_is_new,
+        session_state=_session_state,
     )
 
 
@@ -429,12 +435,17 @@ async def run_agent_stream(
     skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
+    _session_state: HarnessSessionState | None = None,
 ) -> AsyncIterator[str]:
     """Yield the existing SSE vocabulary under the selected app context."""
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
     deadline = asyncio.get_running_loop().time() + timeout
+    session_state = _session_state or HarnessSessionState(caller_supplied=session_id is not None)
     try:
+        session_id = _validate_session_id(session_id)
+        if session_id is not None and session_state.caller_supplied:
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
         harness = _harness or get_harness()
         selected = get_agent_runner(harness)
         stream = selected.run_agent_stream(
@@ -462,6 +473,7 @@ async def run_agent_stream(
             catalog=catalog,
             workflow_policy=workflow_policy,
             session_is_new=_session_is_new,
+            session_state=session_state,
         )
     except Exception as exc:
         logger.error("Agent harness selection failed: %s", exc)

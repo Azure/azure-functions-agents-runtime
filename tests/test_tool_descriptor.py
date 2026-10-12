@@ -375,11 +375,6 @@ async def test_explicit_model_validates_before_author_callable() -> None:
 
 def test_sdk_imports_stay_in_named_adapter_and_legacy_boundaries() -> None:
     source = Path(__file__).resolve().parents[1] / "src" / "azure_functions_agents"
-    maf_boundaries = {
-        "__init__.py",
-        "client_manager.py",
-        "_observability.py",
-    }
     maf_package = source / "harness" / "agent_framework"
     copilot_package = source / "harness" / "copilot_sdk"
     violations: list[str] = []
@@ -406,7 +401,6 @@ def test_sdk_imports_stay_in_named_adapter_and_legacy_boundaries() -> None:
                 if (
                     module.startswith("agent_framework")
                     and path.parent != maf_package
-                    and path.name not in maf_boundaries
                 ):
                     violations.append(f"{path.relative_to(source)}:{node.lineno}: {module}")
                 if (

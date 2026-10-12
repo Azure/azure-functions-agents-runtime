@@ -32,8 +32,6 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "DEFAULT_MODEL",
         "DEFAULT_TIMEOUT",
         "AgentResult",
-        "ClientManager",
-        "MAFClientManager",
         "WorkflowRetryBackoff",
         "WorkflowRetryPolicy",
         "WorkflowRetryableError",
@@ -44,13 +42,11 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "create_sandbox_tools",
         "create_web_request_tools",
         "current_workflow_task_context",
-        "get_client_manager",
         "resolve_config_dir",
         "run_agent",
         "run_agent_stream",
         "set_app_root",
-        "set_client_manager",
-        "shutdown_client_manager",
+        "shutdown_runtime",
         "tool",
         "workflow_tool",
     ]
@@ -119,7 +115,7 @@ async def run():
         copilot.CopilotClient = lambda **kwargs: client
         result = await runner.run_agent("offline", tools=[], mcp_tools=[], _harness=harness)
         assert result.content == "synthetic reply"
-        await runtime.shutdown_client_manager()
+        await runtime.shutdown_runtime()
         client.stop.assert_awaited_once()
     else:
         from agent_framework import Message
@@ -129,7 +125,7 @@ async def run():
         assert [message.text for message in await provider.get_messages("session")] == [
             "ordinary MAF history"
         ]
-        await runtime.shutdown_client_manager()
+        await runtime.shutdown_runtime()
     assert all(sys.modules.get(name) is None for name in opposite)
     print(json.dumps({"selected": harness.name.value, "opposite_loaded": False}))
 

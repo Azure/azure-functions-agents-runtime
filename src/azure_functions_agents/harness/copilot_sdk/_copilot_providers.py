@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, Protocol, Self
 from urllib.parse import urlsplit
 
-from ...client_manager import ProviderKind
 from ...config.env import EnvVar, runtime_env_value
 from .._harness_binding import UnsupportedCapabilityError
+from .._provider_config import ProviderKind
 
 if TYPE_CHECKING:
     from copilot.session import ProviderConfig, ProviderTokenArgs

@@ -18,7 +18,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Code execution sandbox configuration
   - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
-- Default Microsoft Agent Framework execution with optional token-budget conversation-history compaction
+- Default runtime settings (model, timeout, and output limits)
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -66,7 +66,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
-- `agent_configuration` — Portable and Microsoft Agent Framework-specific execution defaults inherited by agents
+- `agent_configuration` — Portable execution defaults inherited by agents
 - `system_tools` — Object containing system-level tools configuration
   - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
   - `web_request` — Object or boolean configuring the built-in outbound HTTP request tool (enabled by default; `false` disables app-wide)
@@ -161,7 +161,7 @@ Fields are organized into categories based on how they can be used:
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
 - `timeout` — Execution time limit
-- `agent_configuration` — Output-token limit and Microsoft Agent Framework conversation-compaction settings
+- `agent_configuration` — Output-token limit
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
@@ -201,23 +201,17 @@ unless another agent references it through `subagents` or
 - **Type:** `object | null`
 - **Typical location:** Global defaults in `agents.config.yaml`; optional recursive overrides in agent front matter
 - **Default:** Empty configuration; Microsoft Agent Framework is the default harness
-- **Description:** Configures a portable model output limit and framework-specific execution
-  settings. All agents execute through the harness-agent mechanism, whether or not this object is
-  present.
+- **Description:** Configures the model output limit. Harness-specific conversation compaction uses each SDK's
+  native defaults and is not configured through this public object.
 
 ```yaml
 # agents.config.yaml
 agent_configuration:
   max_output_tokens: 4096
-  agent_framework:
-    compaction:
-      max_context_window_tokens: 8192
 
-# .agent.md front matter: override one inherited leaf
+# .agent.md front matter: override the inherited output limit
 agent_configuration:
-  agent_framework:
-    compaction:
-      max_context_window_tokens: 16384
+  max_output_tokens: 2048
 ```
 
 Agent configuration inherits recursively by authored field. An omitted field or empty object keeps
@@ -225,10 +219,9 @@ the global value; an explicit `null` clears the inherited leaf or subtree. Setti
 `agent_configuration: null` clears all global agent configuration for that agent. Specialists inherit
 only their own resolved global-plus-agent configuration, never a coordinator's overrides.
 
-`max_output_tokens` is a positive integer and may be configured without compaction. When
-`max_context_window_tokens` is configured, the effective output limit must also be present and must
-be smaller than the context limit. Environment substitution runs before schema parsing and effective
-validation.
+`max_output_tokens` is a positive integer. Environment substitution runs before schema parsing.
+The legacy `agent_framework.compaction.max_context_window_tokens` field is no longer supported:
+the runtime warns and ignores it, and the selected harness uses its native compaction defaults.
 
 With the default MAF harness, execution applies whenever an agent runs directly,
 as a chat-time delegated specialist, or as a Workflow Sub Agent. Direct runs
@@ -236,12 +229,10 @@ retain authoritative full Blob/File history while compaction
 bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
 executions with no nested delegation or persistent history.
 
-On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), a non-null effective
-`max_context_window_tokens` is rejected before inference rather than mapped to a different threshold;
-omitting it or clearing it with `null` selects Copilot's native compaction defaults. Configured
-`max_output_tokens` is rejected on that path. The underlying Copilot SDK/provider surface has
-similarly named token-budget fields, but this bounded internal preview does not map or expose them
-as a supported authoring contract. Both fields behave as described above on the default MAF path.
+On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), the runtime also uses
+the SDK's native compaction defaults. Configured `max_output_tokens` is rejected on that path; the
+underlying Copilot SDK/provider surface has similarly named token-budget fields, but this bounded
+internal preview does not map or expose them as a supported authoring contract.
 
 Session storage is not an `agent_configuration` or front-matter setting.
 The selected harness uses the existing `AzureWebJobsStorage` connection string
@@ -252,10 +243,6 @@ callbacks for opaque SDK-owned files. The SDK owns continuation, recovery,
 compaction and format compatibility; the host does not interpret those files.
 Only the selected harness's persistence adapter is initialized, used and closed.
 See [`copilot-preview-operations.md`](copilot-preview-operations.md).
-
-`max_context_window_tokens` is the budget used by compaction and may be lower than the model's
-physical context window. The default strategy begins truncating older non-system message groups at
-80% of the input budget, where input budget is `max_context_window_tokens - max_output_tokens`.
 
 Existing top-level `model` and `timeout` fields remain unchanged.
 

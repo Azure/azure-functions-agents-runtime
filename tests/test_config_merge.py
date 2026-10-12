@@ -20,8 +20,6 @@ from azure_functions_agents.config.merge import (
 )
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
-    AgentFrameworkCompactionConfig,
-    AgentFrameworkConfiguration,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
@@ -510,21 +508,8 @@ def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
 def _agent_configuration(
     *,
     max_output_tokens: int | None = None,
-    max_context_window_tokens: int | None = None,
 ) -> AgentConfiguration:
-    agent_framework = (
-        AgentFrameworkConfiguration(
-            compaction=AgentFrameworkCompactionConfig(
-                max_context_window_tokens=max_context_window_tokens
-            )
-        )
-        if max_context_window_tokens is not None
-        else None
-    )
-    return AgentConfiguration(
-        max_output_tokens=max_output_tokens,
-        agent_framework=agent_framework,
-    )
+    return AgentConfiguration(max_output_tokens=max_output_tokens)
 
 
 def test_resolve_agent_configuration_defaults_empty() -> None:
@@ -535,10 +520,7 @@ def test_resolve_agent_configuration_defaults_empty() -> None:
 
 
 def test_resolve_agent_configuration_inherits_global_tree() -> None:
-    global_value = _agent_configuration(
-        max_output_tokens=4096,
-        max_context_window_tokens=8192,
-    )
+    global_value = _agent_configuration(max_output_tokens=4096)
     resolved = _resolve_agent_configuration(
         AgentSpec(name="A", description="B"),
         GlobalConfig(agent_configuration=global_value),
@@ -547,18 +529,14 @@ def test_resolve_agent_configuration_inherits_global_tree() -> None:
     assert resolved is not global_value
 
 
-def test_resolve_agent_configuration_deep_merges_agent_leaves() -> None:
-    global_value = _agent_configuration(
-        max_output_tokens=4096,
-        max_context_window_tokens=8192,
-    )
+def test_resolve_agent_configuration_agent_output_overrides_global() -> None:
+    global_value = _agent_configuration(max_output_tokens=4096)
     spec = AgentSpec.model_validate(
         {
             "name": "A",
             "description": "B",
             "agent_configuration": {
                 "max_output_tokens": 2048,
-                "agent_framework": {},
             },
         }
     )
@@ -566,7 +544,6 @@ def test_resolve_agent_configuration_deep_merges_agent_leaves() -> None:
         spec, GlobalConfig(agent_configuration=global_value)
     )
     assert resolved.max_output_tokens == 2048
-    assert resolved.agent_framework == global_value.agent_framework
 
 
 def test_resolve_agent_configuration_empty_object_inherits() -> None:
@@ -580,10 +557,7 @@ def test_resolve_agent_configuration_empty_object_inherits() -> None:
 
 
 def test_resolve_agent_configuration_null_clears_all() -> None:
-    global_value = _agent_configuration(
-        max_output_tokens=4096,
-        max_context_window_tokens=8192,
-    )
+    global_value = _agent_configuration(max_output_tokens=4096)
     spec = AgentSpec.model_validate(
         {"name": "A", "description": "B", "agent_configuration": None}
     )
@@ -606,54 +580,6 @@ def test_resolve_agent_configuration_null_leaf_clears_output() -> None:
     ) == AgentConfiguration()
 
 
-def test_resolve_agent_configuration_null_agent_framework_clears_subtree_only() -> None:
-    global_value = _agent_configuration(
-        max_output_tokens=4096,
-        max_context_window_tokens=8192,
-    )
-    spec = AgentSpec.model_validate(
-        {
-            "name": "A",
-            "description": "B",
-            "agent_configuration": {"agent_framework": None},
-        }
-    )
-    resolved = _resolve_agent_configuration(
-        spec, GlobalConfig(agent_configuration=global_value)
-    )
-    assert resolved == AgentConfiguration(max_output_tokens=4096)
-
-
-@pytest.mark.parametrize(
-    "agent_framework_override",
-    [
-        {"compaction": None},
-        {"compaction": {"max_context_window_tokens": None}},
-    ],
-    ids=["compaction-subtree", "context-leaf"],
-)
-def test_resolve_agent_configuration_nested_null_clears_compaction_only(
-    agent_framework_override: dict[str, object],
-) -> None:
-    global_value = _agent_configuration(
-        max_output_tokens=4096,
-        max_context_window_tokens=8192,
-    )
-    spec = AgentSpec.model_validate(
-        {
-            "name": "A",
-            "description": "B",
-            "agent_configuration": {
-                "agent_framework": agent_framework_override,
-            },
-        }
-    )
-    resolved = _resolve_agent_configuration(
-        spec, GlobalConfig(agent_configuration=global_value)
-    )
-    assert resolved == AgentConfiguration(max_output_tokens=4096)
-
-
 def test_resolve_agent_configuration_output_only_is_valid() -> None:
     resolved = _resolve_agent_configuration(
         AgentSpec.model_validate(
@@ -668,60 +594,8 @@ def test_resolve_agent_configuration_output_only_is_valid() -> None:
     assert resolved == AgentConfiguration(max_output_tokens=4096)
 
 
-def test_resolve_agent_configuration_context_inherits_output() -> None:
-    spec = AgentSpec.model_validate(
-        {
-            "name": "A",
-            "description": "B",
-            "agent_configuration": {
-                "agent_framework": {
-                    "compaction": {"max_context_window_tokens": 8192}
-                }
-            },
-        }
-    )
-    resolved = _resolve_agent_configuration(
-        spec,
-        GlobalConfig(
-            agent_configuration=AgentConfiguration(max_output_tokens=4096)
-        ),
-    )
-    assert resolved == _agent_configuration(
-        max_output_tokens=4096,
-        max_context_window_tokens=8192,
-    )
-
-
-@pytest.mark.parametrize(
-    ("max_output_tokens", "max_context_window_tokens", "message"),
-    [
-        (None, 8192, "max_output_tokens is required"),
-        (8192, 8192, "must be less than"),
-        (9000, 8192, "must be less than"),
-    ],
-)
-def test_resolve_agent_configuration_rejects_invalid_effective_limits(
-    max_output_tokens: int | None,
-    max_context_window_tokens: int,
-    message: str,
-) -> None:
-    spec = AgentSpec(
-        name="A",
-        description="B",
-        agent_configuration=_agent_configuration(
-            max_output_tokens=max_output_tokens,
-            max_context_window_tokens=max_context_window_tokens,
-        ),
-    )
-    with pytest.raises(ValueError, match=message):
-        _resolve_agent_configuration(spec, GlobalConfig())
-
-
 def test_compose_wires_resolved_agent_configuration() -> None:
-    config = _agent_configuration(
-        max_output_tokens=4096,
-        max_context_window_tokens=8192,
-    )
+    config = _agent_configuration(max_output_tokens=4096)
     resolved = compose(
         AgentSpec(name="A", description="desc", agent_configuration=config),
         GlobalConfig(),

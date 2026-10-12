@@ -17,8 +17,8 @@ from ...discovery.skills import SkillDescriptor
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .._agent_runner import AgentFunctionTool, AgentRunner
-from .._harness_binding import AppHarness
-from . import _maf_execution
+from .._harness_binding import AppHarness, HarnessSessionState, SessionHistory
+from ._maf_observability import configure_maf_instrumentation
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -57,7 +57,10 @@ class _MAFHarnessRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
+        session_state: HarnessSessionState | None = None,
     ) -> AgentResult:
+        from . import _maf_execution
+
         request = _runner._request(
             self._harness,
             prompt,
@@ -77,6 +80,7 @@ class _MAFHarnessRunner:
             agent_name=agent_name,
             web_request_tools=web_request_tools,
             agent_configuration=agent_configuration,
+            session_state=session_state,
         )
         return await _maf_execution.run(
             self._harness,
@@ -94,6 +98,7 @@ class _MAFHarnessRunner:
             subagents=subagents,
             catalog=catalog,
             workflow_policy=workflow_policy,
+            session_state=session_state,
         )
 
     def run_agent_stream(
@@ -123,7 +128,10 @@ class _MAFHarnessRunner:
         session_is_new: bool = False,
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
+        session_state: HarnessSessionState | None = None,
     ) -> AsyncGenerator[str]:
+        from . import _maf_execution
+
         request = _runner._request(
             self._harness,
             prompt,
@@ -143,6 +151,7 @@ class _MAFHarnessRunner:
             agent_name=agent_name,
             web_request_tools=web_request_tools,
             agent_configuration=agent_configuration,
+            session_state=session_state,
         )
         return _maf_execution.run_stream(
             self._harness,
@@ -161,7 +170,13 @@ class _MAFHarnessRunner:
             subagents=subagents,
             catalog=catalog,
             workflow_policy=workflow_policy,
+            session_state=session_state,
         )
+
+    async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
+        from ._maf_history import get_session_history
+
+        return await get_session_history(agent_slug, session_id)
 
     async def run_leaf_agent_task(
         self,
@@ -172,6 +187,8 @@ class _MAFHarnessRunner:
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str:
+        from . import _maf_execution
+
         return await _maf_execution.run_leaf_agent_task(
             resolved,
             replace(capabilities, _harness=self._harness),
@@ -183,4 +200,5 @@ class _MAFHarnessRunner:
 
 def create_runner(harness: AppHarness) -> AgentRunner:
     """Create the MAF-backed bound execution facade for one app binding."""
+    configure_maf_instrumentation(harness)
     return AgentRunner(_MAFHarnessRunner(harness))

@@ -20,9 +20,9 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 - Do not defensively revalidate already typed SDK results or local dataclasses
   with `getattr`, `isinstance`, casts, or `Any`; import the boundary type and
   use its declared fields directly. This does not apply to declared,
-  intentionally dynamic extension points (e.g. `ClientManager.build_chat_client`,
-  which returns `Any` because the underlying SDK is pluggable) — narrow
-  runtime inspection is expected there.
+  intentionally dynamic harness boundaries (for example, the lazy SDK imports
+  and client-construction helpers in `harness/agent_framework/_maf_client.py`)
+  — narrow runtime inspection is expected there.
 - Validate external or SDK-owned inputs once at the trust boundary, then pass
   a normalized internal shape downstream so ordinary code can use non-optional
   fields directly. Keep `None` / optional handling where the upstream contract

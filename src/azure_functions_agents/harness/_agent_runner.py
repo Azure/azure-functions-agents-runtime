@@ -14,7 +14,12 @@ from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor
 from ..registration.capabilities import AgentCapabilities
 from ..registration.catalog import AgentCatalog
-from ._harness_binding import AppHarness, HarnessKind
+from ._harness_binding import (
+    AppHarness,
+    HarnessKind,
+    HarnessSessionState,
+    SessionHistory,
+)
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -52,6 +57,7 @@ class _HarnessRunner(Protocol):
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
+        session_state: HarnessSessionState | None = None,
     ) -> AgentResult: ...
 
     def run_agent_stream(
@@ -81,7 +87,10 @@ class _HarnessRunner(Protocol):
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
+        session_state: HarnessSessionState | None = None,
     ) -> AsyncGenerator[str]: ...
+
+    async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory: ...
 
     async def run_leaf_agent_task(
         self,
@@ -126,6 +135,7 @@ class AgentRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
+        session_state: HarnessSessionState | None = None,
     ) -> AgentResult:
         effective_deadline = deadline
         if effective_deadline is None:
@@ -154,6 +164,7 @@ class AgentRunner:
             skills=skills,
             skill_catalog=skill_catalog,
             session_is_new=session_is_new,
+            session_state=session_state,
         )
 
     def run_agent_stream(
@@ -183,6 +194,7 @@ class AgentRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
+        session_state: HarnessSessionState | None = None,
     ) -> AsyncGenerator[str]:
         effective_deadline = deadline
         if effective_deadline is None:
@@ -212,7 +224,11 @@ class AgentRunner:
             skills=skills,
             skill_catalog=skill_catalog,
             session_is_new=session_is_new,
+            session_state=session_state,
         )
+
+    async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
+        return await self._backend.get_session_history(agent_slug, session_id)
 
     async def run_leaf_agent_task(
         self,

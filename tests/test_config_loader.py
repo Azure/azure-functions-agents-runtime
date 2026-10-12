@@ -181,7 +181,8 @@ def test_load_agent_specs_resolves_frontmatter_strings(
     assert spec.response_example == '{"status":"ok"}'
 
 
-def test_load_global_and_agent_configuration_with_limits(
+def test_retired_compaction_setting_warns_and_is_ignored_in_global_and_agent_config(
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -189,7 +190,10 @@ def test_load_global_and_agent_configuration_with_limits(
     monkeypatch.setenv("OUTPUT_LIMIT", "4096")
     (tmp_path / "agents.config.yaml").write_text(
         "agent_configuration:\n"
-        "  max_output_tokens: $OUTPUT_LIMIT\n",
+        "  max_output_tokens: $OUTPUT_LIMIT\n"
+        "  agent_framework:\n"
+        "    compaction:\n"
+        "      max_context_window_tokens: $CONTEXT_LIMIT\n",
         encoding="utf-8",
     )
     (tmp_path / "main.agent.md").write_text(
@@ -205,40 +209,38 @@ def test_load_global_and_agent_configuration_with_limits(
         encoding="utf-8",
     )
 
-    config = load_global_config(tmp_path)
-    [spec] = load_agent_specs(tmp_path, strict=True)
+    with caplog.at_level(logging.WARNING):
+        config = load_global_config(tmp_path)
+        [spec] = load_agent_specs(tmp_path, strict=True)
     assert config.agent_configuration is not None
     assert config.agent_configuration.max_output_tokens == 4096
-    assert spec.agent_configuration is not None
-    assert spec.agent_configuration.max_output_tokens is None
-    assert spec.agent_configuration.agent_framework is not None
-    assert spec.agent_configuration.agent_framework.compaction is not None
-    assert spec.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
+    assert spec.agent_configuration is None
     resolved = compose(spec, config)
     assert resolved.agent_configuration.max_output_tokens == 4096
-    assert resolved.agent_configuration.agent_framework is not None
-    assert resolved.agent_configuration.agent_framework.compaction is not None
-    assert resolved.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
+    assert "max_context_window_tokens" not in str(resolved.agent_configuration.model_dump())
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len([message for message in warnings if "Ignoring retired configuration field" in message]) == 2
 
 
-def test_compose_rejects_invalid_effective_agent_configuration(tmp_path: Path) -> None:
+def test_retired_compaction_setting_does_not_mask_unrelated_unknown_configuration(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "main.agent.md").write_text(
         "---\n"
         "name: Main\n"
         "description: Main agent\n"
         "agent_configuration:\n"
-        "  max_output_tokens: 4096\n"
         "  agent_framework:\n"
         "    compaction:\n"
         "      max_context_window_tokens: 4096\n"
+        "      unrelated_setting: true\n"
         "---\n"
         "Hello\n",
         encoding="utf-8",
     )
 
-    [spec] = load_agent_specs(tmp_path, strict=True)
-    with pytest.raises(ValueError, match="must be less than"):
-        compose(spec, load_global_config(tmp_path))
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        load_agent_specs(tmp_path, strict=True)
 
 
 def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(
@@ -818,4 +820,3 @@ def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> Non
     assert {spec.name for spec in specs if spec.is_main} == {"Default Agent", "Main Agent"}
     assert Path(next(spec for spec in specs if spec.name == "Default Agent").source_file).name == "agent.md"
     assert Path(next(spec for spec in specs if spec.name == "Main Agent").source_file).name == "main.agent.md"
-
