@@ -13,7 +13,7 @@ import azure.functions as func
 
 from .client_manager import get_client_manager
 from .harness._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
-from .hosted_skill import HostedSkill
+from .hosted_skill_binding import HostedSkill
 from .registration.catalog import AgentCatalog, CatalogEntry
 
 type _Handler = Callable[..., Any]

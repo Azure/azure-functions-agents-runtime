@@ -6,9 +6,9 @@ import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
-from ._agent_execution import _set_run_result_attributes, build_sandbox_tools_for_session
-from ._observability import FaultDomain, LifecycleStage, current_span, start_span
-from ._session_id import validate_session_id
+from ._agent_run_diagnostics import _set_run_result_attributes, start_agent_run_span
+from ._agent_validation import validate_prompt, validate_session_id
+from ._observability import FaultDomain, current_span
 from .harness._harness_binding import AppHarness
 from .registration.catalog import CatalogEntry
 from .response_contract import (
@@ -18,12 +18,7 @@ from .response_contract import (
 )
 from .runner import AgentResult, run_agent, run_agent_events
 from .streaming_events import AgentStreamEvent, AgentStreamEventKind
-
-
-def _validate_prompt(prompt: str) -> str:
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("prompt must be a nonblank string")
-    return prompt
+from .system_tools.sandbox import build_sandbox_tools_for_session
 
 
 def _resolve_session_id(session_id: str | None) -> tuple[str, bool]:
@@ -51,19 +46,15 @@ class HostedSkill:
         """Run one agent turn and return its result."""
         resolved = self._entry.resolved
         capabilities = self._entry.capabilities
-        effective_prompt = self._effective_prompt(_validate_prompt(prompt))
+        effective_prompt = self._effective_prompt(validate_prompt(prompt))
         resolved_session_id, is_new_session = _resolve_session_id(session_id)
         response_error: HostedSkillResponseError | None = None
-        with start_span(
-            f"agent.run {resolved.slug}",
-            lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
-                "af.agent.execution_surface": "hosted_skill",
-                "af.agent.session_id": resolved_session_id,
-                "af.agent.model": resolved.model,
-            },
+        with start_agent_run_span(
+            resolved.slug,
+            display_name=resolved.name,
+            model=resolved.model,
+            execution_surface="hosted_skill",
+            session_id=resolved_session_id,
         ) as span:
             try:
                 result = await run_agent(
@@ -113,7 +104,7 @@ class HostedSkill:
         """Stream one agent turn as harness-neutral events."""
         resolved = self._entry.resolved
         capabilities = self._entry.capabilities
-        effective_prompt = self._effective_prompt(_validate_prompt(prompt))
+        effective_prompt = self._effective_prompt(validate_prompt(prompt))
         resolved_session_id, is_new_session = _resolve_session_id(session_id)
         events = run_agent_events(
             effective_prompt,

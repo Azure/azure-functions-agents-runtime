@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-import azure_functions_agents.hosted_skill as hosted_skill_module
+import azure_functions_agents.hosted_skill_binding as hosted_skill_module
 from azure_functions_agents._observability import FaultDomain
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -18,7 +18,7 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
-from azure_functions_agents.hosted_skill import HostedSkill
+from azure_functions_agents.hosted_skill_binding import HostedSkill
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry
 from azure_functions_agents.response_contract import (
@@ -64,7 +64,10 @@ def _install_start_span_capture(monkeypatch: pytest.MonkeyPatch) -> list[_Captur
         spans.append(span)
         yield span
 
-    monkeypatch.setattr(hosted_skill_module, "start_span", fake_start_span)
+    monkeypatch.setattr(
+        "azure_functions_agents._agent_run_diagnostics.start_span",
+        fake_start_span,
+    )
     return spans
 
 
@@ -210,7 +213,10 @@ async def test_run_records_failure_once_through_span_context(
     async def run_agent(_prompt: str, **_kwargs: Any) -> AgentResult:
         raise failure
 
-    monkeypatch.setattr(hosted_skill_module, "start_span", recording_start_span)
+    monkeypatch.setattr(
+        "azure_functions_agents._agent_run_diagnostics.start_span",
+        recording_start_span,
+    )
     monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
 
     with pytest.raises(RuntimeError, match="run failed"):
@@ -294,7 +300,10 @@ async def test_run_records_response_contract_failure_as_app_fault_once(
     async def run_agent(_prompt: str, **kwargs: Any) -> AgentResult:
         return AgentResult(kwargs["session_id"], "not JSON")
 
-    monkeypatch.setattr(hosted_skill_module, "start_span", recording_start_span)
+    monkeypatch.setattr(
+        "azure_functions_agents._agent_run_diagnostics.start_span",
+        recording_start_span,
+    )
     monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
 
     with pytest.raises(InvalidResponseJsonError) as caught:

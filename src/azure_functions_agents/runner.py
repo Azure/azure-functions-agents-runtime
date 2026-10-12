@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
+from ._agent_validation import SESSION_ID_PATTERN, validate_session_id
 from ._function_tool import tool
 from ._logger import logger
 from ._observability import FaultDomain, RuntimeSpan, current_span, record_delegate_call
-from ._session_id import SESSION_ID_PATTERN, validate_session_id
 from ._slug import delegate_tool_name
 from ._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from .config import ResolvedAgent, SubagentRef

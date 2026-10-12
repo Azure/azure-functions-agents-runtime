@@ -13,7 +13,7 @@ import azure.functions as func
 import pytest
 from azure.durable_functions import DurableFunctionsClient
 
-from azure_functions_agents._session_id import SESSION_ID_PATTERN
+from azure_functions_agents._agent_validation import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     EndpointAuthConfig,
@@ -244,7 +244,7 @@ def _install_start_span_capture(monkeypatch: Any) -> list[_CapturedSpan]:
         yield span
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration.endpoints.start_span", _fake_start_span
+        "azure_functions_agents._agent_run_diagnostics.start_span", _fake_start_span
     )
     return spans
 

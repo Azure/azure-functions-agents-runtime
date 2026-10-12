@@ -175,15 +175,18 @@ and the injected parameter must have a runtime-resolvable annotation that is
 exactly `HostedSkill`. A `TYPE_CHECKING`-only import, `HostedSkill | None`, and
 Durable orchestrator generators are rejected. `HostedSkillDFApp` supports
 ordinary Functions and Durable Activity handlers, but agent calls must not run
-inside replayed orchestrator code.
+inside replayed orchestrator code. These constraints ensure the Functions
+worker indexes the wrapped signature without the runtime-managed parameter,
+make that parameter unambiguous, and keep agent I/O out of deterministic
+orchestrator replay.
 
 Application code obtains `HostedSkill` only through decorator injection. Direct
 construction with internal catalog or harness objects is unsupported. Applying
-the decorator performs MAF provider preflight during module import. Invalid MAF
-provider settings therefore prevent the whole Function module from indexing,
-including unrelated deterministic Functions, even if no request would invoke
-the skill. Copilot preview uses its app-selection and catalog-validation gates
-instead of MAF client-manager preflight.
+the decorator validates the selected agent's provider configuration during
+module import. Invalid provider settings therefore prevent the whole Function
+module from indexing, including unrelated deterministic Functions, even if no
+request would invoke the skill. The app's selected execution mode owns any
+additional catalog validation.
 
 HostedSkill direct execution reuses `instructions`, `model`, `timeout`,
 `agent_configuration`, `response_schema`, `response_example`, tools, skills,
@@ -192,10 +195,10 @@ MCP servers, sandbox, and `web_request` settings. `trigger`,
 not change the call. `input_schema` is not applied because v1 accepts a string
 prompt.
 
-HostedSkill runs through the app-bound MAF or Copilot harness. Decorator
-application rejects agents that declare chat-time `subagents` or enable Dynamic
-Workflows. Streaming yields typed `HostedSkillEvent` values rather than
-Server-Sent Events text.
+HostedSkill uses the execution mode selected for the app. Decorator application
+rejects agents that declare chat-time `subagents` or enable Dynamic Workflows.
+Streaming yields typed `HostedSkillEvent` values rather than Server-Sent Events
+text.
 
 Session IDs are continuity keys, not authorization checks. Applications must
 authorize continuation when conversations belong to users or tenants. A

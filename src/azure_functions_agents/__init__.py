@@ -109,9 +109,9 @@ except ImportError:
     pass
 
 
+from ._agent_validation import validate_session_id  # noqa: E402
 from ._function_tool import tool, workflow_tool  # noqa: E402
 from ._hosted_skill_app import HostedSkillDFApp  # noqa: E402
-from ._session_id import validate_session_id  # noqa: E402
 from .app import (  # noqa: E402
     HostedSkillApp,
     HostedSkillFunctionApp,
@@ -126,7 +126,7 @@ from .client_manager import (  # noqa: E402
 from .client_manager import shutdown_client_manager as _shutdown_client_manager  # noqa: E402
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
 from .harness._harness_lifecycle import _shutdown_harnesses  # noqa: E402
-from .hosted_skill import HostedSkill  # noqa: E402
+from .hosted_skill_binding import HostedSkill  # noqa: E402
 from .response_contract import HostedSkillResponseError  # noqa: E402
 from .runner import (  # noqa: E402
     DEFAULT_MODEL,

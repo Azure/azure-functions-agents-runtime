@@ -3,29 +3,33 @@
 from __future__ import annotations
 
 import json
-import uuid
-from importlib import import_module
+from contextlib import AbstractContextManager
 from typing import Any
 
-from ._tool_descriptor import ToolDescriptor, describe_tools
-from .config import ResolvedAgent
+from ._observability import LifecycleStage, RuntimeSpan, start_span
 
 
-def build_sandbox_tools_for_session(
-    resolved: ResolvedAgent, session_id: str | None
-) -> list[ToolDescriptor] | None:
-    """Build per-request sandbox tools using the resolved session id."""
-    if resolved.tools_disabled or resolved.sandbox_config is None:
-        return None
-    fallback = session_id or uuid.uuid4().hex
-    sandbox_module = import_module("azure_functions_agents.system_tools.sandbox")
-    return list(
-        describe_tools(
-            sandbox_module.create_sandbox_tools(
-                resolved.sandbox_config.model_dump(),
-                fallback_session_id=fallback,
-            )
-        )
+def start_agent_run_span(
+    agent_name: str,
+    *,
+    display_name: str,
+    model: str | None,
+    trigger_type: str | None = None,
+    execution_surface: str | None = None,
+    session_id: str | None = None,
+) -> AbstractContextManager[RuntimeSpan]:
+    """Start a run-level span with the shared agent identity attributes."""
+    return start_span(
+        f"agent.run {agent_name}",
+        lifecycle_stage=LifecycleStage.AGENT_RUN,
+        attributes={
+            "af.agent.name": agent_name,
+            "af.agent.display_name": display_name,
+            "af.agent.trigger_type": trigger_type,
+            "af.agent.execution_surface": execution_surface,
+            "af.agent.session_id": session_id,
+            "af.agent.model": model,
+        },
     )
 
 

@@ -13,18 +13,16 @@ import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
-from .._agent_execution import (
+from .._agent_run_diagnostics import (
     _set_run_result_attributes,
     _total_tool_error_count,
-    build_sandbox_tools_for_session,
+    start_agent_run_span,
 )
 from .._logger import logger
 from .._observability import (
     ATTR_FAULT_DOMAIN,
     FaultDomain,
-    LifecycleStage,
     capture_sensitive_data,
-    start_span,
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
@@ -36,6 +34,7 @@ from ..response_contract import (
     response_format_instructions,
     validate_response_contract,
 )
+from ..system_tools.sandbox import build_sandbox_tools_for_session
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
@@ -165,16 +164,12 @@ def make_agent_handler(
         )
 
         session_id = _new_session_id()
-        with start_span(
-            f"agent.run {resolved.slug}",
-            lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": trigger_type,
-                "af.agent.session_id": session_id,
-                "af.agent.model": resolved.model,
-            },
+        with start_agent_run_span(
+            resolved.slug,
+            display_name=resolved.name,
+            model=resolved.model,
+            trigger_type=trigger_type,
+            session_id=session_id,
         ) as span:
             try:
                 data_json = serialize_trigger_data(trigger_data)
@@ -283,15 +278,11 @@ def make_http_agent_handler(
             source_marker(resolved.source_file),
         )
 
-        with start_span(
-            f"agent.run {resolved.slug}",
-            lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "http",
-                "af.agent.model": resolved.model,
-            },
+        with start_agent_run_span(
+            resolved.slug,
+            display_name=resolved.name,
+            model=resolved.model,
+            trigger_type="http",
         ) as span:
             try:
                 supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)

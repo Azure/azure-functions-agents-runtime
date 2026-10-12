@@ -1,4 +1,4 @@
-"""Shared session-id validation pattern.
+"""Shared agent input validation.
 
 The session id is used as a filename component by the runner's history
 providers, so anything outside this safe set is rejected. Kept in a tiny,
@@ -13,6 +13,17 @@ import re
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def validate_prompt(
+    prompt: object,
+    *,
+    error_message: str = "prompt must be a nonblank string",
+) -> str:
+    """Return a nonblank prompt or raise with the caller's boundary message."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError(error_message)
+    return prompt
 
 
 def validate_session_id(session_id: str | None) -> str | None:

@@ -10,11 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from azure_functions_agents._agent_execution import (
-    _tool_error_count,
-    _total_tool_error_count,
-    build_sandbox_tools_for_session,
-)
+from azure_functions_agents._agent_run_diagnostics import _tool_error_count, _total_tool_error_count
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
@@ -35,6 +31,7 @@ from azure_functions_agents.registration._handlers import (
     make_http_agent_handler,
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.system_tools.sandbox import build_sandbox_tools_for_session
 
 
 class DummyRequest:
@@ -79,7 +76,7 @@ def _install_recording_span(monkeypatch: Any) -> RecordingSpan:
         yield span
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration._handlers.start_span",
+        "azure_functions_agents._agent_run_diagnostics.start_span",
         _fake_start_span,
     )
     return span
@@ -452,8 +449,8 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
         return [tool(lambda: "ok", name="execute_python")]
 
     monkeypatch.setattr(
-        "azure_functions_agents._agent_execution.import_module",
-        lambda name: SimpleNamespace(create_sandbox_tools=fake_create_sandbox_tools),
+        "azure_functions_agents.system_tools.sandbox.create_sandbox_tools",
+        fake_create_sandbox_tools,
     )
 
     disabled = build_sandbox_tools_for_session(
@@ -490,8 +487,8 @@ def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypa
         return [tool(lambda: fallback_session_id, name="execute_python")]
 
     monkeypatch.setattr(
-        "azure_functions_agents._agent_execution.import_module",
-        lambda name: SimpleNamespace(create_sandbox_tools=fake_create_sandbox_tools),
+        "azure_functions_agents.system_tools.sandbox.create_sandbox_tools",
+        fake_create_sandbox_tools,
     )
 
     resolved = _resolved_agent(

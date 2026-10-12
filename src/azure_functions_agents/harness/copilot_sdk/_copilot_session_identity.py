@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from ..._agent_identity import agent_id
-from ..._session_id import validate_session_id
+from ..._agent_validation import validate_session_id
 from ...config.paths import resolve_config_dir
 from .._history_identity import validate_agent_slug
 from .._session_storage import (

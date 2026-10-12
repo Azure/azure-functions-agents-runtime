@@ -14,15 +14,16 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
-from .._agent_execution import _set_run_result_attributes, build_sandbox_tools_for_session
+from .._agent_run_diagnostics import _set_run_result_attributes, start_agent_run_span
+from .._agent_validation import SESSION_ID_PATTERN, validate_prompt, validate_session_id
 from .._logger import logger
-from .._observability import FaultDomain, LifecycleStage, start_span
-from .._session_id import SESSION_ID_PATTERN, validate_session_id
+from .._observability import FaultDomain
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ..harness._harness_binding import AppHarness, HarnessKind, bind_harness, get_harness
 from ..harness._history_identity import validate_agent_slug
 from ..harness._session_storage import SessionStorageError
+from ..system_tools.sandbox import build_sandbox_tools_for_session
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import (
     _SESSION_ID_HEADER,
@@ -250,9 +251,7 @@ def _run_builtin_agent_stream(
 
 def _extract_prompt_from_body(body: Any) -> str:
     prompt = body.get("prompt") if isinstance(body, dict) else None
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("Missing 'prompt'")
-    return prompt.strip()
+    return validate_prompt(prompt, error_message="Missing 'prompt'").strip()
 
 
 def _json_error(message: str, status_code: int = 500) -> Response:
@@ -324,16 +323,12 @@ def _register_http_chat(
         # surface gets the same run-level span/attributes (including B3's
         # `af.agent.tool_error_count`, which folds in delegate errors) that
         # `make_agent_handler`/`make_http_agent_handler` already provide.
-        with start_span(
-            f"agent.run {resolved.slug}",
-            lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "builtin_chat",
-                "af.agent.session_id": resolved_session_id,
-                "af.agent.model": resolved.model,
-            },
+        with start_agent_run_span(
+            resolved.slug,
+            display_name=resolved.name,
+            model=resolved.model,
+            trigger_type="builtin_chat",
+            session_id=resolved_session_id,
         ) as span:
             try:
                 auth_error = authorize_entra_request(req.headers.get, auth)
@@ -503,31 +498,32 @@ def _register_mcp_endpoint(
         # calls `run_agent` directly, so nothing upstream opens an
         # `agent.run {name}` span for it — open one here to get the same
         # run-level attributes (including B3's `af.agent.tool_error_count`).
-        with start_span(
-            f"agent.run {resolved.slug}",
-            lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "builtin_mcp",
-                "af.agent.model": resolved.model,
-            },
+        with start_agent_run_span(
+            resolved.slug,
+            display_name=resolved.name,
+            model=resolved.model,
+            trigger_type="builtin_mcp",
         ) as span:
             try:
                 payload = json.loads(context) if context else {}
                 arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
-                prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
-                if not isinstance(prompt, str) or not prompt.strip():
+                raw_prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
+                try:
+                    prompt = validate_prompt(
+                        raw_prompt,
+                        error_message="Missing 'prompt'",
+                    ).strip()
+                except ValueError as exc:
                     span.set_attribute("af.agent.outcome", "error")
-                    span.set_error("Missing 'prompt'", fault_domain=FaultDomain.APP)
-                    return json.dumps({"error": "Missing 'prompt'"})
+                    span.set_error(str(exc), fault_domain=FaultDomain.APP)
+                    return json.dumps({"error": str(exc)})
 
                 session_id = (
                     _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
                 )
                 span.set_attribute("af.agent.session_id", session_id)
                 result = await _run_builtin_agent(
-                    prompt.strip(),
+                    prompt,
                     resolved=resolved,
                     capabilities=capabilities,
                     session_id=session_id,

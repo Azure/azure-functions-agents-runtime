@@ -106,7 +106,7 @@ pipeline authoritative and avoids a second interpretation of frontmatter.
 | translate | `config/merge.py`, `config/validation.py` | Reuse `ResolvedAgent`. Permit a fully validated agent with no external surface so it can be an inert internal catalog entry. |
 | compose | `app.py`, `registration/catalog.py`, `_hosted_skill_app.py` | Build the existing complete catalog before app mutation, then initialize an enhanced FunctionApp or DFApp with that catalog and the frozen app harness. |
 | register | `_hosted_skill_app.py`, existing Azure registration modules | Add a Python decorator that wraps an application handler and hides its injected parameter. Register no new host binding type. Existing automatic surfaces are unchanged. |
-| execute | `hosted_skill.py`, `_agent_execution.py`, `runner.py`, `streaming_events.py`, `response_contract.py`, `client_manager.py` | Map facade calls to the existing runner inputs, expose typed stream events, enforce the response contract, share harness-neutral execution helpers, and preflight MAF provider configuration without constructing a client. |
+| execute | `hosted_skill_binding.py`, `_agent_validation.py`, `_agent_run_diagnostics.py`, `system_tools/sandbox.py`, `runner.py`, `streaming_events.py`, `response_contract.py`, `client_manager.py` | Map facade calls to the existing runner inputs, expose typed stream events, enforce the response contract, share validation and run diagnostics, bind per-session sandbox tools, and preflight MAF provider configuration without constructing a client. |
 
 ### 4.1 Authoring and selection
 
