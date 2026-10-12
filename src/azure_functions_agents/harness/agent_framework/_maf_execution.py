@@ -14,7 +14,19 @@ from azure_functions_agents import runner as _runner
 
 from ..._agent_identity import agent_id
 from ..._logger import logger
-from ..._observability import FaultDomain, LifecycleStage, start_span
+from ..._observability import (
+    ATTR_AGENT_MODEL,
+    ATTR_AGENT_NAME,
+    ATTR_AGENT_OUTCOME,
+    ATTR_AGENT_SESSION_ID,
+    ATTR_AGENT_TOOL_ERROR_COUNT,
+    ATTR_AGENT_TRIGGER_TYPE,
+    ATTR_GEN_AI_AGENT_NAME,
+    FaultDomain,
+    LifecycleStage,
+    gen_ai_agent_name,
+    start_span,
+)
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
@@ -333,8 +345,7 @@ def _build_role_agent(
         if skill_paths
         else None
     )
-    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
-    maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
+    maf_agent_name = gen_ai_agent_name(agent_name, default="main")
     with suppress_experimental_warnings():
         return create_harness_agent(
             chat_client,
@@ -780,11 +791,12 @@ async def run_stream(
         f"agent.run {agent_name or 'agent'}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes={
-            "af.agent.name": agent_name,
+            ATTR_AGENT_NAME: agent_name,
+            ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name, default="main"),
             "af.agent.display_name": display_name,
-            "af.agent.trigger_type": "stream",
-            "af.agent.session_id": resolved_id,
-            "af.agent.model": model,
+            ATTR_AGENT_TRIGGER_TYPE: "stream",
+            ATTR_AGENT_SESSION_ID: resolved_id,
+            ATTR_AGENT_MODEL: model,
         },
     ) as span:
         ordinary_tool_error_count = 0
@@ -899,7 +911,7 @@ async def run_stream(
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
                             yield _sse_frame(event)
-                    span.set_attribute("af.agent.outcome", "success")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "success")
                     stream_settled = True
                     try:
                         yield _sse_frame({"type": "done"})
@@ -918,7 +930,7 @@ async def run_stream(
                     if not stream_settled:
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
@@ -934,7 +946,7 @@ async def run_stream(
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                     yield _sse_frame({"type": "error", "content": str(exc)})
                 finally:
@@ -946,14 +958,14 @@ async def run_stream(
                         if usage_recorder is not None:
                             _emit_usage(usage_recorder)
         except TimeoutError:
-            span.set_attribute("af.agent.outcome", "error")
+            span.set_attribute(ATTR_AGENT_OUTCOME, "error")
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
             yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
         finally:
             span.set_attribute(
-                "af.agent.tool_error_count",
+                ATTR_AGENT_TOOL_ERROR_COUNT,
                 (delegate_error_tracker.count if delegate_error_tracker else 0)
                 + ordinary_tool_error_count,
             )

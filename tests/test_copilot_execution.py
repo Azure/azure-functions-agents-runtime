@@ -1012,6 +1012,9 @@ async def test_usage_events_deduplicate_counters_and_exclude_skill_content(
             cache_read_tokens=0,
             cache_write_tokens=2,
             duration=timedelta(seconds=1.25),
+            time_to_first_token=timedelta(milliseconds=25),
+            output_ttft=timedelta(milliseconds=40),
+            inter_token_latency=timedelta(milliseconds=5),
         ),
         id=uuid4(),
         timestamp=datetime.now(UTC),
@@ -1054,11 +1057,15 @@ async def test_usage_events_deduplicate_counters_and_exclude_skill_content(
     skill_events = [event for event in run_span.events if event.name == "af.copilot.skill.invoked"]
     assert len(usage_events) == 1
     assert usage_events[0].attributes["gen_ai.request.model"] == "reported-model"
-    assert usage_events[0].attributes["af.copilot.usage.input_tokens"] == 0
-    assert usage_events[0].attributes["af.copilot.usage.output_tokens"] == 8
-    assert usage_events[0].attributes["af.copilot.usage.reasoning_tokens"] == 3
-    assert usage_events[0].attributes["af.copilot.usage.cache_read_tokens"] == 0
+    assert usage_events[0].attributes["gen_ai.usage.input_tokens"] == 0
+    assert usage_events[0].attributes["gen_ai.usage.output_tokens"] == 8
+    assert usage_events[0].attributes["gen_ai.usage.reasoning.output_tokens"] == 3
+    assert usage_events[0].attributes["gen_ai.usage.cache_read.input_tokens"] == 0
+    assert usage_events[0].attributes["gen_ai.usage.cache_write.input_tokens"] == 2
     assert usage_events[0].attributes["af.copilot.usage.duration_ms"] == 1250
+    assert usage_events[0].attributes["af.copilot.usage.time_to_first_token_ms"] == 25
+    assert usage_events[0].attributes["af.copilot.usage.output_ttft_ms"] == 40
+    assert usage_events[0].attributes["af.copilot.usage.inter_token_latency_ms"] == 5
     assert len(skill_events) == 1
     assert skill_events[0].attributes == {"af.skill.name": "review_skill"}
     assert "private" not in repr(run_span.events)

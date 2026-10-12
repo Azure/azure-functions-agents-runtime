@@ -15,10 +15,21 @@ from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._logger import logger
 from .._observability import (
+    ATTR_AGENT_INPUT_BYTES,
+    ATTR_AGENT_MODEL,
+    ATTR_AGENT_NAME,
+    ATTR_AGENT_OUTCOME,
+    ATTR_AGENT_RESPONSE_BYTES,
+    ATTR_AGENT_SESSION_ID,
+    ATTR_AGENT_TOOL_CALL_COUNT,
+    ATTR_AGENT_TOOL_ERROR_COUNT,
+    ATTR_AGENT_TRIGGER_TYPE,
     ATTR_FAULT_DOMAIN,
+    ATTR_GEN_AI_AGENT_NAME,
     FaultDomain,
     LifecycleStage,
     capture_sensitive_data,
+    gen_ai_agent_name,
     start_span,
 )
 from .._source_marker import source_marker
@@ -161,9 +172,9 @@ def _set_run_result_attributes(span: Any, result: Any) -> None:
     """Attach non-sensitive run-summary attributes; content only when opted in."""
     tool_calls = list(getattr(result, "tool_calls", None) or [])
     content = str(getattr(result, "content", "") or "")
-    span.set_attribute("af.agent.tool_call_count", len(tool_calls))
-    span.set_attribute("af.agent.tool_error_count", _total_tool_error_count(result))
-    span.set_attribute("af.agent.response_bytes", len(content))
+    span.set_attribute(ATTR_AGENT_TOOL_CALL_COUNT, len(tool_calls))
+    span.set_attribute(ATTR_AGENT_TOOL_ERROR_COUNT, _total_tool_error_count(result))
+    span.set_attribute(ATTR_AGENT_RESPONSE_BYTES, len(content))
     span.set_content("af.agent.response", content)
 
 
@@ -179,7 +190,6 @@ def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
     }
     if capture_sensitive_data():
         payload["response"] = content
-        payload["tool_calls"] = tool_calls
     return payload
 
 
@@ -269,16 +279,17 @@ def make_agent_handler(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
+                ATTR_AGENT_NAME: resolved.slug,
+                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
                 "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": trigger_type,
-                "af.agent.session_id": session_id,
-                "af.agent.model": resolved.model,
+                ATTR_AGENT_TRIGGER_TYPE: trigger_type,
+                ATTR_AGENT_SESSION_ID: session_id,
+                ATTR_AGENT_MODEL: resolved.model,
             },
         ) as span:
             try:
                 data_json = serialize_trigger_data(trigger_data)
-                span.set_attribute("af.agent.input_bytes", len(data_json))
+                span.set_attribute(ATTR_AGENT_INPUT_BYTES, len(data_json))
                 span.set_content("af.agent.input", data_json)
                 parts: list[str] = [
                     f"Triggered by: {trigger_type}\n\nTrigger data:\n```json\n{data_json}\n```"
@@ -312,7 +323,7 @@ def make_agent_handler(
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
-                span.set_attribute("af.agent.outcome", "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "success")
 
                 if _should_log(resolved):
                     logger.info(
@@ -322,14 +333,13 @@ def make_agent_handler(
                             {
                                 "session_id": result.session_id,
                                 "response": result.content,
-                                "tool_calls": result.tool_calls,
                             },
                             ensure_ascii=False,
                             default=str,
                         ),
                     )
             except Exception as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 logger.exception(
                     "Agent execution failed: source_file=%s error=%s",
@@ -393,10 +403,11 @@ def make_http_agent_handler(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
+                ATTR_AGENT_NAME: resolved.slug,
+                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
                 "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "http",
-                "af.agent.model": resolved.model,
+                ATTR_AGENT_TRIGGER_TYPE: "http",
+                ATTR_AGENT_MODEL: resolved.model,
             },
         ) as span:
             try:
@@ -404,7 +415,7 @@ def make_http_agent_handler(
                 session_state = HarnessSessionState(
                     caller_supplied=supplied_session_id is not None
                 )
-                span.set_attribute("af.agent.session_id", session_id)
+                span.set_attribute(ATTR_AGENT_SESSION_ID, session_id)
                 try:
                     body = await req.json()
                     body_json = json.dumps(body, ensure_ascii=False, default=str)
@@ -413,7 +424,7 @@ def make_http_agent_handler(
                     body = body_bytes.decode("utf-8", errors="replace") if body_bytes else {}
                     body_json = body if isinstance(body, str) else json.dumps(body)
 
-                span.set_attribute("af.agent.input_bytes", len(body_json))
+                span.set_attribute(ATTR_AGENT_INPUT_BYTES, len(body_json))
                 span.set_content("af.agent.input", body_json)
 
                 validation_error = validate_request_body(body, resolved.input_schema)
@@ -425,7 +436,7 @@ def make_http_agent_handler(
                             resolved.name,
                             validation_error.body.decode("utf-8"),
                         )
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                     span.set_error("input validation failed", fault_domain=FaultDomain.APP)
                     span.add_event(
                         "af.input.validation_failed",
@@ -471,7 +482,7 @@ def make_http_agent_handler(
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
-                span.set_attribute("af.agent.outcome", "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "success")
 
                 if _should_log(resolved):
                     logger.info(
@@ -494,7 +505,7 @@ def make_http_agent_handler(
                             resolved.name,
                             exc,
                         )
-                        span.set_attribute("af.agent.outcome", "error")
+                        span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                         span.set_error("agent returned invalid JSON", fault_domain=FaultDomain.APP)
                         span.add_event(
                             "af.response.invalid_json",
@@ -527,7 +538,7 @@ def make_http_agent_handler(
                                 resolved.name,
                                 exc,
                             )
-                            span.set_attribute("af.agent.outcome", "error")
+                            span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                             span.set_error(
                                 "response schema validation failed", fault_domain=FaultDomain.APP
                             )
@@ -572,7 +583,7 @@ def make_http_agent_handler(
                     ),
                 )
             except SessionStorageError as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 logger.error("HTTP agent '%s' storage failed: %s", resolved.name, exc)
                 return Response(
@@ -586,7 +597,7 @@ def make_http_agent_handler(
                     ),
                 )
             except Exception as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
                 return Response(

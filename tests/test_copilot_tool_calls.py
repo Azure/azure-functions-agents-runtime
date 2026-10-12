@@ -99,9 +99,9 @@ def test_harness_sdk_results_are_rejected_instead_of_flattened():
             tool_result_text(value)
 
 
-def _start(call_id="native-1", name="skill", arguments=None):
+def _start(call_id="native-1", name="skill", arguments=None, **kwargs):
     return ToolExecutionStartData(
-        tool_call_id=call_id, tool_name=name, arguments=arguments
+        tool_call_id=call_id, tool_name=name, arguments=arguments, **kwargs
     )
 
 
@@ -310,7 +310,8 @@ def test_start_only_preserves_an_uncompleted_call_and_first_seen_order():
     assert recorded.calls[1]["result"] == "ok"
 
 
-def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch):
+@pytest.mark.parametrize("mcp_metadata", [False, True])
+def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch, mcp_metadata):
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -334,7 +335,14 @@ def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch):
             run_span=observability.current_span(),
         )
         calls.start_native(
-            _start(name="remote_lookup"),
+            _start(
+                name="remote_lookup",
+                **(
+                    {"mcp_server_name": "fixture-server", "mcp_tool_name": "lookup"}
+                    if mcp_metadata
+                    else {}
+                ),
+            ),
             event_id=start_event_id,
             timestamp=start,
         )
@@ -370,7 +378,12 @@ def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch):
     assert tool_spans[0].start_time == expected_start_ns
     assert tool_spans[0].end_time == expected_end_ns
     assert tool_spans[0].attributes["af.tool.source"] == "copilot.native"
+    assert tool_spans[0].attributes["gen_ai.tool.name"] == "remote_lookup"
     assert tool_spans[0].attributes["af.tool.outcome"] == "success"
+    if mcp_metadata:
+        assert tool_spans[0].attributes["mcp.method.name"] == "tools/call"
+    else:
+        assert "mcp.method.name" not in tool_spans[0].attributes
 
 
 @pytest.mark.parametrize(
@@ -484,6 +497,7 @@ def test_custom_tool_wrapper_claims_reserved_native_call_once(monkeypatch, nativ
     assert [span.name for span in spans].count("execute_tool host_tool") == 1
     [custom_span] = [span for span in spans if span.name == "execute_tool host_tool"]
     assert custom_span.attributes["af.tool.source"] == "copilot.wrapper"
+    assert custom_span.attributes["gen_ai.tool.name"] == "host_tool"
 
 
 def test_duplicate_custom_start_claims_one_wrapper_span(monkeypatch):

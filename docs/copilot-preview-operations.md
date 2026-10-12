@@ -234,16 +234,19 @@ subscription, the current OpenTelemetry provider, and the custom-tool wrapper.
 It adds no new settings, caps, receiver, exporter, flush/shutdown hook, or
 create/resume session-open telemetry. MAF behavior stays unchanged.
 
-Each unique public `ASSISTANT_USAGE` event is recorded as a separate
-observation on the owning `agent.run`. The existing once-only eight-field
-invocation totals stay unchanged. Reported model and duration appear only when
-the SDK reports them; missing hierarchy or timing is left incomplete rather
-than invented.
+Each unique public `ASSISTANT_USAGE` event is recorded as a custom
+`af.copilot.model.usage` span event on the owning `agent.run`. It uses standard
+`gen_ai.usage.*` fields where reported semantics match exactly; reported
+duration, TTFT, and inter-token measures remain custom `af.copilot.*` values.
+No backdated inference span is created or implied. The existing once-only
+eight-field invocation totals stay unchanged.
 
-Native-only tool accounting uses coherent id/timestamp-matched
-`tool.execution_start` / `tool.execution_complete` pairs. Custom tools restore
-captured host context before invocation, and the wrapper owns each wrapped call
-ID so one wrapped call is counted once. This preserves the host's nested
+Completion records, including completion-only records, continue to contribute
+to `AgentResult` and aggregate tool counts. A timed telemetry span requires a
+coherent call-ID/timestamp-matched `tool.execution_start` /
+`tool.execution_complete` pair. Custom tools restore captured host context
+before invocation, and the wrapper owns each wrapped call ID so one wrapped
+call is counted once. This preserves the host's nested
 `agent.run -> execute_tool delegate_<slug> -> child agent.run` trace shape for
 delegates while leaving coordinator-visible SSE limited to the delegate tool
 boundary and final child text.
@@ -256,10 +259,11 @@ boundary and final child text.
 | Workflow Sub Agent leaves | Each leaf is observed as its own run; model/duration appear only when reported by the SDK. |
 | Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
 
-The existing `ENABLE_SENSITIVE_DATA` switch still gates optional arguments and
-results, with field-level sanitization. Credentials, authorization headers,
-raw event envelopes, stack traces, prompts, reasoning text, and skill paths or
-content are never exported; skill telemetry uses the sanitized skill name only.
+`ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but
+run-log payloads never include full `tool_calls` records. Credentials,
+authorization headers, raw event envelopes, stack traces, reasoning text, and
+skill paths or content are never exported; skill telemetry uses the sanitized
+skill name only.
 Diagnostics and telemetry cleanup stay best-effort and non-throwing so they do
 not change request outcomes, cancellation, or SSE termination.
 

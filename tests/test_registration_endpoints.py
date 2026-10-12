@@ -738,6 +738,71 @@ def test_handle_chat_reports_delegate_error_count_on_span(
     assert span.attributes["af.agent.name"] != resolved.name
 
 
+def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    @contextlib.contextmanager
+    def test_start_span(name: str, *, attributes: Any = None, **_kwargs: Any):
+        with tracer.start_as_current_span(name, attributes=attributes) as span:
+            yield observability.RuntimeSpan(span)
+
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+        source_file=source_file,
+    )
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("builtin-chat-telemetry-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.start_span",
+        test_start_span,
+    )
+
+    async def fake_run_builtin_agent(*_args: Any, **kwargs: Any) -> AgentResult:
+        observability.current_span().add_event(
+            "af.copilot.model.usage",
+            {"gen_ai.usage.output_tokens": 3},
+        )
+        return AgentResult(
+            session_id=kwargs["session_id"],
+            content="ok",
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(
+        route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
+    )
+    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    [span] = exporter.get_finished_spans()
+    assert span.name == f"agent.run {resolved.slug}"
+    assert span.attributes["gen_ai.agent.name"] == resolved.slug
+    [usage_event] = [
+        event for event in span.events if event.name == "af.copilot.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 3
+
+
 def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

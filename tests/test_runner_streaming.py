@@ -568,6 +568,7 @@ async def test_run_agent_stream_continues_after_loading_skill(
     assert history_calls == ["billing"]
     [span] = spans
     assert span.attributes["af.agent.name"] == "billing"
+    assert span.attributes["gen_ai.agent.name"] == agent.name
 
 
 def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(

@@ -269,7 +269,15 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     monkeypatch.setattr(observability, "_enabled", True)
     monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
     leaf_result = runner.AgentResult("leaf-session", "leaf answer")
-    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(return_value=leaf_result))
+
+    async def fake_leaf_execution(*_args, **_kwargs):
+        observability.current_span().add_event(
+            "af.copilot.model.usage",
+            {"gen_ai.usage.output_tokens": 4},
+        )
+        return leaf_result
+
+    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fake_leaf_execution))
     leaf_runner = _copilot_runner._CopilotHarnessRunner(preview)
 
     async def delegate(task: str) -> str:
@@ -311,7 +319,63 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     assert leaf_span.parent.span_id == tool_span.context.span_id
     assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
     assert leaf_span.attributes["af.agent.outcome"] == "success"
+    assert leaf_span.attributes["gen_ai.agent.name"] == "analyst"
+    [usage_event] = [
+        event for event in leaf_span.events if event.name == "af.copilot.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 4
     assert result.text_result_for_llm == "leaf answer"
+
+
+@pytest.mark.asyncio
+async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, monkeypatch):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-sse-telemetry-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    async def fake_execution(harness, request):
+        observability.current_span().add_event(
+            "af.copilot.model.usage",
+            {"gen_ai.usage.output_tokens": 5},
+        )
+        return runner.AgentResult(
+            session_id=request.session_id,
+            content="stream reply",
+            tool_calls=[],
+            model=request.model,
+        )
+
+    monkeypatch.setattr(_copilot_execution, "run", fake_execution)
+    harness_runner = _copilot_runner._CopilotHarnessRunner(preview)
+    events = [
+        json.loads(chunk.removeprefix("data: ").strip())
+        async for chunk in harness_runner.run_agent_stream(
+            "hello",
+            deadline=asyncio.get_running_loop().time() + 5,
+            model="test-model",
+            session_id="sse-session",
+            agent_name="sse_agent",
+            tools=[],
+            mcp_tools=[],
+        )
+    ]
+
+    assert [event["type"] for event in events] == ["delta", "done"], events
+    [span] = exporter.get_finished_spans()
+    assert span.name == "agent.run sse_agent"
+    [usage_event] = [
+        event for event in span.events if event.name == "af.copilot.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 5
 
 
 @pytest.mark.asyncio
@@ -440,11 +504,15 @@ async def test_workflow_leaf_failure_closes_run_span_without_exception_content(
     tracer = provider.get_tracer("copilot-workflow-leaf-failure-test")
     monkeypatch.setattr(observability, "_enabled", True)
     monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
-    monkeypatch.setattr(
-        _copilot_execution,
-        "run",
-        AsyncMock(side_effect=RuntimeError("private session-open detail")),
-    )
+
+    async def fail_with_usage(*_args, **_kwargs):
+        observability.current_span().add_event(
+            "af.copilot.model.usage",
+            {"gen_ai.usage.output_tokens": 6},
+        )
+        raise RuntimeError("private session-open detail")
+
+    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fail_with_usage))
     leaf_runner = _copilot_runner._CopilotHarnessRunner(preview)
     parent = tracer.start_span("agent.run workflow")
 
@@ -467,6 +535,10 @@ async def test_workflow_leaf_failure_closes_run_span_without_exception_content(
     assert workflow_span.attributes["af.agent.outcome"] == "error"
     assert workflow_span.status.description != "private session-open detail"
     assert all(event.name != "exception" for event in workflow_span.events)
+    [usage_event] = [
+        event for event in workflow_span.events if event.name == "af.copilot.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 6
 
 
 @pytest.mark.asyncio

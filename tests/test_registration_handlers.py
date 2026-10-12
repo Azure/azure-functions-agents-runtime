@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
@@ -24,6 +26,7 @@ from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration._handlers import (
+    _run_log_payload,
     _tool_error_count,
     _total_tool_error_count,
     build_sandbox_tools_for_session,
@@ -50,12 +53,13 @@ class DummyRequest:
 class RecordingSpan:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any] | None]] = []
+        self.content: dict[str, str] = {}
 
     def set_attribute(self, key: str, value: Any) -> None:
         return None
 
     def set_content(self, key: str, value: str) -> None:
-        return None
+        self.content[key] = value
 
     def set_error(self, message: str, *, fault_domain: str) -> None:
         return None
@@ -822,6 +826,134 @@ def test_total_tool_error_count_does_not_misclassify_sanitized_delegate_text() -
 def test_total_tool_error_count_handles_missing_fields_gracefully() -> None:
     assert _total_tool_error_count(SimpleNamespace()) == 0
     assert _total_tool_error_count(None) == 0
+
+
+def test_sensitive_run_capture_keeps_prompts_and_responses_but_not_tool_records(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.capture_sensitive_data",
+        lambda: True,
+    )
+    span = _install_recording_span(monkeypatch)
+    tool_calls = [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-1",
+            "tool_name": "lookup",
+            "arguments": {"query": "private tool arguments"},
+            "result": "private tool response",
+        }
+    ]
+
+    async def fake_run_agent(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content="private model response",
+            session_id=kwargs["session_id"],
+            tool_calls=tool_calls,
+            delegate_error_count=0,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(_resolved_agent(response_schema=None), AgentCapabilities())
+    response = asyncio.run(handler(DummyRequest({"prompt": "private prompt"})))
+
+    assert response.status_code == 200
+    assert json.loads(span.content["af.agent.input"])["prompt"] == "private prompt"
+    assert span.content["af.agent.response"] == "private model response"
+    log_payload = _run_log_payload(
+        _resolved_agent(response_schema=None),
+        SimpleNamespace(
+            content="private model response",
+            session_id="session-123",
+            tool_calls=tool_calls,
+            delegate_error_count=0,
+        ),
+    )
+    assert log_payload["response"] == "private model response"
+    assert log_payload["tool_call_count"] == 1
+    assert "tool_calls" not in log_payload
+
+
+@pytest.mark.parametrize("entrypoint", ["http", "timer"])
+def test_agent_ingress_attaches_harness_events_to_run_span(
+    monkeypatch: Any, caplog: Any, entrypoint: str
+) -> None:
+    import logging
+
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    @contextmanager
+    def test_start_span(name: str, *, attributes: Any = None, **_kwargs: Any):
+        with tracer.start_as_current_span(name, attributes=attributes) as span:
+            yield observability.RuntimeSpan(span)
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("agent-ingress-telemetry-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.start_span",
+        test_start_span,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.capture_sensitive_data",
+        lambda: True,
+    )
+
+    async def fake_run_agent(*_args: Any, **kwargs: Any) -> Any:
+        observability.current_span().add_event(
+            "af.copilot.model.usage",
+            {"gen_ai.usage.output_tokens": 2},
+        )
+        return SimpleNamespace(
+            content="ok",
+            session_id=kwargs["session_id"],
+            tool_calls=[
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "call-1",
+                    "tool_name": "lookup",
+                    "arguments": {"query": "private"},
+                    "result": "private",
+                }
+            ],
+            delegate_error_count=0,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    resolved = _resolved_agent(response_schema=None)
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        if entrypoint == "http":
+            handler = make_http_agent_handler(resolved, AgentCapabilities())
+            response = asyncio.run(handler(DummyRequest({"prompt": "hello"})))
+            assert response.status_code == 200
+        else:
+            handler = make_agent_handler(resolved, "timer_trigger", AgentCapabilities())
+            asyncio.run(handler({"past_due": False}))
+
+    [span] = exporter.get_finished_spans()
+    assert span.name == "agent.run resolved-agent-slug"
+    assert span.attributes["gen_ai.agent.name"] == "resolved-agent-slug"
+    [usage_event] = [
+        event for event in span.events if event.name == "af.copilot.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 2
+    assert "private" not in caplog.text
+    assert '"response": "ok"' in caplog.text
+    assert '"tool_calls"' not in caplog.text
 
 
 def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(

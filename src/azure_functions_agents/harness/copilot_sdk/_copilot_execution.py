@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._logger import logger
@@ -26,6 +24,7 @@ from ._copilot_capabilities import (
     mcp_configuration,
     permission_handler,
 )
+from ._copilot_observability import CopilotEventTelemetry
 from ._copilot_preview import CopilotPreviewError
 from ._copilot_runtime import CopilotRuntime, get_runtime
 from ._copilot_session_fs import open_session_fs
@@ -47,11 +46,10 @@ if TYPE_CHECKING:
         SystemMessageConfig,
         ToolSearchConfig,
     )
-    from copilot.session_events import AssistantUsageData, PermissionRequest
+    from copilot.session_events import PermissionRequest
     from copilot.session_events import SessionEvent as CopilotSessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
-    from ..._observability import RuntimeSpan
     from ..._tool_descriptor import ToolDescriptor
     from ...runner import AgentResult
     from ._copilot_providers import ProviderTokenSource
@@ -80,7 +78,6 @@ class _SessionOptions(TypedDict):
 
 
 type _EventSink = Callable[[StreamEvent], None]
-_METADATA_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]")
 
 
 def _emit_event(event_sink: _EventSink | None, event: StreamEvent | None) -> None:
@@ -90,31 +87,6 @@ def _emit_event(event_sink: _EventSink | None, event: StreamEvent | None) -> Non
 
 def _copilot_session_id(agent_slug: str, session_id: str) -> str:
     return f"{agent_slug}-{session_id}"
-
-
-def _safe_metadata_name(value: str) -> str:
-    return _METADATA_NAME_PATTERN.sub("_", value)[:128]
-
-
-def _duration_ms(value: timedelta | None) -> float | None:
-    return value.total_seconds() * 1000 if value is not None else None
-
-
-def _record_usage_observation(span: RuntimeSpan, usage: AssistantUsageData) -> None:
-    attributes = {
-        "gen_ai.request.model": usage.model,
-        "af.copilot.usage.input_tokens": usage.input_tokens,
-        "af.copilot.usage.output_tokens": usage.output_tokens,
-        "af.copilot.usage.reasoning_tokens": usage.reasoning_tokens,
-        "af.copilot.usage.reasoning_tokens_included_in_output": True,
-        "af.copilot.usage.cache_read_tokens": usage.cache_read_tokens,
-        "af.copilot.usage.cache_write_tokens": usage.cache_write_tokens,
-        "af.copilot.usage.duration_ms": _duration_ms(usage.duration),
-        "af.copilot.usage.time_to_first_token_ms": _duration_ms(usage.time_to_first_token),
-        "af.copilot.usage.output_ttft_ms": _duration_ms(usage.output_ttft),
-        "af.copilot.usage.inter_token_latency_ms": _duration_ms(usage.inter_token_latency),
-    }
-    span.add_event("af.copilot.model.usage", attributes)
 
 
 class _RequestTokenSource:
@@ -484,7 +456,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         run_span=run_span,
         custom_tool_names=tuple(tool.name for tool in request.tools),
     )
-    usage_event_ids: set[uuid.UUID] = set()
+    telemetry = CopilotEventTelemetry(run_span)
     messages: list[str] = []
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -511,20 +483,13 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             case AssistantMessageData(content=content, parent_tool_call_id=None) if content:
                 messages.append(content)
             case AssistantUsageData(input_tokens=used_input, output_tokens=used_output):
-                if event.id not in usage_event_ids:
-                    usage_event_ids.add(event.id)
+                if telemetry.observe_usage(event.id, event.data):
                     if used_input is not None:
                         input_tokens = (input_tokens or 0) + used_input
                     if used_output is not None:
                         output_tokens = (output_tokens or 0) + used_output
-                    _record_usage_observation(run_span, event.data)
             case SkillInvokedData(name=name):
-                safe_name = _safe_metadata_name(name)
-                if safe_name:
-                    run_span.add_event(
-                        "af.copilot.skill.invoked",
-                        {"af.skill.name": safe_name},
-                    )
+                telemetry.observe_skill(name)
             case ToolExecutionStartData() as started:
                 calls.start_native(
                     started,

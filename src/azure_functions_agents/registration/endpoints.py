@@ -15,7 +15,18 @@ from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
-from .._observability import FaultDomain, LifecycleStage, start_span
+from .._observability import (
+    ATTR_AGENT_MODEL,
+    ATTR_AGENT_NAME,
+    ATTR_AGENT_OUTCOME,
+    ATTR_AGENT_SESSION_ID,
+    ATTR_AGENT_TRIGGER_TYPE,
+    ATTR_GEN_AI_AGENT_NAME,
+    FaultDomain,
+    LifecycleStage,
+    gen_ai_agent_name,
+    start_span,
+)
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
@@ -351,17 +362,18 @@ def _register_http_chat(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
+                ATTR_AGENT_NAME: resolved.slug,
+                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
                 "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "builtin_chat",
-                "af.agent.session_id": resolved_session_id,
-                "af.agent.model": resolved.model,
+                ATTR_AGENT_TRIGGER_TYPE: "builtin_chat",
+                ATTR_AGENT_SESSION_ID: resolved_session_id,
+                ATTR_AGENT_MODEL: resolved.model,
             },
         ) as span:
             try:
                 auth_error = authorize_entra_request(req.headers.get, auth)
                 if auth_error is not None:
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                     span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
                     return _json_error(
                         auth_error.message,
@@ -384,7 +396,7 @@ def _register_http_chat(
                     _session_state=session_state,
                 )
                 _set_run_result_attributes(span, result)
-                span.set_attribute("af.agent.outcome", "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "success")
                 return Response(
                     json.dumps(
                         {
@@ -406,7 +418,7 @@ def _register_http_chat(
                     ),
                 )
             except SessionStorageError as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
                 return _json_error(
                     str(exc),
@@ -418,7 +430,7 @@ def _register_http_chat(
                     ),
                 )
             except ValueError as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)
                 return _json_error(
                     str(exc),
@@ -430,7 +442,7 @@ def _register_http_chat(
                     ),
                 )
             except Exception as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 error_msg = _format_exception_message(exc)
                 logger.error(
@@ -578,10 +590,11 @@ def _register_mcp_endpoint(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
+                ATTR_AGENT_NAME: resolved.slug,
+                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
                 "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "builtin_mcp",
-                "af.agent.model": resolved.model,
+                ATTR_AGENT_TRIGGER_TYPE: "builtin_mcp",
+                ATTR_AGENT_MODEL: resolved.model,
             },
         ) as span:
             session_id: str | None = None
@@ -596,13 +609,13 @@ def _register_mcp_endpoint(
                 session_state = HarnessSessionState(caller_supplied=session_id is not None)
                 prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
                 if not isinstance(prompt, str) or not prompt.strip():
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                     span.set_error("Missing 'prompt'", fault_domain=FaultDomain.APP)
                     return json.dumps(
                         {"error": "Missing 'prompt'", "session_id": session_id}
                     )
 
-                span.set_attribute("af.agent.session_id", session_id)
+                span.set_attribute(ATTR_AGENT_SESSION_ID, session_id)
                 resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
                 result = await _run_builtin_agent(
                     prompt.strip(),
@@ -623,9 +636,9 @@ def _register_mcp_endpoint(
                 # with it (N1) instead of leaving the pre-call `None` in place,
                 # which otherwise left this attribute permanently unset for
                 # every caller-omitted-session-id turn.
-                span.set_attribute("af.agent.session_id", resolved_session_id)
+                span.set_attribute(ATTR_AGENT_SESSION_ID, resolved_session_id)
                 _set_run_result_attributes(span, result)
-                span.set_attribute("af.agent.outcome", "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "success")
                 return json.dumps(
                     {
                         "session_id": (
@@ -639,7 +652,7 @@ def _register_mcp_endpoint(
                     }
                 )
             except Exception as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 error_msg = _format_exception_message(exc)
                 logger.error(

@@ -69,11 +69,12 @@ runtime's worker spans. Use the [Quick KQL](#quick-kql) below to pull a whole ru
 
 ## Attribute naming: what `af.` means
 
-Every attribute the runtime adds is prefixed **`af.`** — short for **Azure Functions agents**.
-The prefix:
+Custom runtime attributes use the **`af.`** prefix — short for **Azure Functions agents**.
+Standard OpenTelemetry and GenAI attributes are reused when their semantics match the value.
+This distinction:
 
-- keeps our attributes from colliding with MAF's `gen_ai.*` or OpenTelemetry semantic conventions,
-- makes them trivial to query — *everything we add starts with `af.`*.
+- keeps custom runtime attributes separate from standard names,
+- lets queries use standard names for reported model, token-usage, agent, and tool metadata.
 
 Four sub-namespaces group the detail, plus two cross-cutting attributes:
 
@@ -86,8 +87,11 @@ Four sub-namespaces group the detail, plus two cross-cutting attributes:
 | `af.fault_domain`, `af.lifecycle_stage` | cross-cutting; may appear on any runtime span |
 
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
-name — for example `server.address` for the session-pool host. MAF keeps emitting its own
-`gen_ai.*` spans (agent invocation, chat, tool calls, token usage); we don't touch those.
+name — for example `server.address` for the session-pool host. MAF continues emitting its own
+`gen_ai.*` model/tool spans. Copilot emits the same standard agent/tool names and token-usage
+attributes where the SDK reports matching semantics; its usage observation remains a custom event
+on the owning `agent.run`, not a synthetic model span. A timed Copilot MCP tool span sets
+`mcp.method.name=tools/call` only when the SDK event identifies an MCP server/tool invocation.
 
 The Copilot preview addendum reuses the active turn's existing session-event
 subscription, the current OpenTelemetry provider, and the runtime's custom-tool
@@ -128,14 +132,17 @@ Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 In the default-off Copilot preview, turn-scoped tool accounting comes from the
 active turn's public SDK events rather than a second receiver. Native MCP and
 `skill` / `view` / `bash` calls, including permission denials, populate
-`AgentResult.tool_calls` and the existing tool/error counts only from coherent
-`tool.execution_start` / `tool.execution_complete` pairs that share native
-call-ID ownership and matched timestamps; incomplete pairs stay incomplete
-rather than being guessed. The custom wrapper restores captured host context
-before invocation, owns each wrapped call ID, and deduplicates native metadata
-so one wrapped call is counted once. Each unique public `ASSISTANT_USAGE` event
-becomes its own usage observation on the owning `agent.run`, with model and
-duration attached only when the SDK reports them. Those observations stay
+`AgentResult.tool_calls` and the existing tool/error counts from completion
+records, including completion-only records. A timed telemetry span is emitted
+only when start and completion records have coherent call-ID ownership and
+matched timestamps; incomplete or ambiguous timing is not guessed. The custom
+wrapper restores captured host context before invocation, owns each wrapped
+call ID, and deduplicates native metadata so one wrapped call is counted once.
+Each unique public `ASSISTANT_USAGE` event becomes a custom
+`af.copilot.model.usage` span event on the owning `agent.run`. It uses standard
+`gen_ai.usage.*` fields where the reported semantics match exactly; reported
+duration, TTFT, and inter-token measures remain custom `af.copilot.*` values.
+No backdated inference span is created or implied. These observations stay
 separate from the existing once-only eight-field invocation totals.
 `skill.invoked` metadata is not an extra tool call. The same sensitive-data
 policy applies, and counting once is not a guarantee of exactly-once tool
@@ -185,8 +192,8 @@ Copilot preview namespace. Runtime `af.agent.name` stays the canonical slug.
 
 These `agent.run {name}` span events mark runtime-owned input/output-contract boundaries. They carry
 only non-sensitive metadata (names/status/counts — never request/response/model content). MAF's
-`gen_ai.*` child spans already cover per-model/per-tool detail, so these events intentionally track
-runtime milestones rather than duplicating tool/model spans.
+`gen_ai.*` child spans cover its per-model/per-tool detail; Copilot uses its turn-scoped usage event
+and tool spans for reported detail.
 
 - `af.input.validation_failed` — HTTP input-schema validation failed before agent execution; includes
   `af.fault_domain=app` and `af.http.status_code`.
@@ -337,10 +344,11 @@ Microsoft Agent Framework, **default off**.
 - **On:** content attributes are attached (bounded in length): `af.agent.input`, `af.agent.response`,
   `af.dynamic_session.code` / `.stdout` / `.stderr`, `af.delegate.task` / `.result`, plus MAF
   prompt/response/tool-arg content (via `enable_instrumentation(enable_sensitive_data=True)`).
-- **Copilot addendum:** optional tool arguments/results still follow the same switch, but only after
-  field-level bounded sanitization. Skill telemetry keeps the sanitized skill name only.
+  Copilot prompt/request and response capture are also permitted by this switch.
+- **Copilot addendum:** run-log payloads never include full `tool_calls` records,
+  regardless of the switch. Skill telemetry keeps the sanitized skill name only.
 - **Never captured, regardless of the flag:** secrets — MCP `Authorization` headers/tokens,
-  connection strings, raw native envelopes, stack traces, prompts, reasoning text, skill paths or
+  connection strings, raw native envelopes, stack traces, reasoning text, skill paths or
   content, and the ACA system key. Endpoints are reduced to host only. The `web_request` span never
   carries the full request URL (query string or userinfo stripped), request/response bodies, or
   header values — it is host/status/size metadata only, unaffected by `ENABLE_SENSITIVE_DATA`.

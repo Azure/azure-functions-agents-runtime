@@ -34,20 +34,17 @@ if TYPE_CHECKING:
 # Conventions
 # ---------------------------------------------------------------------------
 #
-# Attribute naming: every attribute this runtime adds is prefixed ``af.`` — short for
-# "Azure Functions agents". The prefix keeps our attributes from colliding with Microsoft Agent
-# Framework's ``gen_ai.*`` attributes or OpenTelemetry semantic conventions, and makes them trivial
-# to query ("everything we add starts with af."). A few sub-namespaces group the details:
+# Custom runtime attributes use the ``af.`` prefix — short for "Azure Functions agents".
+# Standard GenAI attributes are reused when their semantics match the reported value. A few
+# ``af.`` sub-namespaces group the details:
 #
 #   * ``af.agent.*``            — attributes on the per-run ``agent.run {name}`` span.
 #   * ``af.dynamic_session.*``  — attributes on the ``dynamic_session.execute`` (sandbox) span.
 #   * ``af.delegate.*``         — attributes on the ``execute_tool delegate_<slug>`` span added
 #                                 for a chat-time sub-agent delegation (FRD 0007).
 #
-# Three ``af.*`` attributes are cross-cutting and can appear on any runtime span: fault domain,
-# lifecycle stage, and operation id (below). We reuse standard OTel semantic-convention attributes
-# where they already exist (e.g. ``server.address`` for the session-pool host) instead of inventing
-# an ``af.`` name.
+# Fault domain, lifecycle stage, and operation id are cross-cutting ``af.*`` attributes (below).
+# Shared run-attribute keys are defined once here so both harnesses emit the same names.
 
 #: Attribute that classifies which layer a failure belongs to (set only on failing spans).
 ATTR_FAULT_DOMAIN = "af.fault_domain"
@@ -55,6 +52,29 @@ ATTR_FAULT_DOMAIN = "af.fault_domain"
 ATTR_LIFECYCLE_STAGE = "af.lifecycle_stage"
 #: Correlation id (the active trace id) propagated to ACA so its telemetry lines up with the run.
 ATTR_OPERATION_ID = "af.operation_id"
+
+# Run attributes shared by registration surfaces and both execution harnesses.
+ATTR_AGENT_NAME = "af.agent.name"
+ATTR_AGENT_TRIGGER_TYPE = "af.agent.trigger_type"
+ATTR_AGENT_SESSION_ID = "af.agent.session_id"
+ATTR_AGENT_MODEL = "af.agent.model"
+ATTR_AGENT_OUTCOME = "af.agent.outcome"
+ATTR_AGENT_TOOL_CALL_COUNT = "af.agent.tool_call_count"
+ATTR_AGENT_TOOL_ERROR_COUNT = "af.agent.tool_error_count"
+ATTR_AGENT_INPUT_BYTES = "af.agent.input_bytes"
+ATTR_AGENT_RESPONSE_BYTES = "af.agent.response_bytes"
+ATTR_GEN_AI_AGENT_NAME = "gen_ai.agent.name"
+ATTR_GEN_AI_TOOL_NAME = "gen_ai.tool.name"
+
+# Standard GenAI attributes are used only where the reported value has the same meaning.
+ATTR_GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
+ATTR_GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+ATTR_GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS = "gen_ai.usage.reasoning.output_tokens"
+ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
+ATTR_GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS = "gen_ai.usage.cache_write.input_tokens"
+ATTR_MCP_METHOD_NAME = "mcp.method.name"
+MCP_METHOD_TOOLS_CALL = "tools/call"
 
 _TRACER_NAME = "azure.functions.AgentRuntime"
 
@@ -118,6 +138,15 @@ def is_observability_enabled() -> bool:
 def capture_sensitive_data() -> bool:
     """Return whether sensitive content may be attached to telemetry (default False)."""
     return _capture_sensitive_data
+
+
+def gen_ai_agent_name(agent_slug: str | None, *, default: str | None = None) -> str | None:
+    """Match MAF's app-qualified GenAI agent name without changing the runtime slug."""
+    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
+    if not site_name:
+        return agent_slug
+    name = agent_slug or default
+    return f"{site_name}/{name}" if name else None
 
 
 def _resolve_capture_sensitive_data() -> bool:

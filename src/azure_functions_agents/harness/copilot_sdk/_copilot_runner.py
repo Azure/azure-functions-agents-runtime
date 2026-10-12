@@ -14,7 +14,18 @@ from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
-from ..._observability import FaultDomain, LifecycleStage, start_span
+from ..._observability import (
+    ATTR_AGENT_MODEL,
+    ATTR_AGENT_NAME,
+    ATTR_AGENT_OUTCOME,
+    ATTR_AGENT_SESSION_ID,
+    ATTR_AGENT_TRIGGER_TYPE,
+    ATTR_GEN_AI_AGENT_NAME,
+    FaultDomain,
+    LifecycleStage,
+    gen_ai_agent_name,
+    start_span,
+)
 from ..._tool_descriptor import ToolDescriptor, ToolInput
 from ...config import ResolvedAgent, SubagentRef
 from ...config.schema import AgentConfiguration
@@ -263,11 +274,12 @@ class _CopilotHarnessRunner:
                 f"agent.run {agent_name or 'agent'}",
                 lifecycle_stage=LifecycleStage.AGENT_RUN,
                 attributes={
-                    "af.agent.name": agent_name,
+                    ATTR_AGENT_NAME: agent_name,
+                    ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name),
                     "af.agent.display_name": display_name,
-                    "af.agent.trigger_type": "stream",
-                    "af.agent.session_id": resolved_id,
-                    "af.agent.model": model,
+                    ATTR_AGENT_TRIGGER_TYPE: "stream",
+                    ATTR_AGENT_SESSION_ID: resolved_id,
+                    ATTR_AGENT_MODEL: model,
                 },
             ) as span:
                 execution = asyncio.create_task(execute())
@@ -292,13 +304,13 @@ class _CopilotHarnessRunner:
                         yield f"data: {json.dumps(ContentEvent(type='message', content=result.content))}\n\n"
                     elif not emitted_text and result.content:
                         yield f"data: {json.dumps(ContentEvent(type='delta', content=result.content))}\n\n"
-                    span.set_attribute("af.agent.outcome", "success")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "success")
                     yield f"data: {json.dumps(DoneEvent(type='done'))}\n\n"
                 except asyncio.CancelledError:
-                    span.set_attribute("af.agent.outcome", "cancelled")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "cancelled")
                     raise
                 except Exception as exc:
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                     span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
                     if session_state.resumable and not emitted_session:
                         yield f"data: {json.dumps(SessionEvent(type='session', session_id=resolved_id))}\n\n"
@@ -333,9 +345,10 @@ class _CopilotHarnessRunner:
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=False,
             attributes={
-                "af.agent.name": resolved.slug,
+                ATTR_AGENT_NAME: resolved.slug,
+                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
                 "af.agent.execution_role": execution_role,
-                "af.agent.model": resolved_model,
+                ATTR_AGENT_MODEL: resolved_model,
             },
         ) as span:
             try:
@@ -363,12 +376,12 @@ class _CopilotHarnessRunner:
                     ),
                 )
             except asyncio.CancelledError:
-                span.set_attribute("af.agent.outcome", "cancelled")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "cancelled")
                 raise
             except Exception:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
                 raise
-            span.set_attribute("af.agent.outcome", "success")
+            span.set_attribute(ATTR_AGENT_OUTCOME, "success")
         return result.content
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:

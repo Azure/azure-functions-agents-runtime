@@ -350,21 +350,25 @@ This addendum extends the Copilot execution contract; it does not change MAF.
   destination. Do not add a subscription, settings, sampling, caps, exporters,
   flush/shutdown calls, or create/resume telemetry; keep
   `continue_pending_work=False`.
-- Emit each unique public `ASSISTANT_USAGE` event as a model-usage observation
-  on its owning `agent.run`, with reported model and duration when available.
-  Keep observations separate from unchanged, once-only eight-field invocation
-  totals; expose extra measures only when unambiguous and separately labeled.
+- Emit each unique public `ASSISTANT_USAGE` event as a custom
+  `af.copilot.model.usage` span event on its owning `agent.run`. Use standard
+  `gen_ai.usage.*` fields where reported semantics match exactly; reported
+  duration, TTFT, and inter-token measures remain custom `af.copilot.*` values.
+  Do not create or imply a backdated inference span. Keep observations separate
+  from unchanged, once-only eight-field invocation totals.
 - Capture and reactivate host context before custom-tool invocation. Native
   custom events are metadata-only; the wrapper owns each custom call ID.
-  Native-only tools use coherent ID/timestamp-matched events or remain
-  incomplete. Preserve the nested
+  Completion records continue to contribute to `AgentResult` and aggregate
+  tool counts; emit a timed telemetry span only for a coherent
+  ID/timestamp-matched start/complete pair. Preserve the nested
   `agent.run -> execute_tool delegate_<slug> -> child agent.run` trace.
-- Export only allowlisted telemetry. Tool arguments/results are content gated
-  by the existing sensitive-data switch and field-level bounded sanitization;
-  credentials, authorization headers, raw envelopes, stacks, prompts, reasoning
-  text, and skill content/paths are never exported. Skill events identify the
-  sanitized name only. Content-free diagnostics and best-effort telemetry
-  cleanup must not change results, errors, cancellation, or SSE termination.
+- Export only allowlisted telemetry. `ENABLE_SENSITIVE_DATA` may enable prompt/
+  request and response capture, but run-log payloads never include full
+  `tool_calls` records. Credentials, authorization headers, raw envelopes,
+  stacks, reasoning text, and skill content/paths are never exported. Skill
+  events identify the sanitized name only. Content-free diagnostics and
+  best-effort telemetry cleanup must not change results, errors, cancellation,
+  or SSE termination.
 - Coverage is turn-scoped. Do not fabricate model spans or missing timing,
   claim complete native hierarchy, or promise recovery of lost events.
 
@@ -407,7 +411,7 @@ previously approved harness decisions above.
 | --- | --- | --- | --- | --- | --- |
 | 21 | Telemetry source and scope | new receiver / existing turn events and wrapper | Reuse the existing provider, active-turn subscription, and custom-tool wrapper; add no telemetry settings, event caps, or session-opening coverage. | Human (@larohra) | 2026-10-12 |
 | 22 | Trace and tool ownership | native callback context / explicit host context and wrapper ownership | Restore captured host context before custom invocation; preserve nested delegate run/tool/leaf spans, with matched native events only for native-only tools. | Human (@larohra) | 2026-10-12 |
-| 23 | Usage and privacy | merge observations into totals / separate observations and allowlisted telemetry | Deduplicate reported usage observations separately from unchanged invocation totals; omit ambiguous fields and isolate telemetry failures from request outcomes. | Human (@larohra) | 2026-10-12 |
+| 23 | Usage and privacy | merge observations into totals / separate observations and allowlisted telemetry | Deduplicate reported usage observations separately from unchanged invocation totals; allow prompt/request and response capture but never full `tool_calls` records in run logs; omit ambiguous fields and isolate telemetry failures from request outcomes. | Human (@larohra) | 2026-10-12 |
 
 ## 6. Feature-level acceptance and test plan
 

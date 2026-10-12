@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from ..._observability import (
+    ATTR_GEN_AI_TOOL_NAME,
+    ATTR_MCP_METHOD_NAME,
+    MCP_METHOD_TOOLS_CALL,
     LifecycleStage,
     RuntimeSpan,
     record_timed_span,
@@ -83,6 +86,7 @@ class _ToolCall:
     telemetry_native_complete: bool = False
     telemetry_native_event_ids: set[UUID] = field(default_factory=set)
     telemetry_incomplete_emitted: bool = False
+    telemetry_mcp: bool = False
 
     def public_record(self) -> ToolCallEvidence:
         record: ToolCallEvidence = {
@@ -216,6 +220,7 @@ class CopilotToolCalls:
             parent_context=self._parent_context,
             record_exception=False,
             attributes={
+                ATTR_GEN_AI_TOOL_NAME: name,
                 "af.tool.name": name,
                 "af.tool.source": "copilot.wrapper",
             },
@@ -238,6 +243,9 @@ class CopilotToolCalls:
         timestamp: datetime | None = None,
     ) -> None:
         record = self._record(data.tool_call_id)
+        record.telemetry_mcp = (
+            data.mcp_server_name is not None or data.mcp_tool_name is not None
+        )
         if data.tool_name in self._custom_tool_names:
             record.telemetry_reserved = True
         self._observe_native_event(record, event_id)
@@ -351,19 +359,23 @@ class CopilotToolCalls:
             self._mark_incomplete(record, "invalid_interval")
             return
         name = _safe_name(record.tool_name) or "unknown"
+        attributes: dict[str, Any] = {
+            ATTR_GEN_AI_TOOL_NAME: name,
+            "af.tool.name": name,
+            "af.tool.source": "copilot.native",
+            "af.tool.outcome": (
+                "success" if data.success and data.error is None else "error"
+            ),
+        }
+        if record.telemetry_mcp:
+            attributes[ATTR_MCP_METHOD_NAME] = MCP_METHOD_TOOLS_CALL
         emitted = record_timed_span(
             f"execute_tool {name}",
             parent_context=self._parent_context,
             start_time_ns=start_ns,
             end_time_ns=end_ns,
             lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
-            attributes={
-                "af.tool.name": name,
-                "af.tool.source": "copilot.native",
-                "af.tool.outcome": (
-                    "success" if data.success and data.error is None else "error"
-                ),
-            },
+            attributes=attributes,
         )
         if not emitted:
             self._mark_incomplete(record, "unavailable_interval")
