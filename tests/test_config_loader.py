@@ -727,6 +727,22 @@ def _write_valid_agent_markdown(path: Path, *, name: str, description: str) -> N
         pytest.param("info.Claude.MD", "agents", "info.Claude.MD", False, "info", id="prefixed-claude-mixed-case-in-agents-folder"),
         pytest.param("report.AGENT.md", "top-level", "report.AGENT.md", False, "report", id="agent-suffix-uppercase"),
         pytest.param("data.Agent.MD", "top-level", "data.Agent.MD", False, "data", id="agent-suffix-mixed-case"),
+        pytest.param(
+            "summarizer.hostedskill.md",
+            "top-level",
+            "summarizer.hostedskill.md",
+            False,
+            "summarizer",
+            id="hostedskill-suffix",
+        ),
+        pytest.param(
+            "main.HOSTEDSKILL.MD",
+            "agents",
+            "main.HOSTEDSKILL.MD",
+            True,
+            "main",
+            id="hostedskill-suffix-uppercase-main-in-agents-folder",
+        ),
     ],
 )
 def test_load_agent_specs_flexible_naming_normalizes_and_marks_main(
@@ -818,4 +834,21 @@ def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> Non
     assert {spec.name for spec in specs if spec.is_main} == {"Default Agent", "Main Agent"}
     assert Path(next(spec for spec in specs if spec.name == "Default Agent").source_file).name == "agent.md"
     assert Path(next(spec for spec in specs if spec.name == "Main Agent").source_file).name == "main.agent.md"
+
+
+def test_load_agent_specs_ignores_unsupported_hostedskill_filename_shapes(
+    tmp_path: Path,
+) -> None:
+    for filename in (
+        "hostedskill.md",
+        "summary.hosted_skill.md",
+        "summary.hostedskillmd",
+    ):
+        _write_valid_agent_markdown(
+            tmp_path / filename,
+            name=filename,
+            description="Unsupported filename shape",
+        )
+
+    assert load_agent_specs(tmp_path, strict=True) == []
 

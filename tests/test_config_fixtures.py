@@ -840,3 +840,25 @@ def test_hosted_skill_endpointless_agent_fixture() -> None:
     assert internal.builtin_endpoints == BuiltinEndpointsConfig()
     assert internal.subagents == []
     validate_resolved_agent(internal, discovered_mcp_names=[], discovered_skills=[])
+
+
+# ---------------------------------------------------------------------------
+# 25 — HostedSkill markdown suffix uses the normal config pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_hostedskill_suffix_fixture() -> None:
+    fixture = FIXTURES_ROOT / "25_hostedskill_suffix"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+
+    assert len(specs) == 1
+    assert Path(specs[0].source_file).name == "summarizer.hostedskill.md"
+
+    resolved = compose(specs[0], global_config)
+
+    assert resolved.slug == "summarizer"
+    assert resolved.trigger is None
+    assert resolved.builtin_endpoints == BuiltinEndpointsConfig()
+    validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])

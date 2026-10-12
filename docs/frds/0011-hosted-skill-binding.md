@@ -4,7 +4,7 @@ title: HostedSkill binding
 status: Finalized
 author: victoriahall
 created: 2026-10-05
-updated: 2026-10-09
+updated: 2026-10-12
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1362
 pull_requests: []
@@ -26,6 +26,8 @@ Agent Framework (MAF) implementation.
 
 The feature ships in `azurefunctions-agents-runtime`. It is not a new extension
 package, Functions host binding type, worker converter, or harness provider.
+The additive `*.hostedskill.md` filename suffix is a case-insensitive authoring
+alias for `*.agent.md`; it communicates intent without changing agent behavior.
 
 ## 2. Motivation / problem
 
@@ -68,6 +70,8 @@ second schema or duplicate connection settings in the decorator.
   history, usage accounting, and observability.
 - Let a `.agent.md` file exist solely as an internal HostedSkill target without
   registering a trigger or built-in endpoint.
+- Discover prefixed `*.hostedskill.md` files through the same pipeline and
+  derive identity from the filename prefix.
 - Fail with actionable diagnostics for unknown agents, invalid decorator use,
   missing provider configuration, unsupported capabilities, malformed existing
   frontmatter, and invalid structured responses.
@@ -81,7 +85,7 @@ second schema or duplicate connection settings in the decorator.
 - A new package in `azure-functions-python-extensions`, provider entry point,
   Functions host binding, worker converter, or generated binding metadata.
 - Exposing raw MAF, Copilot SDK, LangGraph, or other harness objects or options.
-- A new `.agent.md`, `agents.config.yaml`, provider, connection, or
+- A new frontmatter, `agents.config.yaml`, provider, connection, or
   authentication schema.
 - File-path declarations or binding-level overrides for model, provider,
   timeout, tools, skills, MCP, connection, or instructions.
@@ -102,7 +106,7 @@ pipeline authoritative and avoids a second interpretation of frontmatter.
 
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
-| discover | `config/loader.py`, `discovery/*` | No new discovery format. Existing agent files, project tools, MCP servers, and skills remain the complete inputs. |
+| discover | `config/loader.py`, `_slug.py`, `discovery/*` | Discover case-insensitive `*.hostedskill.md` files as aliases of `*.agent.md`; existing project tools, MCP servers, and skills remain the complete inputs. |
 | translate | `config/merge.py`, `config/validation.py` | Reuse `ResolvedAgent`. Permit a fully validated agent with no external surface so it can be an inert internal catalog entry. |
 | compose | `app.py`, `registration/catalog.py`, `_hosted_skill_app.py` | Build the existing complete catalog before app mutation, then initialize an enhanced FunctionApp or DFApp with that catalog and the frozen app harness. |
 | register | `_hosted_skill_app.py`, existing Azure registration modules | Add a Python decorator that wraps an application handler and hides its injected parameter. Register no new host binding type. Existing automatic surfaces are unchanged. |
@@ -135,6 +139,21 @@ async def prepare_order(
 filename. For example, `order-preprocessor.agent.md` is selected with
 `agent_name="order-preprocessor"`. The decorator accepts no path and no agent
 configuration overrides. An unknown slug fails when the decorator is applied.
+
+Authors may instead use a prefixed `<name>.hostedskill.md` filename. The suffix
+is case-insensitive and the complete suffix is stripped for identity, so
+`order-preprocessor.hostedskill.md` has the same slug as
+`order-preprocessor.agent.md`. It is a pure authoring alias: triggers, built-in
+endpoints, delegation, and all other behavior still come from configuration.
+The real filename remains in `source_file` and diagnostics.
+
+`main.hostedskill.md` is a regular prefixed file whose `main` prefix gives it
+main-agent status. Bare `hostedskill.md` is not a single-agent alias; bare alias
+behavior remains limited to `agent.md` and `CLAUDE.md`. Files using any
+supported naming pattern that resolve to the same slug fail through the
+existing duplicate-slug check, including `summary.hostedskill.md` with
+`summary.agent.md` or `summary.claude.md`, and `main.hostedskill.md` with bare
+`agent.md` or `CLAUDE.md`.
 
 The decorated function must be declared with `async def`, and the named
 parameter must be positional-or-keyword or keyword-only. The decorator resolves
@@ -458,6 +477,11 @@ optional app root and produce equivalent composed apps. The deliberate
 compatibility change is that a valid endpoint-less agent file no longer fails
 startup and instead becomes an inert catalog entry.
 
+The `*.hostedskill.md` alias is additive. An existing file with that suffix was
+previously ignored and becomes discoverable after upgrade. If its derived slug
+collides with another discovered agent, startup fails with the existing
+duplicate-slug diagnostic rather than selecting one file by precedence.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -485,6 +509,7 @@ startup and instead becomes an inert catalog entry.
 | 21 | Constructor typing and identity | Pretend facade is runtime base / expose concrete constructors / separate constructor and app alias | Supersede the public-concrete-class clause in the earlier **Enhanced app typing** choice: make the facade non-subclassable, annotate `__new__` with public `HostedSkillsApp`, do not promise facade `isinstance`, and stop exporting catalog/harness concrete constructors from the package root | Human | 2026-10-09 |
 | 22 | Mypy constructor inference | Direct public class annotation / untyped cast at call sites / conditional runtime class and typing declaration | Define the real public `__new__` facade class at runtime and declare the same public symbol under `TYPE_CHECKING` through a callable protocol returning `HostedSkillsApp`; this preserves class identity and runtime constructor/subclass behavior while making strict mypy infer the concrete-app union | Agent | 2026-10-09 |
 | 23 | Constructor name and adoption | Plural constructor promoted everywhere / singular additive constructor / factory only | Supersede decisions 20-22 only where naming and adoption differ: expose singular `HostedSkillFunctionApp(app_root=None)` with `HostedSkillApp` typing, retain `create_function_app()` as the default in existing samples/tests/docs, retain the `HostedSkillDFApp` compatibility export, and adopt the constructor only in HostedSkill-specific guidance and its dedicated sample | Human | 2026-10-09 |
+| 24 | HostedSkill filename | Pure alias / HostedSkill-only restrictions / no new suffix | Discover case-insensitive prefixed `*.hostedskill.md` as a pure `.agent.md` alias with prefix-derived identity, no bare alias, and existing duplicate-slug behavior | Human | 2026-10-12 |
 
 ## 6. Test plan
 
@@ -534,7 +559,13 @@ startup and instead becomes an inert catalog entry.
   behaviorally equivalent to the compatibility factory: same selected concrete
   type and registered functions for the same project.
 - [ ] Integration: a deterministic route invokes an injected HostedSkill backed
-  by an existing `.agent.md` without repeating agent or connection settings.
+  by an existing markdown agent without repeating agent or connection settings.
+- [ ] Unit: discovery and slug derivation cover top-level and `agents/`
+  `*.hostedskill.md` files, case-only suffix variants, `main.hostedskill.md`,
+  preserved source paths, ignored bare/structurally different filenames, and
+  collisions with every existing naming pattern.
+- [ ] Fixture: a HostedSkill-suffixed agent loads through a dedicated config
+  scenario and the hybrid sample composes with its renamed markdown file.
 - [ ] Integration: decorated and undecorated handlers coexist in one app without
   changing each other's signatures, registration, or execution, and concurrent
   HostedSkill invocations do not mutate shared catalog state.
@@ -556,8 +587,8 @@ selection.
   adapter, MAF event core, Copilot capability boundary, public constructor/private
   composition split, and package ownership.
 - [ ] `docs/front-matter-spec.md` - document identity-slug selection,
-  endpoint-less internal agents, reused versus surface-only fields, and version
-  1 limitations.
+  endpoint-less internal agents, the prefixed `*.hostedskill.md` alias, reused
+  versus surface-only fields, and version 1 limitations.
 - [ ] `docs/getting-started.md` - add hybrid usage and align Foundry model wording
   with current runtime fallback.
 - [ ] `README.md` - add the concise HostedSkill API and deterministic/agentic
@@ -600,3 +631,8 @@ selection.
   architecture reviews on 2026-10-09 confirmed the runtime facade, callable
   typing protocol, public app alias, package exports, and strict-typing contract
   with no remaining blockers.
+- **Filename refinement sign-off:** victoriahall, 2026-10-12. Approved
+  `*.hostedskill.md` as a case-insensitive pure alias with prefix-derived
+  identity and existing duplicate-slug behavior. An independent architecture
+  review found no blockers after collision, main-agent, and bare-filename
+  semantics were made explicit.
