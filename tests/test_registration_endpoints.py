@@ -773,6 +773,7 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
     )
 
     async def fake_run_builtin_agent(*_args: Any, **kwargs: Any) -> AgentResult:
+        assert kwargs["_session_state"].caller_supplied is True
         observability.current_span().add_event(
             "af.copilot.model.usage",
             {"gen_ai.usage.output_tokens": 3},
@@ -791,7 +792,11 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
     chat_route = next(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
     )
-    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+    response = asyncio.run(
+        chat_route["handler"](
+            DummyRequest({"prompt": "hello"}, headers={"x-ms-session-id": "continued"})
+        )
+    )
 
     assert response.status_code == 200
     [span] = exporter.get_finished_spans()
