@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._logger import logger
 from ..._observability import (
+    SpanOutcome,
     capture_current_context,
     current_span,
 )
@@ -189,16 +190,16 @@ def _tool(
                 )
                 text = tool_result_text(result)
             except asyncio.CancelledError:
-                span.set_attribute("af.tool.outcome", "cancelled")
+                span.set_attribute("af.tool.outcome", SpanOutcome.CANCELLED)
                 raise
             except Exception:
                 logger.warning("Copilot custom tool failed: tool=%s", function.name)
                 text = '{"error":"Custom tool failed or returned unsupported content."}'
-                span.set_attribute("af.tool.outcome", "error")
+                span.set_attribute("af.tool.outcome", SpanOutcome.ERROR)
                 calls.complete_custom(invocation.tool_call_id, text, success=False)
                 _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
                 return ToolResult(text_result_for_llm=text, result_type="failure")
-            span.set_attribute("af.tool.outcome", "success")
+            span.set_attribute("af.tool.outcome", SpanOutcome.SUCCESS)
             calls.complete_custom(invocation.tool_call_id, text, success=True)
             _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
             return ToolResult(text_result_for_llm=text, result_type="success")

@@ -15,15 +15,12 @@ from azure_functions_agents import runner as _runner
 from ..._agent_identity import agent_id
 from ..._logger import logger
 from ..._observability import (
-    ATTR_AGENT_MODEL,
-    ATTR_AGENT_NAME,
     ATTR_AGENT_OUTCOME,
-    ATTR_AGENT_SESSION_ID,
     ATTR_AGENT_TOOL_ERROR_COUNT,
-    ATTR_AGENT_TRIGGER_TYPE,
-    ATTR_GEN_AI_AGENT_NAME,
     FaultDomain,
     LifecycleStage,
+    SpanOutcome,
+    agent_run_attributes,
     gen_ai_agent_name,
     start_span,
 )
@@ -790,14 +787,14 @@ async def run_stream(
     with start_span(
         f"agent.run {agent_name or 'agent'}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,
-        attributes={
-            ATTR_AGENT_NAME: agent_name,
-            ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name, default="main"),
-            "af.agent.display_name": display_name,
-            ATTR_AGENT_TRIGGER_TYPE: "stream",
-            ATTR_AGENT_SESSION_ID: resolved_id,
-            ATTR_AGENT_MODEL: model,
-        },
+        attributes=agent_run_attributes(
+            agent_name=agent_name,
+            display_name=display_name,
+            trigger_type="stream",
+            session_id=resolved_id,
+            model=model,
+            gen_ai_default="main",
+        ),
     ) as span:
         ordinary_tool_error_count = 0
         try:
@@ -911,7 +908,7 @@ async def run_stream(
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
                             yield _sse_frame(event)
-                    span.set_attribute(ATTR_AGENT_OUTCOME, "success")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
                     stream_settled = True
                     try:
                         yield _sse_frame({"type": "done"})
@@ -930,7 +927,7 @@ async def run_stream(
                     if not stream_settled:
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
-                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
@@ -946,7 +943,7 @@ async def run_stream(
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
-                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                     yield _sse_frame({"type": "error", "content": str(exc)})
                 finally:
@@ -958,7 +955,7 @@ async def run_stream(
                         if usage_recorder is not None:
                             _emit_usage(usage_recorder)
         except TimeoutError:
-            span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )

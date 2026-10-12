@@ -8,6 +8,37 @@ import pytest
 import azure_functions_agents._observability as obs
 
 
+def test_agent_run_attributes_preserve_extensible_trigger_values(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("WEBSITE_SITE_NAME", raising=False)
+
+    attributes = obs.agent_run_attributes(
+        agent_name="billing",
+        display_name="Billing assistant",
+        trigger_type="future_connector_trigger",
+        session_id="session-123",
+        model="model-name",
+    )
+
+    assert attributes == {
+        obs.ATTR_AGENT_NAME: "billing",
+        obs.ATTR_GEN_AI_AGENT_NAME: "billing",
+        "af.agent.display_name": "Billing assistant",
+        obs.ATTR_AGENT_TRIGGER_TYPE: "future_connector_trigger",
+        obs.ATTR_AGENT_SESSION_ID: "session-123",
+        obs.ATTR_AGENT_MODEL: "model-name",
+    }
+
+
+def test_common_span_outcome_and_tool_source_values() -> None:
+    assert [outcome.value for outcome in obs.SpanOutcome] == [
+        "success",
+        "error",
+        "cancelled",
+    ]
+    assert obs.ToolSpanSource.COPILOT_WRAPPER.value == "copilot.wrapper"
+    assert obs.ToolSpanSource.COPILOT_NATIVE.value == "copilot.native"
+
+
 def _clear_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     for name in (
         "APPLICATIONINSIGHTS_CONNECTION_STRING",

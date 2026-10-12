@@ -22,6 +22,7 @@ import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from ._logger import logger
@@ -75,6 +76,22 @@ ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_token
 ATTR_GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS = "gen_ai.usage.cache_write.input_tokens"
 ATTR_MCP_METHOD_NAME = "mcp.method.name"
 MCP_METHOD_TOOLS_CALL = "tools/call"
+
+
+class SpanOutcome(StrEnum):
+    """Common outcome values used on agent and tool spans."""
+
+    SUCCESS = "success"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+class ToolSpanSource(StrEnum):
+    """Origin of a Copilot tool execution span."""
+
+    COPILOT_WRAPPER = "copilot.wrapper"
+    COPILOT_NATIVE = "copilot.native"
+
 
 _TRACER_NAME = "azure.functions.AgentRuntime"
 
@@ -147,6 +164,26 @@ def gen_ai_agent_name(agent_slug: str | None, *, default: str | None = None) -> 
         return agent_slug
     name = agent_slug or default
     return f"{site_name}/{name}" if name else None
+
+
+def agent_run_attributes(
+    *,
+    agent_name: str | None,
+    display_name: str | None,
+    trigger_type: str | None,
+    session_id: str | None,
+    model: str | None,
+    gen_ai_default: str | None = None,
+) -> dict[str, Any]:
+    """Build shared agent.run attributes while leaving trigger names extensible."""
+    return {
+        ATTR_AGENT_NAME: agent_name,
+        ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name, default=gen_ai_default),
+        "af.agent.display_name": display_name,
+        ATTR_AGENT_TRIGGER_TYPE: trigger_type,
+        ATTR_AGENT_SESSION_ID: session_id,
+        ATTR_AGENT_MODEL: model,
+    }
 
 
 def _resolve_capture_sensitive_data() -> bool:

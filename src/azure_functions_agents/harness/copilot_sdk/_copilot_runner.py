@@ -15,15 +15,11 @@ from typing import TYPE_CHECKING, Literal
 from azure_functions_agents import runner as _runner
 
 from ..._observability import (
-    ATTR_AGENT_MODEL,
-    ATTR_AGENT_NAME,
     ATTR_AGENT_OUTCOME,
-    ATTR_AGENT_SESSION_ID,
-    ATTR_AGENT_TRIGGER_TYPE,
-    ATTR_GEN_AI_AGENT_NAME,
     FaultDomain,
     LifecycleStage,
-    gen_ai_agent_name,
+    SpanOutcome,
+    agent_run_attributes,
     start_span,
 )
 from ..._tool_descriptor import ToolDescriptor, ToolInput
@@ -273,14 +269,13 @@ class _CopilotHarnessRunner:
             with start_span(
                 f"agent.run {agent_name or 'agent'}",
                 lifecycle_stage=LifecycleStage.AGENT_RUN,
-                attributes={
-                    ATTR_AGENT_NAME: agent_name,
-                    ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name),
-                    "af.agent.display_name": display_name,
-                    ATTR_AGENT_TRIGGER_TYPE: "stream",
-                    ATTR_AGENT_SESSION_ID: resolved_id,
-                    ATTR_AGENT_MODEL: model,
-                },
+                attributes=agent_run_attributes(
+                    agent_name=agent_name,
+                    display_name=display_name,
+                    trigger_type="stream",
+                    session_id=resolved_id,
+                    model=model,
+                ),
             ) as span:
                 execution = asyncio.create_task(execute())
                 try:
@@ -304,13 +299,13 @@ class _CopilotHarnessRunner:
                         yield f"data: {json.dumps(ContentEvent(type='message', content=result.content))}\n\n"
                     elif not emitted_text and result.content:
                         yield f"data: {json.dumps(ContentEvent(type='delta', content=result.content))}\n\n"
-                    span.set_attribute(ATTR_AGENT_OUTCOME, "success")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
                     yield f"data: {json.dumps(DoneEvent(type='done'))}\n\n"
                 except asyncio.CancelledError:
-                    span.set_attribute(ATTR_AGENT_OUTCOME, "cancelled")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
                     raise
                 except Exception as exc:
-                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                     span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
                     if session_state.resumable and not emitted_session:
                         yield f"data: {json.dumps(SessionEvent(type='session', session_id=resolved_id))}\n\n"
@@ -345,10 +340,14 @@ class _CopilotHarnessRunner:
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=False,
             attributes={
-                ATTR_AGENT_NAME: resolved.slug,
-                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
+                **agent_run_attributes(
+                    agent_name=resolved.slug,
+                    display_name=None,
+                    trigger_type=None,
+                    session_id=None,
+                    model=resolved_model,
+                ),
                 "af.agent.execution_role": execution_role,
-                ATTR_AGENT_MODEL: resolved_model,
             },
         ) as span:
             try:
@@ -376,12 +375,12 @@ class _CopilotHarnessRunner:
                     ),
                 )
             except asyncio.CancelledError:
-                span.set_attribute(ATTR_AGENT_OUTCOME, "cancelled")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
                 raise
             except Exception:
-                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                 raise
-            span.set_attribute(ATTR_AGENT_OUTCOME, "success")
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
         return result.content
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:

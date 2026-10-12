@@ -40,7 +40,11 @@ class CopilotEventTelemetry:
         self._usage_event_ids: set[UUID] = set()
 
     def observe_usage(self, event_id: UUID, usage: AssistantUsageData) -> bool:
-        """Emit one usage observation per public SDK event ID."""
+        """Emit each public usage event once within this invocation.
+
+        Return ``False`` for a repeated event ID so callers can update invocation
+        counters only when its telemetry observation is new.
+        """
         if event_id in self._usage_event_ids:
             return False
         self._usage_event_ids.add(event_id)

@@ -16,20 +16,17 @@ from azurefunctions.extensions.http.fastapi import Request, Response
 from .._logger import logger
 from .._observability import (
     ATTR_AGENT_INPUT_BYTES,
-    ATTR_AGENT_MODEL,
-    ATTR_AGENT_NAME,
     ATTR_AGENT_OUTCOME,
     ATTR_AGENT_RESPONSE_BYTES,
     ATTR_AGENT_SESSION_ID,
     ATTR_AGENT_TOOL_CALL_COUNT,
     ATTR_AGENT_TOOL_ERROR_COUNT,
-    ATTR_AGENT_TRIGGER_TYPE,
     ATTR_FAULT_DOMAIN,
-    ATTR_GEN_AI_AGENT_NAME,
     FaultDomain,
     LifecycleStage,
+    SpanOutcome,
+    agent_run_attributes,
     capture_sensitive_data,
-    gen_ai_agent_name,
     start_span,
 )
 from .._source_marker import source_marker
@@ -278,14 +275,13 @@ def make_agent_handler(
         with start_span(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                ATTR_AGENT_NAME: resolved.slug,
-                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
-                "af.agent.display_name": resolved.name,
-                ATTR_AGENT_TRIGGER_TYPE: trigger_type,
-                ATTR_AGENT_SESSION_ID: session_id,
-                ATTR_AGENT_MODEL: resolved.model,
-            },
+            attributes=agent_run_attributes(
+                agent_name=resolved.slug,
+                display_name=resolved.name,
+                trigger_type=trigger_type,
+                session_id=session_id,
+                model=resolved.model,
+            ),
         ) as span:
             try:
                 data_json = serialize_trigger_data(trigger_data)
@@ -323,7 +319,7 @@ def make_agent_handler(
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
-                span.set_attribute(ATTR_AGENT_OUTCOME, "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
 
                 if _should_log(resolved):
                     logger.info(
@@ -339,7 +335,7 @@ def make_agent_handler(
                         ),
                     )
             except Exception as exc:
-                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 logger.exception(
                     "Agent execution failed: source_file=%s error=%s",
@@ -402,13 +398,13 @@ def make_http_agent_handler(
         with start_span(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                ATTR_AGENT_NAME: resolved.slug,
-                ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(resolved.slug),
-                "af.agent.display_name": resolved.name,
-                ATTR_AGENT_TRIGGER_TYPE: "http",
-                ATTR_AGENT_MODEL: resolved.model,
-            },
+            attributes=agent_run_attributes(
+                agent_name=resolved.slug,
+                display_name=resolved.name,
+                trigger_type="http",
+                session_id=None,
+                model=resolved.model,
+            ),
         ) as span:
             try:
                 session_id = supplied_session_id or _new_session_id()
@@ -436,7 +432,7 @@ def make_http_agent_handler(
                             resolved.name,
                             validation_error.body.decode("utf-8"),
                         )
-                    span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                     span.set_error("input validation failed", fault_domain=FaultDomain.APP)
                     span.add_event(
                         "af.input.validation_failed",
@@ -482,7 +478,7 @@ def make_http_agent_handler(
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
-                span.set_attribute(ATTR_AGENT_OUTCOME, "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
 
                 if _should_log(resolved):
                     logger.info(
@@ -505,7 +501,7 @@ def make_http_agent_handler(
                             resolved.name,
                             exc,
                         )
-                        span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                        span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                         span.set_error("agent returned invalid JSON", fault_domain=FaultDomain.APP)
                         span.add_event(
                             "af.response.invalid_json",
@@ -538,7 +534,7 @@ def make_http_agent_handler(
                                 resolved.name,
                                 exc,
                             )
-                            span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                             span.set_error(
                                 "response schema validation failed", fault_domain=FaultDomain.APP
                             )
@@ -583,7 +579,7 @@ def make_http_agent_handler(
                     ),
                 )
             except SessionStorageError as exc:
-                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 logger.error("HTTP agent '%s' storage failed: %s", resolved.name, exc)
                 return Response(
@@ -597,7 +593,7 @@ def make_http_agent_handler(
                     ),
                 )
             except Exception as exc:
-                span.set_attribute(ATTR_AGENT_OUTCOME, "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
                 return Response(

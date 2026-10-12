@@ -17,6 +17,8 @@ from ..._observability import (
     MCP_METHOD_TOOLS_CALL,
     LifecycleStage,
     RuntimeSpan,
+    SpanOutcome,
+    ToolSpanSource,
     record_timed_span,
     start_span,
 )
@@ -222,7 +224,7 @@ class CopilotToolCalls:
             attributes={
                 ATTR_GEN_AI_TOOL_NAME: name,
                 "af.tool.name": name,
-                "af.tool.source": "copilot.wrapper",
+                "af.tool.source": ToolSpanSource.COPILOT_WRAPPER,
             },
         ) as span:
             yield span
@@ -362,9 +364,9 @@ class CopilotToolCalls:
         attributes: dict[str, Any] = {
             ATTR_GEN_AI_TOOL_NAME: name,
             "af.tool.name": name,
-            "af.tool.source": "copilot.native",
+            "af.tool.source": ToolSpanSource.COPILOT_NATIVE,
             "af.tool.outcome": (
-                "success" if data.success and data.error is None else "error"
+                SpanOutcome.SUCCESS if data.success and data.error is None else SpanOutcome.ERROR
             ),
         }
         if record.telemetry_mcp:

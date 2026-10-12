@@ -18,6 +18,7 @@ from ._logger import logger
 from ._observability import (
     FaultDomain,
     RuntimeSpan,
+    SpanOutcome,
     current_span,
     record_delegate_call,
 )
@@ -163,7 +164,7 @@ def _record_generic_delegate_failure(
 ) -> str:
     tracker.record_error()
     record_delegate_call(error=True)
-    span.set_attribute("af.delegate.outcome", "error")
+    span.set_attribute("af.delegate.outcome", SpanOutcome.ERROR)
     span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return _sanitize_delegate_failure(slug, exc)
 
@@ -243,14 +244,14 @@ def _build_delegate_tool(
             )
         except asyncio.CancelledError:
             record_delegate_call(error=False)
-            span.set_attribute("af.delegate.outcome", "cancelled")
+            span.set_attribute("af.delegate.outcome", SpanOutcome.CANCELLED)
             raise
         except TimeoutError as exc:
             return _record_delegate_timeout(span, tracker, slug, timeout, exc)
         except Exception as exc:
             return _record_generic_delegate_failure(span, tracker, slug, exc)
         record_delegate_call(error=False)
-        span.set_attribute("af.delegate.outcome", "success")
+        span.set_attribute("af.delegate.outcome", SpanOutcome.SUCCESS)
         span.set_attribute("af.delegate.response_bytes", len(result))
         span.set_content("af.delegate.result", result)
         return result
