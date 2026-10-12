@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import time
 from collections.abc import Mapping, Sequence
@@ -190,6 +191,74 @@ def test_run_agent_does_not_guess_batch_or_correlate_missing_ids(monkeypatch: An
             "arguments": {}, "turn_id": "response-1",
         },
     ]
+
+
+async def _collect_stream(stream: Any) -> list[str]:
+    return [item async for item in stream]
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "env_value", "expected_capture"),
+    [
+        ("run", None, False),
+        ("run", "false", False),
+        ("run", "true", True),
+        ("stream", None, False),
+        ("stream", "false", False),
+        ("stream", "true", True),
+    ],
+)
+def test_public_maf_runner_bootstraps_shared_sensitive_data_policy_without_app_startup(
+    monkeypatch: Any, entrypoint: str, env_value: str | None, expected_capture: bool
+) -> None:
+    obs = importlib.import_module("azure_functions_agents._observability")
+    maf_obs = importlib.import_module(
+        "azure_functions_agents.harness.agent_framework._maf_observability"
+    )
+    maf_runner = importlib.import_module("azure_functions_agents.harness.agent_framework._maf_runner")
+    if env_value is None:
+        monkeypatch.delenv("ENABLE_SENSITIVE_DATA", raising=False)
+    else:
+        monkeypatch.setenv("ENABLE_SENSITIVE_DATA", env_value)
+    monkeypatch.setattr(obs, "_configured", False)
+    monkeypatch.setattr(obs, "_enabled", False)
+    monkeypatch.setattr(obs, "_capture_sensitive_data", False)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    monkeypatch.setattr(obs, "_quiet_noisy_loggers", lambda: None)
+    monkeypatch.setattr(obs, "_configure_azure_monitor", lambda _connection: None)
+    monkeypatch.setattr(maf_obs, "_configured_harnesses", set())
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        maf_obs,
+        "enable_instrumentation",
+        lambda *, enable_sensitive_data: calls.append(enable_sensitive_data),
+    )
+    monkeypatch.setattr(
+        maf_runner,
+        "configure_maf_instrumentation",
+        maf_obs.configure_maf_instrumentation,
+    )
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    async def fake_run(*args: Any, **kwargs: Any) -> runner.AgentResult:
+        return runner.AgentResult("session", "captured")
+
+    async def fake_run_stream(*args: Any, **kwargs: Any):
+        yield 'data: {"type":"done"}\n\n'
+
+    monkeypatch.setattr(maf, "run", fake_run)
+    monkeypatch.setattr(maf, "run_stream", fake_run_stream)
+
+    if entrypoint == "run":
+        result = asyncio.run(runner.run_agent("prompt", _harness=harness))
+        assert result.content == "captured"
+    else:
+        events = list(asyncio.run(_collect_stream(runner.run_agent_stream("prompt", _harness=harness))))
+        assert events == ['data: {"type":"done"}\n\n']
+
+    assert calls == [expected_capture]
+    assert obs.capture_sensitive_data() is expected_capture
 
 
 @pytest.fixture(autouse=True)

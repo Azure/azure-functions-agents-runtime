@@ -11,9 +11,9 @@ _configured_harnesses: set[int] = set()
 
 
 def _capture_sensitive_data() -> bool:
-    from ..._observability import capture_sensitive_data
+    from ..._observability import configure_observability
 
-    return capture_sensitive_data()
+    return configure_observability().capture_sensitive_data
 
 
 def configure_maf_instrumentation(harness: AppHarness) -> None:
