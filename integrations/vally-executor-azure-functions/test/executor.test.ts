@@ -221,6 +221,57 @@ describe("AzureFunctionsAgentExecutor", () => {
     );
   });
 
+  it("maps Copilot SDK evidence without a response batch ID", async () => {
+    const executor = new AzureFunctionsAgentExecutor({
+      fetch: async () =>
+        runtimeResponse(
+          "copilot-session",
+          "The total is 42.18 USD",
+          "gpt-4.1-mini",
+          [
+            {
+              type: "tool_start",
+              tool_call_id: "native-1",
+              tool_name: "read_receipt",
+              arguments: { currency: "USD" },
+              result: '{"total":42.18}',
+              success: true,
+            },
+          ],
+        ),
+    });
+
+    const trajectory = await executor.execute(
+      stimulus(),
+      options(
+        { endpointUrl: "http://127.0.0.1:7071/api/agents/main/chat" },
+        { sessionID: "copilot-session" },
+      ),
+    );
+
+    assert.equal(trajectory.output, "The total is 42.18 USD");
+    assert.equal(trajectory.metadata.model, "gpt-4.1-mini");
+    assert.equal(trajectory.metadata.sessionID, "copilot-session");
+    assert.equal(trajectory.metrics.toolCallCount, 1);
+    const toolCall = trajectory.events.find(
+      (event) => event.type === "tool_call",
+    );
+    assert.deepEqual(toolCall?.data, {
+      toolName: "read_receipt",
+      toolCallId: "native-1",
+      arguments: { currency: "USD" },
+    });
+    const toolResult = trajectory.events.find(
+      (event) => event.type === "tool_result",
+    );
+    assert.deepEqual(toolResult?.data, {
+      toolName: "read_receipt",
+      toolCallId: "native-1",
+      success: true,
+      result: '{"total":42.18}',
+    });
+  });
+
   it("uses a function key without exposing it in the trajectory", async () => {
     process.env.AGENT_ENDPOINT = "https://example.test/api/agents/main/chat";
     process.env.AGENT_FUNCTION_KEY = "top-secret-key";
