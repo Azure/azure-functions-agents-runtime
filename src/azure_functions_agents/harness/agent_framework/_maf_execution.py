@@ -477,8 +477,6 @@ async def _build_agent_session(
 
     history_agent_slug = _runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
     history_provider = _build_history_provider(history_agent_slug)
-    if session_state is not None:
-        session_state.resumable = True
 
     delegate_tools: list[ToolDescriptor] | None = None
     delegate_error_tracker: _runner._DelegateErrorTracker | None = None
@@ -517,6 +515,8 @@ async def _build_agent_session(
         history_provider=history_provider,
         agent_configuration=resolved_config,
     )
+    if session_state is not None:
+        session_state.resumable = True
     return agent, session, resolved_id, delegate_error_tracker, inference_target
 
 

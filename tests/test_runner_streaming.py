@@ -86,6 +86,37 @@ def test_common_stream_echoes_supplied_id_and_gates_generated_ids(
     assert len(supplied_failure) == 2
 
 
+def test_run_agent_stream_leaves_generated_session_non_resumable_when_setup_fails(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        maf,
+        "build_chat_client",
+        lambda _model: (object(), InferenceTarget()),
+    )
+    monkeypatch.setattr(maf, "_build_history_provider", lambda _slug: object())
+
+    def fail_assembly(**_kwargs: Any) -> Any:
+        raise RuntimeError("assembly failed")
+
+    monkeypatch.setattr(maf, "assemble_agent_inputs", fail_assembly)
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    session_state = HarnessSessionState(caller_supplied=False)
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt",
+                _harness=harness,
+                _session_state=session_state,
+            )
+        ]
+
+    assert asyncio.run(collect()) == ['data: {"type": "error", "content": "assembly failed"}\n\n']
+    assert session_state.resumable is False
+
+
 @pytest.mark.asyncio
 async def test_closing_the_public_stream_closes_the_selected_generator(monkeypatch):
     closed = []

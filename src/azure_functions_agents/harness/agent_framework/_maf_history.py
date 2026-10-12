@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from .._harness_binding import HistoryMessage, SessionHistory
 from .._history_identity import validate_agent_slug
 
@@ -21,11 +23,18 @@ async def get_session_history(agent_slug: str, session_id: str) -> SessionHistor
     messages = await provider.get_messages(session_id)
     rendered: list[HistoryMessage] = []
     for message in messages:
-        role = str(message.role or "").strip().lower()
-        text = message.text
-        if role not in {"user", "assistant"} or not isinstance(text, str) or not text:
+        normalized_role = str(message.role or "").strip().lower()
+        role: Literal["user", "assistant"]
+        if normalized_role == "user":
+            role = "user"
+        elif normalized_role == "assistant":
+            role = "assistant"
+        else:
             continue
-        rendered.append({"role": role, "text": text})  # type: ignore[typeddict-item]
+        text = message.text
+        if not isinstance(text, str) or not text:
+            continue
+        rendered.append({"role": role, "text": text})
 
     truncated = len(rendered) > _MAX_HISTORY_REPLAY_MESSAGES
     if truncated:
