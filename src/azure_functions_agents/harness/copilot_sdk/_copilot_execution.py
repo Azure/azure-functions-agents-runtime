@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._logger import logger
 from ..._observability import (
+    FaultDomain,
     SpanOutcome,
     capture_current_context,
     current_span,
@@ -196,6 +197,10 @@ def _tool(
                 logger.warning("Copilot custom tool failed: tool=%s", function.name)
                 text = '{"error":"Custom tool failed or returned unsupported content."}'
                 span.set_attribute("af.tool.outcome", SpanOutcome.ERROR)
+                span.set_error(
+                    "Custom tool failed or returned unsupported content.",
+                    fault_domain=FaultDomain.APP,
+                )
                 calls.complete_custom(invocation.tool_call_id, text, success=False)
                 _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
                 return ToolResult(text_result_for_llm=text, result_type="failure")
@@ -484,11 +489,11 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             case AssistantMessageData(content=content, parent_tool_call_id=None) if content:
                 messages.append(content)
             case AssistantUsageData(input_tokens=used_input, output_tokens=used_output):
-                if telemetry.observe_usage(event.id, event.data):
-                    if used_input is not None:
-                        input_tokens = (input_tokens or 0) + used_input
-                    if used_output is not None:
-                        output_tokens = (output_tokens or 0) + used_output
+                telemetry.observe_usage(event.id, event.data)
+                if used_input is not None:
+                    input_tokens = (input_tokens or 0) + used_input
+                if used_output is not None:
+                    output_tokens = (output_tokens or 0) + used_output
             case SkillInvokedData(name=name):
                 telemetry.observe_skill(name)
             case ToolExecutionStartData() as started:

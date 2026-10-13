@@ -260,7 +260,7 @@ boundary and final child text.
 | Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
 
 `ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but
-run-log payloads never include full `tool_calls` records. Credentials,
+Copilot run-log payloads never include full `tool_calls` records; MAF run logging is unchanged. Credentials,
 authorization headers, raw event envelopes, stack traces, reasoning text, and
 skill paths or content are never exported; skill telemetry uses the sanitized
 skill name only.

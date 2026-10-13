@@ -975,7 +975,7 @@ async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_me
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capture_sensitive_data", [False, True])
-async def test_usage_events_deduplicate_counters_and_exclude_skill_content(
+async def test_usage_events_deduplicate_observations_but_keep_invocation_totals(
     preview, monkeypatch, caplog, capture_sensitive_data,
 ):
     import logging
@@ -1074,7 +1074,7 @@ async def test_usage_events_deduplicate_counters_and_exclude_skill_content(
         if record.getMessage().startswith("Agent token usage:")
     ]
     assert len(usage_logs) == 1
-    assert json.loads(usage_logs[0].partition(": ")[2])["output_tokens"] == 8
+    assert json.loads(usage_logs[0].partition(": ")[2])["output_tokens"] == 16
 
 
 @pytest.mark.asyncio

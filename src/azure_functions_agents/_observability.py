@@ -543,6 +543,8 @@ def record_timed_span(
     end_time_ns: int,
     lifecycle_stage: str | None = None,
     attributes: Mapping[str, Any] | None = None,
+    status_description: str | None = None,
+    fault_domain: str | None = None,
 ) -> bool:
     """Emit a span with explicit parent and epoch-nanosecond timing; return whether it was emitted."""
 
@@ -587,6 +589,12 @@ def record_timed_span(
             start_time=start_time_ns,
             attributes=span_attributes or None,
         )
+        if status_description is not None:
+            from opentelemetry.trace import Status, StatusCode
+
+            span.set_status(Status(StatusCode.ERROR, status_description))
+            if fault_domain is not None:
+                span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain)
         span.end(end_time=end_time_ns)
     except Exception:  # pragma: no cover - defensive
         diagnose("OpenTelemetry span emission failed")

@@ -38,6 +38,7 @@ from .discovery.tools import discover_user_tools as discover_user_tools
 from .harness._agent_runner import get_agent_runner
 from .harness._harness_binding import (
     AppHarness,
+    HarnessKind,
     HarnessRequest,
     HarnessSessionState,
     get_harness,
@@ -160,18 +161,26 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
 
 
 def _record_generic_delegate_failure(
-    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
+    span: RuntimeSpan,
+    tracker: _DelegateErrorTracker,
+    harness: AppHarness | None,
+    slug: str,
+    exc: BaseException,
 ) -> str:
     tracker.record_error()
     record_delegate_call(error=True)
     span.set_attribute("af.delegate.outcome", SpanOutcome.ERROR)
-    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    if harness is not None and harness.name is HarnessKind.COPILOT:
+        span.set_error("delegate specialist failed", fault_domain=FaultDomain.DELEGATE)
+    else:
+        span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return _sanitize_delegate_failure(slug, exc)
 
 
 def _record_delegate_timeout(
     span: RuntimeSpan,
     tracker: _DelegateErrorTracker,
+    harness: AppHarness | None,
     slug: str,
     effective_timeout: float,
     exc: BaseException,
@@ -180,7 +189,10 @@ def _record_delegate_timeout(
     record_delegate_call(error=True)
     span.set_attribute("af.delegate.outcome", "timeout")
     span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
-    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    if harness is not None and harness.name is HarnessKind.COPILOT:
+        span.set_error("delegate specialist timed out", fault_domain=FaultDomain.DELEGATE)
+    else:
+        span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return (
         f"The '{slug}' specialist did not respond in time and was "
         "stopped. Consider a narrower request, trying again, or proceeding without it."
@@ -233,7 +245,7 @@ def _build_delegate_tool(
         timeout = min(resolved.timeout, remaining)
         if timeout <= 0:
             exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
-            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
+            return _record_delegate_timeout(span, tracker, harness, slug, timeout, exc)
         try:
             result = await run_leaf_agent_task(
                 resolved,
@@ -247,9 +259,9 @@ def _build_delegate_tool(
             span.set_attribute("af.delegate.outcome", SpanOutcome.CANCELLED)
             raise
         except TimeoutError as exc:
-            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
+            return _record_delegate_timeout(span, tracker, harness, slug, timeout, exc)
         except Exception as exc:
-            return _record_generic_delegate_failure(span, tracker, slug, exc)
+            return _record_generic_delegate_failure(span, tracker, harness, slug, exc)
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", SpanOutcome.SUCCESS)
         span.set_attribute("af.delegate.response_bytes", len(result))

@@ -386,6 +386,56 @@ def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch, mcp_
         assert "mcp.method.name" not in tool_spans[0].attributes
 
 
+def test_failed_native_tool_sets_error_status_without_exception_content(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-native-tool-error-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(seconds=2)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+        )
+        calls.start_native(
+            _start(name="remote_lookup"),
+            event_id=uuid4(),
+            timestamp=start,
+        )
+        calls.complete_native(
+            _complete(
+                success=False,
+                content="private failure detail",
+                error=ToolExecutionCompleteError(message="private error detail"),
+            ),
+            event_id=uuid4(),
+            timestamp=end,
+        )
+        calls.finish_telemetry()
+
+    [failed_span] = [
+        span for span in exporter.get_finished_spans()
+        if span.name == "execute_tool remote_lookup"
+    ]
+    assert failed_span.attributes["af.tool.outcome"] == "error"
+    assert failed_span.status.status_code.name == "ERROR"
+    assert failed_span.status.description == "Native tool failed or was denied."
+    assert failed_span.attributes["af.fault_domain"] == "unknown"
+    assert all(event.name != "exception" for event in failed_span.events)
+    assert "private failure detail" not in repr(failed_span.events)
+    assert "private error detail" not in repr(failed_span.events)
+
+
 @pytest.mark.parametrize(
     ("start_event_id", "start_time", "end_event_id", "end_time", "reason"),
     [

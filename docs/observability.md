@@ -345,8 +345,8 @@ Microsoft Agent Framework, **default off**.
   `af.dynamic_session.code` / `.stdout` / `.stderr`, `af.delegate.task` / `.result`, plus MAF
   prompt/response/tool-arg content (via `enable_instrumentation(enable_sensitive_data=True)`).
   Copilot prompt/request and response capture are also permitted by this switch.
-- **Copilot addendum:** run-log payloads never include full `tool_calls` records,
-  regardless of the switch. Skill telemetry keeps the sanitized skill name only.
+- **Copilot addendum:** Copilot run-log payloads never include full `tool_calls` records,
+  regardless of the switch; MAF run logging is unchanged. Skill telemetry keeps the sanitized skill name only.
 - **Never captured, regardless of the flag:** secrets — MCP `Authorization` headers/tokens,
   connection strings, raw native envelopes, stack traces, reasoning text, skill paths or
   content, and the ACA system key. Endpoints are reduced to host only. The `web_request` span never

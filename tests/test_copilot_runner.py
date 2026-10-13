@@ -270,7 +270,11 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
     leaf_result = runner.AgentResult("leaf-session", "leaf answer")
 
-    async def fake_leaf_execution(*_args, **_kwargs):
+    leaf_request = None
+
+    async def fake_leaf_execution(_harness, request):
+        nonlocal leaf_request
+        leaf_request = request
         observability.current_span().add_event(
             "af.copilot.model.usage",
             {"gen_ai.usage.output_tokens": 4},
@@ -320,6 +324,7 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
     assert leaf_span.attributes["af.agent.outcome"] == "success"
     assert leaf_span.attributes["gen_ai.agent.name"] == "analyst"
+    assert leaf_span.attributes["af.agent.session_id"] == leaf_request.session_id
     [usage_event] = [
         event for event in leaf_span.events if event.name == "af.copilot.model.usage"
     ]
@@ -483,8 +488,79 @@ async def test_custom_tool_error_closes_wrapper_span_without_exception_content(
     assert result.result_type == "failure"
     assert "private tool failure" not in result.text_result_for_llm
     assert failed_span.attributes["af.tool.outcome"] == "error"
+    assert failed_span.status.status_code.name == "ERROR"
+    assert failed_span.status.description == "Custom tool failed or returned unsupported content."
+    assert failed_span.attributes["af.fault_domain"] == "app"
     assert all(event.name != "exception" for event in failed_span.events)
     assert "private tool failure" not in repr(failed_span.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+async def test_delegate_tool_error_keeps_wrapper_span_sanitized_for_copilot(
+    preview, monkeypatch, capture_sensitive_data,
+):
+    from copilot.tools import ToolInvocation
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+    from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-delegate-error-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    monkeypatch.setattr(
+        runner,
+        "run_leaf_agent_task",
+        AsyncMock(side_effect=RuntimeError("private leaf failure")),
+    )
+
+    specialist = _specialist()
+    catalog = build_catalog({
+        specialist.slug: CatalogEntry(specialist, AgentCapabilities()),
+    })
+    [descriptor], tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent=specialist.slug)],
+        catalog,
+        coordinator_deadline=asyncio.get_running_loop().time() + 5,
+        harness=preview,
+    )
+
+    parent = tracer.start_span("agent.run coordinator")
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            custom_tool_names=(descriptor.name,),
+        )
+        wrapped = _tool(descriptor, calls)
+        result = await wrapped.handler(ToolInvocation(
+            session_id="main-session",
+            tool_call_id="delegate-call",
+            tool_name=descriptor.name,
+            arguments={"task": "analyze this"},
+        ))
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    delegate_span = spans["execute_tool delegate_analyst"]
+    assert tracker.count == 1
+    assert result.result_type == "success"
+    assert "private leaf failure" not in result.text_result_for_llm
+    assert delegate_span.attributes["af.delegate.outcome"] == "error"
+    assert delegate_span.attributes["af.fault_domain"] == "delegate"
+    assert delegate_span.status.status_code.name == "ERROR"
+    assert delegate_span.status.description == "delegate specialist failed"
+    assert all(event.name != "exception" for event in delegate_span.events)
+    assert "private leaf failure" not in repr(delegate_span.events)
 
 
 @pytest.mark.asyncio

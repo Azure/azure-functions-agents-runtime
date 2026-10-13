@@ -42,8 +42,8 @@ class CopilotEventTelemetry:
     def observe_usage(self, event_id: UUID, usage: AssistantUsageData) -> bool:
         """Emit each public usage event once within this invocation.
 
-        Return ``False`` for a repeated event ID so callers can update invocation
-        counters only when its telemetry observation is new.
+        Return ``False`` for a repeated event ID. Observation deduplication does
+        not change invocation-counter accumulation.
         """
         if event_id in self._usage_event_ids:
             return False

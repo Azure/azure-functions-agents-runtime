@@ -878,9 +878,54 @@ def test_sensitive_run_capture_keeps_prompts_and_responses_but_not_tool_records(
     assert "tool_calls" not in log_payload
 
 
+@pytest.mark.parametrize(
+    ("harness_kind", "expects_tool_calls"),
+    [
+        (HarnessKind.MAF, True),
+        (HarnessKind.COPILOT, False),
+    ],
+)
+def test_sensitive_http_log_payload_restores_maf_tool_calls_only(
+    monkeypatch: Any,
+    tmp_path: Path,
+    harness_kind: HarnessKind,
+    expects_tool_calls: bool,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.capture_sensitive_data",
+        lambda: True,
+    )
+    tool_calls = [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-1",
+            "tool_name": "lookup",
+            "arguments": {"query": "private tool arguments"},
+            "result": "private tool response",
+        }
+    ]
+
+    log_payload = _run_log_payload(
+        AppHarness(harness_kind, tmp_path),
+        SimpleNamespace(
+            content="private model response",
+            session_id="session-123",
+            tool_calls=tool_calls,
+            delegate_error_count=0,
+        ),
+    )
+
+    assert log_payload["response"] == "private model response"
+    assert log_payload["tool_call_count"] == 1
+    if expects_tool_calls:
+        assert log_payload["tool_calls"] == tool_calls
+    else:
+        assert "tool_calls" not in log_payload
+
+
 @pytest.mark.parametrize("entrypoint", ["http", "timer"])
 def test_agent_ingress_attaches_harness_events_to_run_span(
-    monkeypatch: Any, caplog: Any, entrypoint: str
+    monkeypatch: Any, caplog: Any, entrypoint: str, tmp_path: Path
 ) -> None:
     import logging
 
@@ -935,13 +980,14 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
         fake_run_agent,
     )
     resolved = _resolved_agent(response_schema=None)
+    capabilities = AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         if entrypoint == "http":
-            handler = make_http_agent_handler(resolved, AgentCapabilities())
+            handler = make_http_agent_handler(resolved, capabilities)
             response = asyncio.run(handler(DummyRequest({"prompt": "hello"})))
             assert response.status_code == 200
         else:
-            handler = make_agent_handler(resolved, "timer_trigger", AgentCapabilities())
+            handler = make_agent_handler(resolved, "timer_trigger", capabilities)
             asyncio.run(handler({"past_due": False}))
 
     [span] = exporter.get_finished_spans()
@@ -954,6 +1000,60 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
     assert "private" not in caplog.text
     assert '"response": "ok"' in caplog.text
     assert '"tool_calls"' not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("harness_kind", "expects_tool_calls"),
+    [
+        (HarnessKind.MAF, True),
+        (HarnessKind.COPILOT, False),
+    ],
+)
+def test_non_http_handler_logs_tool_calls_for_maf_only(
+    monkeypatch: Any,
+    caplog: Any,
+    tmp_path: Path,
+    harness_kind: HarnessKind,
+    expects_tool_calls: bool,
+) -> None:
+    import logging
+
+    tool_calls = [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-1",
+            "tool_name": "lookup",
+            "arguments": {"query": "private tool arguments"},
+            "result": "private tool response",
+        }
+    ]
+
+    async def fake_run_agent(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content="private model response",
+            session_id=kwargs["session_id"],
+            tool_calls=tool_calls,
+            delegate_error_count=0,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_agent_handler(
+        _resolved_agent(response_schema=None),
+        "timer_trigger",
+        AgentCapabilities(_harness=AppHarness(harness_kind, tmp_path)),
+    )
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        asyncio.run(handler({"message": "hello"}))
+
+    if expects_tool_calls:
+        assert '"tool_calls": [{"type": "tool_start"' in caplog.text
+    else:
+        assert '"tool_calls"' not in caplog.text
 
 
 def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(

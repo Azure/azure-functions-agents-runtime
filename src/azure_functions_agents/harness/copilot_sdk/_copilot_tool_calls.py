@@ -15,6 +15,7 @@ from ..._observability import (
     ATTR_GEN_AI_TOOL_NAME,
     ATTR_MCP_METHOD_NAME,
     MCP_METHOD_TOOLS_CALL,
+    FaultDomain,
     LifecycleStage,
     RuntimeSpan,
     SpanOutcome,
@@ -378,6 +379,12 @@ class CopilotToolCalls:
             end_time_ns=end_ns,
             lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
             attributes=attributes,
+            status_description=(
+                None if data.success and data.error is None else "Native tool failed or was denied."
+            ),
+            fault_domain=(
+                None if data.success and data.error is None else FaultDomain.UNKNOWN
+            ),
         )
         if not emitted:
             self._mark_incomplete(record, "unavailable_interval")

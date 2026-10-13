@@ -344,7 +344,7 @@ class _CopilotHarnessRunner:
                     agent_name=resolved.slug,
                     display_name=None,
                     trigger_type=None,
-                    session_id=None,
+                    session_id=session_id,
                     model=resolved_model,
                 ),
                 "af.agent.execution_role": execution_role,

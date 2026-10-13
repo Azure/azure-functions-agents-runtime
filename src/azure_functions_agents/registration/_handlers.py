@@ -32,7 +32,7 @@ from .._observability import (
 from .._source_marker import source_marker
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
-from ..harness._harness_binding import HarnessSessionState, bind_harness
+from ..harness._harness_binding import AppHarness, HarnessKind, HarnessSessionState, bind_harness
 from ..harness._session_storage import SessionStorageError
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
@@ -175,7 +175,11 @@ def _set_run_result_attributes(span: Any, result: Any) -> None:
     span.set_content("af.agent.response", content)
 
 
-def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
+def _should_log_raw_tool_calls(harness: AppHarness) -> bool:
+    return harness.name is HarnessKind.MAF
+
+
+def _run_log_payload(harness: AppHarness, result: Any) -> dict[str, Any]:
     """Build the response log body, gating raw content behind capture_sensitive_data."""
     tool_calls = list(getattr(result, "tool_calls", None) or [])
     content = str(getattr(result, "content", "") or "")
@@ -187,6 +191,8 @@ def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
     }
     if capture_sensitive_data():
         payload["response"] = content
+        if _should_log_raw_tool_calls(harness):
+            payload["tool_calls"] = tool_calls
     return payload
 
 
@@ -322,14 +328,17 @@ def make_agent_handler(
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
 
                 if _should_log(resolved):
+                    payload = {
+                        "session_id": result.session_id,
+                        "response": result.content,
+                    }
+                    if _should_log_raw_tool_calls(harness):
+                        payload["tool_calls"] = list(getattr(result, "tool_calls", None) or [])
                     logger.info(
                         "Agent response: source_file=%s payload=%s",
                         source_marker(resolved.source_file),
                         json.dumps(
-                            {
-                                "session_id": result.session_id,
-                                "response": result.content,
-                            },
+                            payload,
                             ensure_ascii=False,
                             default=str,
                         ),
@@ -485,7 +494,7 @@ def make_http_agent_handler(
                         "HTTP agent '%s' response: %s",
                         resolved.name,
                         json.dumps(
-                            _run_log_payload(resolved, result),
+                            _run_log_payload(harness, result),
                             ensure_ascii=False,
                             default=str,
                         ),
