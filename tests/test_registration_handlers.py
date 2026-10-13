@@ -15,8 +15,6 @@ from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
-    AgentFrameworkCompactionConfig,
-    AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     EndpointAuthConfig,
@@ -258,13 +256,14 @@ def test_http_handler_records_input_validation_failed_event(monkeypatch: Any) ->
     ]
 
 
-def test_http_validation_returns_only_resumable_copilot_session_ids(
+def test_http_validation_returns_only_caller_supplied_session_ids(
     monkeypatch: Any, tmp_path: Path,
 ) -> None:
     run_kwargs: dict[str, Any] = {}
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         run_kwargs.update(kwargs)
+        kwargs["_session_state"].resumable = True
         return SimpleNamespace(content="ok", session_id=kwargs["session_id"], tool_calls=[])
 
     monkeypatch.setattr("azure_functions_agents.registration._handlers._run_agent", fake_run_agent)
@@ -290,7 +289,18 @@ def test_http_validation_returns_only_resumable_copilot_session_ids(
 
     maf_invalid = asyncio.run(maf(DummyRequest({"message": 123})))
     assert maf_invalid.status_code == 400
-    assert "x-ms-session-id" in maf_invalid.headers
+    assert "x-ms-session-id" not in maf_invalid.headers
+
+    supplied_invalid = asyncio.run(
+        maf(
+            DummyRequest(
+                {"message": 123},
+                headers={"x-ms-session-id": "caller-supplied-session"},
+            )
+        )
+    )
+    assert supplied_invalid.status_code == 400
+    assert supplied_invalid.headers["x-ms-session-id"] == "caller-supplied-session"
 
     first = asyncio.run(copilot(DummyRequest({"message": "valid"})))
     assert first.status_code == 200
@@ -311,7 +321,7 @@ def test_http_validation_returns_only_resumable_copilot_session_ids(
     assert run_kwargs["_session_is_new"] is False
 
 
-def test_http_failure_before_copilot_create_does_not_return_new_session_id(
+def test_http_failure_returns_generated_id_only_after_adapter_checkpoint(
     monkeypatch: Any, tmp_path: Path,
 ) -> None:
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
@@ -338,7 +348,18 @@ def test_http_failure_before_copilot_create_does_not_return_new_session_id(
 
     maf_failed = asyncio.run(maf(DummyRequest({"message": "valid"})))
     assert maf_failed.status_code == 500
-    assert "x-ms-session-id" in maf_failed.headers
+    assert "x-ms-session-id" not in maf_failed.headers
+
+    async def fail_after_checkpoint(*args: Any, **kwargs: Any) -> Any:
+        kwargs["_session_state"].resumable = True
+        raise RuntimeError("turn failed after session creation")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent", fail_after_checkpoint
+    )
+    maf_checkpoint_failed = asyncio.run(maf(DummyRequest({"message": "valid"})))
+    assert maf_checkpoint_failed.status_code == 500
+    assert maf_checkpoint_failed.headers["x-ms-session-id"]
 
 
 def test_http_handler_maps_sanitized_storage_errors_without_host_lifecycle_statuses(
@@ -561,6 +582,7 @@ def test_http_handler_uses_case_insensitive_session_header(monkeypatch: Any) -> 
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         run_kwargs.update(kwargs)
+        kwargs["_session_state"].resumable = True
         return SimpleNamespace(content="plain text", session_id=kwargs["session_id"])
 
     monkeypatch.setattr(
@@ -595,6 +617,7 @@ def test_http_handler_generates_session_id_once_per_request(monkeypatch: Any) ->
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         run_kwargs.update(kwargs)
+        kwargs["_session_state"].resumable = True
         return SimpleNamespace(content="plain text", session_id=kwargs["session_id"])
 
     monkeypatch.setattr(
@@ -1273,12 +1296,7 @@ def _resolved_agent_with_configuration(
 
 def test_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
-    config = AgentConfiguration(
-        max_output_tokens=4_096,
-        agent_framework=AgentFrameworkConfiguration(
-            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=64_000)
-        ),
-    )
+    config = AgentConfiguration(max_output_tokens=4_096)
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)

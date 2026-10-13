@@ -49,7 +49,7 @@ branch: <user>/<slug>
 | discover | `discovery/…` | … |
 | translate | `config/…` | … |
 | register | `registration/…` | … |
-| execute | `runner.py` / `client_manager.py` | … |
+| execute | `runner.py` / selected `harness/*` execution modules | … |
 
 ### Authoring / API surface
 

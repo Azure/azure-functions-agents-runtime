@@ -26,7 +26,7 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
-from ..harness._harness_binding import HarnessKind, bind_harness
+from ..harness._harness_binding import HarnessSessionState, bind_harness
 from ..harness._session_storage import SessionStorageError
 from ..response_contract import (
     InvalidResponseJsonError,
@@ -136,6 +136,17 @@ def _request_header_value(req: Request, header_name: str) -> str | None:
 
 def _new_session_id() -> str:
     return uuid.uuid4().hex
+
+
+def _session_id_response_headers(
+    session_id: str,
+    *,
+    caller_supplied: bool,
+    state: HarnessSessionState,
+) -> dict[str, str] | None:
+    if caller_supplied or state.resumable:
+        return {_SESSION_ID_HEADER: session_id}
+    return None
 
 
 def make_agent_handler(
@@ -265,12 +276,18 @@ def make_http_agent_handler(
     harness = bind_harness(resolved, capabilities)
 
     async def _handle(req: Request, durable_client: Any | None) -> Response:
+        supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
         auth_error = authorize_entra_request(req.headers.get, auth_policy)
         if auth_error is not None:
             return Response(
                 content=json.dumps({"error": auth_error.message}),
                 status_code=auth_error.status_code,
                 media_type="application/json",
+                headers=(
+                    {_SESSION_ID_HEADER: supplied_session_id}
+                    if supplied_session_id is not None
+                    else None
+                ),
             )
 
         logger.info(
@@ -285,12 +302,10 @@ def make_http_agent_handler(
             trigger_type="http",
         ) as span:
             try:
-                supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
                 session_id = supplied_session_id or _new_session_id()
-                echo_failed_session_id = (
-                    harness.name is HarnessKind.MAF or supplied_session_id is not None
+                session_state = HarnessSessionState(
+                    caller_supplied=supplied_session_id is not None
                 )
-                turn_completed = False
                 span.set_attribute("af.agent.session_id", session_id)
                 try:
                     body = await req.json()
@@ -305,6 +320,7 @@ def make_http_agent_handler(
 
                 validation_error = validate_request_body(body, resolved.input_schema)
                 if validation_error is not None:
+
                     if validation_error.status_code == 500:
                         logger.error(
                             "HTTP agent '%s' has invalid input schema: %s",
@@ -320,7 +336,7 @@ def make_http_agent_handler(
                             "af.http.status_code": validation_error.status_code,
                         },
                     )
-                    if echo_failed_session_id:
+                    if supplied_session_id is not None:
                         validation_error.headers[_SESSION_ID_HEADER] = session_id
                     return validation_error
 
@@ -352,8 +368,8 @@ def make_http_agent_handler(
                     agent_name=resolved.slug,
                     _harness=harness,
                     _session_is_new=not supplied_session_id,
+                    _session_state=session_state,
                 )
-                turn_completed = True
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
@@ -397,7 +413,11 @@ def make_http_agent_handler(
                             ),
                             status_code=500,
                             media_type="application/json",
-                            headers={_SESSION_ID_HEADER: session_id},
+                            headers=_session_id_response_headers(
+                                session_id,
+                                caller_supplied=supplied_session_id is not None,
+                                state=session_state,
+                            ),
                         )
                     except ResponseSchemaValidationError as exc:
                         logger.warning(
@@ -422,20 +442,32 @@ def make_http_agent_handler(
                             ),
                             status_code=500,
                             media_type="application/json",
-                            headers={_SESSION_ID_HEADER: session_id},
+                            headers=_session_id_response_headers(
+                                session_id,
+                                caller_supplied=supplied_session_id is not None,
+                                state=session_state,
+                            ),
                         )
                     return Response(
                         content=json.dumps(parsed, ensure_ascii=False),
                         status_code=200,
                         media_type="application/json",
-                        headers={_SESSION_ID_HEADER: session_id},
+                        headers=_session_id_response_headers(
+                            session_id,
+                            caller_supplied=supplied_session_id is not None,
+                            state=session_state,
+                        ),
                     )
 
                 return Response(
                     content=result.content,
                     status_code=200,
                     media_type="text/plain",
-                    headers={_SESSION_ID_HEADER: session_id},
+                    headers=_session_id_response_headers(
+                        session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
+                    ),
                 )
             except SessionStorageError as exc:
                 span.set_attribute("af.agent.outcome", "error")
@@ -445,10 +477,10 @@ def make_http_agent_handler(
                     content=json.dumps({"error": str(exc)}),
                     status_code=exc.status_code,
                     media_type="application/json",
-                    headers=(
-                        {_SESSION_ID_HEADER: session_id}
-                        if echo_failed_session_id or turn_completed
-                        else None
+                    headers=_session_id_response_headers(
+                        session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
                     ),
                 )
             except Exception as exc:
@@ -459,10 +491,10 @@ def make_http_agent_handler(
                     content=json.dumps({"error": str(exc)}),
                     status_code=500,
                     media_type="application/json",
-                    headers=(
-                        {_SESSION_ID_HEADER: session_id}
-                        if echo_failed_session_id or turn_completed
-                        else None
+                    headers=_session_id_response_headers(
+                        session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
                     ),
                 )
 

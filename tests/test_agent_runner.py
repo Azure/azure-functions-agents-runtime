@@ -25,12 +25,11 @@ from azure_functions_agents.harness import _agent_runner
 from azure_functions_agents.harness._harness_binding import (
     AppHarness,
     HarnessKind,
-    UnsupportedCapabilityError,
+    HarnessSessionState,
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runtime
 from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
-from azure_functions_agents.streaming_events import HostedSkillEvent, HostedSkillEventKind
 
 
 @pytest.mark.asyncio
@@ -127,39 +126,26 @@ def test_get_agent_runner_keeps_same_root_clones_independent(
     assert created[0] is not created[1]
 
 
-def test_agent_runner_rejects_events_when_backend_does_not_offer_capability() -> None:
-    selected = _agent_runner.AgentRunner(SimpleNamespace())
-
-    with pytest.raises(UnsupportedCapabilityError, match="streaming"):
-        selected.run_agent_events("prompt", deadline=123.0)
-
-
 @pytest.mark.asyncio
-async def test_agent_runner_serializes_events_to_sse_and_closes_iterator() -> None:
+async def test_agent_runner_forwards_sse_and_closes_iterator() -> None:
     closed = False
 
-    class _EventBackend:
-        def run_agent_events(self, prompt: str, **kwargs: object):
+    class _StreamBackend:
+        def run_agent_stream(self, prompt: str, **kwargs: object):
             assert prompt == "prompt"
             assert kwargs["timeout"] == 3.0
 
             async def events():
                 nonlocal closed
                 try:
-                    yield HostedSkillEvent(
-                        HostedSkillEventKind.SESSION,
-                        session_id="session-one",
-                    )
-                    yield HostedSkillEvent(HostedSkillEventKind.DONE)
+                    yield 'data: {"type": "session", "session_id": "session-one"}\n\n'
+                    yield 'data: {"type": "done"}\n\n'
                 finally:
                     closed = True
 
             return events()
 
-    selected = _agent_runner.AgentRunner(
-        SimpleNamespace(),
-        event_backend=_EventBackend(),
-    )
+    selected = _agent_runner.AgentRunner(_StreamBackend())
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
 
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -192,11 +178,11 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
             seen["run_agent"] = {"prompt": prompt, **kwargs}
             return runner.AgentResult("session", "answer")
 
-        def run_agent_events(self, prompt: str, **kwargs: object):
-            seen["run_agent_events"] = {"prompt": prompt, **kwargs}
+        def run_agent_stream(self, prompt: str, **kwargs: object):
+            seen["run_agent_stream"] = {"prompt": prompt, **kwargs}
 
             async def _stream():
-                yield HostedSkillEvent(HostedSkillEventKind.DELTA, content="ok")
+                yield 'data: {"type": "delta", "content": "ok"}\n\n'
 
             return _stream()
 
@@ -229,7 +215,7 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
     assert leaf == "leaf"
     assert seen["run_agent"]["session_is_new"] is True
     assert seen["run_agent"]["timeout"] == 2.0
-    assert seen["run_agent_events"]["timeout"] == 3.0
+    assert seen["run_agent_stream"]["timeout"] == 3.0
     assert seen["run_leaf_agent_task"]["execution_role"] == "delegate"
 
 
@@ -313,7 +299,7 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
 
 
 @pytest.mark.asyncio
-async def test_maf_event_capability_forwards_skill_catalog_and_session_state(
+async def test_maf_stream_forwards_skill_catalog_and_session_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -322,20 +308,21 @@ async def test_maf_event_capability_forwards_skill_catalog_and_session_state(
     approved = SkillDescriptor.create(name="approved", path=tmp_path / "approved")
     excluded = SkillDescriptor.create(name="excluded", path=tmp_path / "excluded")
     observed: dict[str, object] = {}
+    session_state = HarnessSessionState(caller_supplied=True)
 
     def execute(actual_harness, request, **kwargs):
         observed.update(harness=actual_harness, request=request, kwargs=kwargs)
 
         async def events():
-            yield HostedSkillEvent(HostedSkillEventKind.DONE)
+            yield 'data: {"type": "done"}\n\n'
 
         return events()
 
-    monkeypatch.setattr(_maf_execution, "run_events", execute)
+    monkeypatch.setattr(_maf_execution, "run_stream", execute)
 
     output = [
         event
-        async for event in selected.run_agent_events(
+        async for event in selected.run_agent_stream(
             "prompt",
             deadline=123.0,
             session_id="session-one",
@@ -343,7 +330,7 @@ async def test_maf_event_capability_forwards_skill_catalog_and_session_state(
             skills=(approved,),
             skill_catalog=(approved, excluded),
             display_name="Billing",
-            execution_surface="hosted_skill",
+            session_state=session_state,
         )
     ]
 
@@ -353,8 +340,8 @@ async def test_maf_event_capability_forwards_skill_catalog_and_session_state(
     assert request.new_session is True
     assert observed["harness"] is harness
     assert observed["kwargs"]["display_name"] == "Billing"
-    assert observed["kwargs"]["execution_surface"] == "hosted_skill"
-    assert output == [HostedSkillEvent(HostedSkillEventKind.DONE)]
+    assert observed["kwargs"]["session_state"] is session_state
+    assert output == ['data: {"type": "done"}\n\n']
 
 
 @pytest.mark.asyncio

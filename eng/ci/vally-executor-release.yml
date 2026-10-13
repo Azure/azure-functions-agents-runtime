@@ -24,7 +24,7 @@ resources:
   pipelines:
     - pipeline: officialBuild
       project: internal
-      source: azure-functions-agents-runtime.official
+      source: agent-runtime.official-build
       branch: main
 
 variables:

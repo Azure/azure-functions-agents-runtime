@@ -9,7 +9,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 from azure.functions.timer import TimerRequest
@@ -18,20 +18,12 @@ from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.app import create_function_app
-from azure_functions_agents.client_manager import (
-    ClientManager,
-    MAFClientManager,
-    get_client_manager,
-    set_client_manager,
-)
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.env import EnvVar
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
-    AgentFrameworkCompactionConfig,
-    AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     SubagentRef,
@@ -60,19 +52,6 @@ from azure_functions_agents.registration._handlers import make_http_agent_handle
 from azure_functions_agents.registration.capabilities import build_capabilities
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
-
-
-class _ReplacedMAFClientManager(MAFClientManager):
-    pass
-
-
-@pytest.fixture
-def replace_client_manager():
-    original = get_client_manager()
-    try:
-        yield set_client_manager
-    finally:
-        set_client_manager(original)
 
 
 @pytest.fixture
@@ -221,51 +200,6 @@ def test_preview_config_scenario_indexes_without_native_process(preview):
     assert not _harness.get_harness(root).storage_root.exists()
 
 
-def test_custom_manager_is_rejected_before_function_app_construction(
-    preview, monkeypatch, replace_client_manager,
-):
-    import azure_functions_agents.app as app_module
-
-    class CustomManager(ClientManager):
-        def resolve_model(self, requested):
-            return requested or "custom"
-
-        def build_chat_client(self, model):
-            raise AssertionError("Custom MAF client must not be constructed")
-
-    replace_client_manager(CustomManager())
-    app_constructor = Mock(side_effect=AssertionError("FunctionApp must not be constructed"))
-    monkeypatch.setattr(app_module.func, "FunctionApp", app_constructor)
-    with pytest.raises(UnsupportedCapabilityError, match=r"ClientManager.*MAF-only"):
-        create_function_app(SAMPLE)
-    app_constructor.assert_not_called()
-
-
-@pytest.mark.parametrize("manager", [MAFClientManager(), _ReplacedMAFClientManager()])
-def test_replaced_or_subclassed_builtin_manager_is_rejected(
-    preview, manager, replace_client_manager,
-):
-    replace_client_manager(manager)
-    with pytest.raises(UnsupportedCapabilityError, match=r"MAFClientManager.*MAF-only"):
-        _harness.get_harness(preview, new_app=True)
-
-
-def test_flag_off_does_not_reject_custom_manager(tmp_path, monkeypatch, replace_client_manager):
-    class CustomManager(ClientManager):
-        def resolve_model(self, requested):
-            return requested or "custom"
-
-        def build_chat_client(self, model):
-            return object()
-
-    custom = CustomManager()
-    replace_client_manager(custom)
-    monkeypatch.setenv(_harness.FLAG, "false")
-    monkeypatch.setattr(_harness, "_HARNESSES", {})
-    assert _harness.get_harness(tmp_path).name is HarnessKind.MAF
-    assert get_client_manager() is custom
-
-
 def test_foundry_configuration_is_frozen_without_authentication(preview, monkeypatch):
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://fixture.services.ai.azure.com/api/projects/test")
@@ -395,15 +329,8 @@ def test_maf_keeps_authored_approval_that_copilot_cannot_adapt(tmp_path):
     assert build_maf_tools(capabilities.filtered_user_tools)[0].approval_mode == "always_require"
 
 
-def test_maf_only_configuration_is_not_silently_discarded(preview):
-    with pytest.raises(UnsupportedCapabilityError, match="agent_framework"):
-        _preview.validate_configuration(AgentConfiguration(
-            agent_framework=AgentFrameworkConfiguration(
-                compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=100)
-            )
-        ))
-    _preview.validate_configuration(AgentConfiguration(agent_framework=AgentFrameworkConfiguration()))
-    _preview.validate_configuration(AgentConfiguration(agent_framework=None))
+def test_retired_maf_compaction_has_no_active_copilot_configuration(preview):
+    _preview.validate_configuration(AgentConfiguration())
 
 
 def test_unsupported_output_limit_fails_before_native_execution(preview):
@@ -595,6 +522,7 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
 
     async def invoke(harness, request):
         requests.append((harness, request))
+        request.session_state.resumable = True
         return runner.AgentResult(request.session_id, "reply")
 
     monkeypatch.setattr(_harness, "validate_agent", validate_once)
@@ -697,6 +625,7 @@ def test_registered_copilot_mcp_preserves_prompt_sessions_and_errors(preview, mo
         requests.append(request)
         if fail_resume:
             raise CopilotPreviewError("Native resume failed.")
+        request.session_state.resumable = True
         return runner.AgentResult(request.session_id, "reply")
 
     monkeypatch.setattr(_copilot, "run", invoke)
@@ -716,7 +645,7 @@ def test_registered_copilot_mcp_preserves_prompt_sessions_and_errors(preview, mo
         nonlocal fail_resume
         for arguments in ({}, {"prompt": " "}, {"prompt": 42}):
             response = json.loads(await handler(json.dumps({"arguments": arguments})))
-            assert response == {"error": "Missing 'prompt'"}
+            assert response == {"error": "Missing 'prompt'", "session_id": None}
         assert requests == []
         malformed = json.loads(await handler("{"))
         assert "error" in malformed
@@ -745,10 +674,15 @@ def test_registered_copilot_mcp_preserves_prompt_sessions_and_errors(preview, mo
         fail_resume = True
         calls_before_failure = len(requests)
         failed = json.loads(await handler(transport_context))
-        assert failed == {"error": "Native resume failed."}
+        assert failed == {"error": "Native resume failed.", "session_id": mapped["session_id"]}
         assert len(requests) == calls_before_failure + 1
         assert requests[-1].new_session is False
         assert requests[-1].session_id == mapped["session_id"]
+        generated_failure = json.loads(await handler(json.dumps({
+            "arguments": {"prompt": "new turn"},
+        })))
+        assert generated_failure == {"error": "Native resume failed.", "session_id": None}
+        assert requests[-1].new_session is True
 
     asyncio.run(call())
 
@@ -798,6 +732,7 @@ def test_registered_agent_model_override_reaches_copilot_provider(preview, monke
 
     async def invoke(_harness, request):
         requests.append(request)
+        request.session_state.resumable = True
         return runner.AgentResult(request.session_id, "reply")
 
     monkeypatch.setattr(_copilot, "run", invoke)
@@ -832,6 +767,7 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
 
     async def invoke(_selected, request):
         requests.append(request)
+        request.session_state.resumable = True
         return runner.AgentResult(request.session_id, "reply")
 
     monkeypatch.setattr(_handlers, "build_sandbox_tools_for_session", build_sandbox)

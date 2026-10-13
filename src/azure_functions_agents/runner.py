@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -32,6 +33,7 @@ from .harness._agent_runner import get_agent_runner
 from .harness._harness_binding import (
     AppHarness,
     HarnessRequest,
+    HarnessSessionState,
     get_harness,
 )
 from .harness._history_identity import validate_agent_slug
@@ -40,7 +42,7 @@ from .registration.capabilities import (
     _merge_skill_descriptors,
 )
 from .registration.catalog import AgentCatalog, CatalogEntry
-from .streaming_events import AgentStreamEvent, AgentStreamEventKind, agent_event_to_sse
+from .streaming_events import AgentStreamEvent
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -290,6 +292,7 @@ def _request(
     workflow_agent_slug: str | None,
     agent_configuration: AgentConfiguration | None,
     deadline: float,
+    session_state: HarnessSessionState | None = None,
 ) -> HarnessRequest:
     descriptors = describe_tools(
         (
@@ -330,6 +333,8 @@ def _request(
         skill_catalog=_merge_skill_descriptors(discovered, approved),
         max_output_tokens=configuration.max_output_tokens,
         deadline=deadline,
+        session_state=session_state
+        or HarnessSessionState(caller_supplied=session_id is not None),
     )
 
 
@@ -358,6 +363,7 @@ async def run_agent(
     skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
+    _session_state: HarnessSessionState | None = None,
 ) -> AgentResult:
     """Execute a prompt; None inventories discover, explicit empty inventories disable."""
     validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
@@ -388,6 +394,7 @@ async def run_agent(
         catalog=catalog,
         workflow_policy=workflow_policy,
         session_is_new=_session_is_new,
+        session_state=_session_state,
     )
 
 
@@ -419,48 +426,38 @@ async def run_agent_events(
     _session_is_new: bool = False,
     _execution_surface: str | None = None,
 ) -> AsyncGenerator[AgentStreamEvent]:
-    """Yield harness-neutral structured events through the bound harness."""
-    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
-    coordinator_deadline = asyncio.get_running_loop().time() + timeout
-    try:
-        harness = _harness or get_harness()
-        selected = get_agent_runner(harness)
-        stream = selected.run_agent_events(
-            prompt,
-            instructions=instructions,
-            timeout=timeout,
-            deadline=coordinator_deadline,
-            tools=tools,
-            mcp_tools=mcp_tools,
-            skill_paths=skill_paths,
-            model=model,
-            session_id=session_id,
-            sandbox_tools=sandbox_tools,
-            system_addendum=system_addendum,
-            workflow_enabled=workflow_enabled,
-            workflow_durable_client=workflow_durable_client,
-            workflow_agent_slug=workflow_agent_slug,
-            agent_name=agent_name,
-            display_name=display_name,
-            web_request_tools=web_request_tools,
-            agent_configuration=agent_configuration,
-            subagents=subagents,
-            catalog=catalog,
-            workflow_policy=workflow_policy,
-            skills=skills,
-            skill_catalog=skill_catalog,
-            session_is_new=_session_is_new,
-            execution_surface=_execution_surface,
-        )
-    except Exception as exc:
-        logger.error("Agent harness selection failed: %s", exc)
-        yield AgentStreamEvent(AgentStreamEventKind.ERROR, content=str(exc))
-        return
-
-    async with aclosing(stream) as stream:
-        async for event in stream:
-            yield event
+    """Adapt the runtime SSE stream into harness-neutral structured events."""
+    stream = run_agent_stream(
+        prompt,
+        instructions=instructions,
+        timeout=timeout,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        model=model,
+        session_id=session_id,
+        sandbox_tools=sandbox_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        display_name=display_name,
+        web_request_tools=web_request_tools,
+        agent_configuration=agent_configuration,
+        subagents=subagents,
+        catalog=catalog,
+        workflow_policy=workflow_policy,
+        skills=skills,
+        skill_catalog=skill_catalog,
+        _harness=_harness,
+        _session_is_new=_session_is_new,
+        _execution_surface=_execution_surface,
+    )
+    async with aclosing(stream) as owned_stream:
+        async for frame in owned_stream:
+            payload = json.loads(frame.removeprefix("data: ").strip())
+            yield AgentStreamEvent.from_dict(payload)
 
 
 async def run_agent_stream(
@@ -489,34 +486,52 @@ async def run_agent_stream(
     skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
-) -> AsyncIterator[str]:
+    _session_state: HarnessSessionState | None = None,
+    _execution_surface: str | None = None,
+) -> AsyncGenerator[str]:
     """Yield the existing SSE vocabulary under the selected app context."""
-    events = run_agent_events(
-        prompt,
-        instructions=instructions,
-        timeout=timeout,
-        tools=tools,
-        mcp_tools=mcp_tools,
-        skill_paths=skill_paths,
-        skills=skills,
-        skill_catalog=skill_catalog,
-        model=model,
-        session_id=session_id,
-        sandbox_tools=sandbox_tools,
-        system_addendum=system_addendum,
-        workflow_enabled=workflow_enabled,
-        workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
-        agent_name=agent_name,
-        display_name=display_name,
-        web_request_tools=web_request_tools,
-        agent_configuration=agent_configuration,
-        subagents=subagents,
-        catalog=catalog,
-        workflow_policy=workflow_policy,
-        _harness=_harness,
-        _session_is_new=_session_is_new,
-    )
-    async with aclosing(events) as events:
-        async for event in events:
-            yield agent_event_to_sse(event)
+    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
+    deadline = asyncio.get_running_loop().time() + timeout
+    session_state = _session_state or HarnessSessionState(caller_supplied=session_id is not None)
+    try:
+        session_id = _validate_session_id(session_id)
+        if session_id is not None and session_state.caller_supplied:
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
+        harness = _harness or get_harness()
+        selected = get_agent_runner(harness)
+        stream = selected.run_agent_stream(
+            prompt,
+            instructions=instructions,
+            timeout=timeout,
+            deadline=deadline,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            skills=skills,
+            skill_catalog=skill_catalog,
+            model=model,
+            session_id=session_id,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            display_name=display_name,
+            web_request_tools=web_request_tools,
+            agent_configuration=agent_configuration,
+            subagents=subagents,
+            catalog=catalog,
+            workflow_policy=workflow_policy,
+            session_is_new=_session_is_new,
+            session_state=session_state,
+            execution_surface=_execution_surface,
+        )
+    except Exception as exc:
+        logger.error("Agent harness selection failed: %s", exc)
+        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        return
+    async with aclosing(stream) as stream:
+        async for event in stream:
+            yield event

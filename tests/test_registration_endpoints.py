@@ -23,10 +23,12 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness.agent_framework._maf_history import (
+    _MAX_HISTORY_REPLAY_MESSAGES,
+)
 from azure_functions_agents.registration._naming import _function_name_from_source
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
-    _MAX_HISTORY_REPLAY_MESSAGES,
     _SAFE_SESSION_ID_PATTERN,
     _extract_mcp_session_id,
     _run_builtin_agent,
@@ -571,6 +573,7 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
         run_calls["prompt"] = prompt
         run_calls["kwargs"] = kwargs
+        kwargs["_session_state"].resumable = True
         return SimpleNamespace(
             session_id="session-123",
             content="ok",
@@ -588,7 +591,11 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
     )
 
-    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+    response = asyncio.run(
+        chat_route["handler"](
+            DummyRequest({"prompt": "hello"}, headers={"x-ms-session-id": "session-123"})
+        )
+    )
 
     assert response.status_code == 200
     assert json.loads(_response_text(response)) == {
@@ -614,31 +621,55 @@ def test_debug_chat_stream_endpoint_skips_input_schema_validation(
         source_file=source_file,
         input_schema={"type": "object", "required": ["subscription_id"]},
     )
-    run_calls: dict[str, Any] = {}
+    run_requests: list[Any] = []
 
-    async def fake_stream() -> Any:
+    async def fake_maf_stream(_harness: Any, request: Any, **_kwargs: Any) -> Any:
+        run_requests.append(request)
+        if not request.session_state.caller_supplied:
+            yield f'data: {json.dumps({"type": "session", "session_id": request.session_id})}\n\n'
         yield "data: hello\n\n"
 
-    def fake_run_builtin_agent_stream(prompt: str, **kwargs: Any) -> Any:
-        run_calls["prompt"] = prompt
-        run_calls["kwargs"] = kwargs
-        return fake_stream()
-
     monkeypatch.setattr(
-        "azure_functions_agents.registration.endpoints._run_builtin_agent_stream",
-        fake_run_builtin_agent_stream,
+        "azure_functions_agents.harness.agent_framework._maf_execution.run_stream",
+        fake_maf_stream,
     )
 
-    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(_harness=AppHarness(HarnessKind.MAF, tmp_path)),
+    )
     stream_route = next(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chatstream"
     )
 
-    response = asyncio.run(stream_route["handler"](DummyRequest({"prompt": "hello"})))
+    async def invoke(headers: dict[str, str]) -> tuple[Any, list[str]]:
+        response = await stream_route["handler"](
+            DummyRequest({"prompt": "hello"}, headers=headers)
+        )
+        return response, [chunk async for chunk in response.body_iterator]
+
+    response, generated_events = asyncio.run(invoke({}))
 
     assert response.status_code == 200
     assert response.media_type == "text/event-stream"
-    assert run_calls["prompt"] == "hello"
+    generated_session = json.loads(generated_events[0].removeprefix("data: ").strip())
+    assert generated_session["type"] == "session"
+    assert generated_session["session_id"] == run_requests[0].session_id
+    assert run_requests[0].session_state.caller_supplied is False
+
+    _caller_response, caller_events = asyncio.run(
+        invoke({"x-ms-session-id": "caller-provided"})
+    )
+    assert json.loads(caller_events[0].removeprefix("data: ").strip()) == {
+        "type": "session",
+        "session_id": "caller-provided",
+    }
+    assert caller_events == [
+        'data: {"type": "session", "session_id": "caller-provided"}\n\n',
+        "data: hello\n\n",
+    ]
+    assert run_requests[1].session_state.caller_supplied is True
 
 
 def test_handle_chat_reports_delegate_error_count_on_span(
@@ -777,9 +808,10 @@ def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
     spans = _install_start_span_capture(monkeypatch)
 
     async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
-        assert kwargs["session_id"] is None  # caller omitted it
+        assert kwargs["_session_state"].caller_supplied is False  # caller omitted it
+        kwargs["_session_state"].resumable = True
         return AgentResult(
-            session_id="runner-generated-session-id",
+            session_id=kwargs["session_id"],
             content="ok",
         )
 
@@ -796,9 +828,10 @@ def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
     # No "sessionId" key at all -- the caller-omitted case.
     result = asyncio.run(mcp_handler(json.dumps({"arguments": {"prompt": "hello"}})))
 
-    assert json.loads(result)["session_id"] == "runner-generated-session-id"
+    response_session_id = json.loads(result)["session_id"]
+    assert response_session_id
     [span] = spans
-    assert span.attributes["af.agent.session_id"] == "runner-generated-session-id"
+    assert span.attributes["af.agent.session_id"] == response_session_id
 
 
 def test_extract_mcp_session_id_passes_through_safe_ids() -> None:
@@ -1633,9 +1666,21 @@ def test_entra_chatstream_without_identity_emits_sse_error(
         route for route in app.routes if route["route"] == "agents/test_agent/chatstream"
     )
 
-    response = asyncio.run(stream_route["handler"](DummyRequest({"prompt": "hi"})))
+    response = asyncio.run(
+        stream_route["handler"](
+            DummyRequest({"prompt": "hi"}, headers={"x-ms-session-id": "caller-id"})
+        )
+    )
 
     assert response.status_code == 401
+    async def collect() -> list[str]:
+        return [chunk async for chunk in response.body_iterator]
+
+    chunks = asyncio.run(collect())
+    assert json.loads(chunks[0].removeprefix("data: ").strip()) == {
+        "type": "session",
+        "session_id": "caller-id",
+    }
 
 
 def test_entra_chat_with_easy_auth_principal_proceeds(

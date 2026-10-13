@@ -165,8 +165,9 @@ This sample remains a single-agent tool demonstration and does not configure
 those optional capabilities. Deployed hosting remains unsupported in this
 preview. The built-in debug chat UI and non-HTTP triggers are enabled but not
 live-qualified; the UI does not restore earlier transcript messages when you
-resume a session. Custom `ClientManager`
-instances are MAF-only and are rejected when Copilot is on. See
+resume a session. Provider selection still comes from the shared
+`harness/_provider_config.py` rules, while SDK client construction stays inside
+the selected harness adapter. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.
 

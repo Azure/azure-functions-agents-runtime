@@ -10,14 +10,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .._logger import logger
-from ..client_manager import InferenceTarget
+from ._provider_config import InferenceTarget, ProviderKind
 
 if TYPE_CHECKING:
     from ._harness_binding import ExecutionRole
 
 
-def _model_publisher(provider: str | None) -> str | None:
-    return "openai" if provider in {"openai", "azure_openai"} else None
+def _model_publisher(provider: ProviderKind | str | None) -> str | None:
+    return "openai" if provider in {
+        ProviderKind.OPENAI,
+        ProviderKind.AZURE_OPENAI,
+        ProviderKind.OPENAI.value,
+        ProviderKind.AZURE_OPENAI.value,
+    } else None
 
 
 @dataclass

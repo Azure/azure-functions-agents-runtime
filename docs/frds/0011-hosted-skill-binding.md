@@ -110,7 +110,7 @@ pipeline authoritative and avoids a second interpretation of frontmatter.
 | translate | `config/merge.py`, `config/validation.py` | Reuse `ResolvedAgent`. Permit a fully validated agent with no external surface so it can be an inert internal catalog entry. |
 | compose | `app.py`, `registration/catalog.py`, `_hosted_skill_app.py` | Build the existing complete catalog before app mutation, then initialize an enhanced FunctionApp or DFApp with that catalog and the frozen app harness. |
 | register | `_hosted_skill_app.py`, existing Azure registration modules | Add a Python decorator that wraps an application handler and hides its injected parameter. Register no new host binding type. Existing automatic surfaces are unchanged. |
-| execute | `hosted_skill_binding.py`, `_agent_validation.py`, `_agent_run_diagnostics.py`, `system_tools/sandbox.py`, `runner.py`, `streaming_events.py`, `response_contract.py`, `client_manager.py` | Map facade calls to the existing runner inputs, expose typed stream events, enforce the response contract, share validation and run diagnostics, bind per-session sandbox tools, and preflight MAF provider configuration without constructing a client. |
+| execute | `hosted_skill_binding.py`, `_agent_validation.py`, `_agent_run_diagnostics.py`, `system_tools/sandbox.py`, `runner.py`, `streaming_events.py`, `response_contract.py`, `harness/_provider_config.py` | Map facade calls to the existing runner inputs, expose typed stream events, enforce the response contract, share validation and run diagnostics, bind per-session sandbox tools, and preflight MAF provider configuration without constructing a client. |
 
 ### 4.1 Authoring and selection
 
@@ -330,14 +330,10 @@ remain aliases so the initially reviewed HostedSkill API stays source-compatible
 - `tool_end` with call ID, name, and result;
 - terminal `done` or `error`.
 
-Structured events are an optional runner capability, separate from the required
-one-shot and leaf-execution backend contract. Both MAF and Copilot implement it
-by translating SDK updates into neutral events. A future backend without the
-capability is rejected centrally with `UnsupportedCapabilityError` before
-backend acquisition or execution. The public structured iterator retains the
-existing terminal `error` event contract, and the SSE adapter serializes that
-same event, so callers do not receive an `AttributeError` and existing HTTP
-behavior remains unchanged.
+Both MAF and Copilot translate SDK updates into the existing SSE vocabulary at
+the private runner boundary. The public structured iterator adapts those frames
+into neutral events while retaining the terminal `error` contract, so existing
+HTTP behavior remains unchanged.
 
 The optional capability accepts the same neutral inventories and execution
 metadata as existing SSE execution, including approved `skills`, the full
@@ -347,11 +343,10 @@ new. For streaming, HostedSkill passes the selected entry's name as `display_nam
 and the descriptor inventories directly; no path re-discovers or reconstructs
 those values.
 
-Existing `run_agent_stream()` is the only SSE adapter. Above the harness backend
-boundary, it serializes neutral events to its unchanged `data: <JSON>\n\n`
-contract. Explicitly closing or cancelling that adapter closes its owned event
-iterator. Event objects own their structured payload conversion but do not own
-HTTP transport serialization.
+Existing `run_agent_stream()` remains the SSE surface. `run_agent_events()`
+adapts those frames for HostedSkill consumers. Explicitly closing or cancelling
+either adapter closes its owned iterator. Event objects own their structured
+payload conversion but do not own HTTP transport serialization.
 Existing event ordering, fragmented tool-argument coalescing, deadlines, stream
 finalization, cancellation, usage recording, tool-error accounting, spans, and
 unknown-content handling remain authoritative in the MAF event implementation.
@@ -390,15 +385,9 @@ closes the iterator it owns.
 ### 4.5 Provider and Foundry contract
 
 For MAF, the decorator runs a side-effect-free provider preflight for the
-selected HostedSkill. `ClientManager` gains
-`validate_provider_settings(model: str | None) -> None`, whose default is a
-no-op, so a custom manager remains responsible for its own provider contract.
-HostedSkill always calls the active manager's hook. A custom implementation may
-raise an actionable configuration error; if it inherits the no-op, validation
-is intentionally deferred to that manager's client-build/runtime behavior.
-`MAFClientManager` implements the hook by reusing its existing provider and
-model resolution without constructing a chat client, credential, or network
-connection.
+selected HostedSkill through `resolve_inference_target()`. The shared resolver
+uses the same provider and model precedence as MAF execution without
+constructing a chat client, credential, or network connection.
 
 For the built-in Foundry provider, `FOUNDRY_PROJECT_ENDPOINT` is required and
 must be nonblank. Authentication continues through the runtime's existing
@@ -420,7 +409,7 @@ Decorator application occurs during Function module import. Missing MAF
 provider settings therefore prevent the whole module from indexing, including
 unrelated deterministic Functions. Copilot instead uses app selection,
 app-wide catalog validation, and bound-runner checks; it does not run MAF
-`ClientManager` preflight.
+provider preflight.
 
 ### 4.6 Version 1 capability boundary
 

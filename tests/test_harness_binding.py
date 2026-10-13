@@ -10,8 +10,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from azure_functions_agents.client_manager import ProviderKind
 from azure_functions_agents.harness import _harness_binding as binding
+from azure_functions_agents.harness._provider_config import ProviderKind
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 
 
@@ -53,7 +53,7 @@ def test_invalid_flag_is_explicit_and_does_not_echo_value(value):
         assert value not in str(error.value)
 
 
-def test_provider_kind_is_the_client_manager_enum():
+def test_provider_kind_is_sdk_neutral():
     assert binding.ProviderKind is ProviderKind
 
 
@@ -135,6 +135,7 @@ def test_request_retains_frozen_neutral_descriptors_and_standalone_skill_paths()
         "model", "tools", "max_output_tokens", "deadline",
         "mcp_servers", "skills", "skill_catalog",
         "execution_role", "event_sink",
+        "session_state",
     ]
     assert request.mcp_servers == request.skills == request.skill_catalog == ()
     assert request.execution_role == "primary"

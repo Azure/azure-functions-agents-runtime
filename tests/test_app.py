@@ -404,11 +404,7 @@ def test_create_function_app_catalogs_inert_agent_for_hosted_skill(
         """,
     )
 
-    class Manager:
-        def validate_provider_settings(self, _model: str | None) -> None:
-            pass
-
-    monkeypatch.setattr(hosted_app_module, "get_client_manager", lambda: Manager())
+    monkeypatch.setattr(hosted_app_module, "resolve_inference_target", lambda _model: None)
     app = create_function_app(tmp_path)
 
     @app.hosted_skill(arg_name="skill", agent_name="internal")

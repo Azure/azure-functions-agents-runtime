@@ -11,8 +11,8 @@ from typing import Any, TypeVar, cast, get_type_hints
 import azure.durable_functions as df
 import azure.functions as func
 
-from .client_manager import get_client_manager
 from .harness._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
+from .harness._provider_config import resolve_inference_target
 from .hosted_skill_binding import HostedSkill
 from .registration.catalog import AgentCatalog, CatalogEntry
 
@@ -94,7 +94,7 @@ def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
             f"HostedSkill agent {resolved.slug!r} cannot enable Dynamic Workflows."
         )
     if harness.name is HarnessKind.MAF:
-        get_client_manager().validate_provider_settings(resolved.model)
+        resolve_inference_target(resolved.model)
 
 
 class _HostedSkillAppMixin:

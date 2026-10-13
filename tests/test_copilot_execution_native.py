@@ -16,7 +16,7 @@ import httpx
 import pytest
 from azure.core.credentials import AccessToken
 
-from azure_functions_agents import runner, shutdown_client_manager
+from azure_functions_agents import runner, shutdown_runtime
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import WebRequestConfig
@@ -492,7 +492,7 @@ async def test_real_native_public_sse_tool_order_resume_and_completion(native):
         assert resumed_events[-1]["type"] == "done"
         assert native.resumed == native.created
     finally:
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -526,7 +526,7 @@ async def test_real_native_sse_disconnect_aborts_only_affected_turn(native):
     finally:
         if not pending.done():
             pending.cancel()
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -561,7 +561,7 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
             isinstance(event.data, ToolExecutionCompleteData) and event.data.success
             for event in native.histories[0]
         )
-        await shutdown_client_manager()
+        await shutdown_runtime()
         followup = await chat(SimpleNamespace(
             headers={"x-ms-session-id": result["session_id"]},
             json=AsyncMock(return_value={"prompt": "Recall the previous receipt, without tools."}),
@@ -590,7 +590,7 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
                     f"Credential sentinel was persisted in {path.relative_to(native.state)}"
                 )
     finally:
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -621,7 +621,7 @@ async def test_native_provider_auth_failure_is_sanitized_through_public_route(
         assert SENTINEL not in caplog.text
         maf.assert_not_awaited()
     finally:
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -644,7 +644,7 @@ async def test_native_entra_token_failure_preserves_diagnostic(native, monkeypat
         assert "Entra token" in body
         assert "sentinel-private-token-callback" not in body
     finally:
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -660,7 +660,7 @@ async def test_native_startup_failure_preserves_completed_session(native, monkey
         ))
         assert first.status_code == 200, first.body.decode()
         public_id = json.loads(first.body)["session_id"]
-        await shutdown_client_manager()
+        await shutdown_runtime()
         with monkeypatch.context() as patch:
             patch.setenv("COPILOT_CLI_EXTRACT_DIR", str(native.state / "missing-sdk-bundle"))
             failed = await chat(SimpleNamespace(
@@ -676,7 +676,7 @@ async def test_native_startup_failure_preserves_completed_session(native, monkey
         assert resumed.status_code == 200, resumed.body.decode()
         assert native.resumed == native.created
     finally:
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -695,7 +695,7 @@ async def test_sdk_remains_the_only_resume_authority_after_journal_damage(native
         ))
         assert first.status_code == 200, first.body.decode()
         public_id = json.loads(first.body)["session_id"]
-        await shutdown_client_manager()
+        await shutdown_runtime()
         journals = list(native.state.rglob("events.jsonl"))
         assert len(journals) == 1, "SDK did not persist the completed conversation"
         journal = journals[0]
@@ -721,7 +721,7 @@ async def test_sdk_remains_the_only_resume_authority_after_journal_damage(native
         assert native.metadata_lookups == []
         assert send_probe.await_count in {0, 1}
     finally:
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -775,7 +775,7 @@ async def test_authored_preview_http_trigger_creates_and_resumes(native):
         assert followup.body.decode() == receipt
         assert len(native.created) == len(native.resumed) == 1
     finally:
-        await shutdown_client_manager()
+        await shutdown_runtime()
 
 
 @pytest.mark.asyncio
@@ -804,4 +804,4 @@ async def test_real_native_request_cancellation_does_not_kill_peer(native):
     finally:
         if not slow.done():
             slow.cancel()
-        await shutdown_client_manager()
+        await shutdown_runtime()
