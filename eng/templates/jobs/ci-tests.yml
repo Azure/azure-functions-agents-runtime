@@ -73,3 +73,101 @@ jobs:
       - bash: npm run test:cli
         workingDirectory: integrations/vally-executor-azure-functions
         displayName: 'Smoke test Vally CLI integration'
+
+  - job: "TestCSharpLocalTools"
+    displayName: "Test C# Local Tools with .NET 10"
+
+    steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+      - task: UseDotNet@2
+        displayName: 'Use .NET 10 SDK'
+        inputs:
+          packageType: 'sdk'
+          version: '10.x'
+      - bash: |
+          dotnet --list-sdks | grep '^10\.'
+          python -m pip install --upgrade pip
+          python -m pip install -U -e .[dev]
+          python -m pytest tests/test_local_tools_csharp.py tests/test_discovery_local_tools.py -q
+        displayName: 'Run C# local tool tests'
+
+  - job: "TestJavaScriptLocalTools"
+    displayName: "Test JavaScript Local Tools with Node.js 22"
+
+    steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '22.x'
+        displayName: 'Use Node.js 22'
+      - bash: |
+          node --version
+          python -m pip install --upgrade pip
+          python -m pip install -U -e .[dev]
+          python -m pytest tests/test_local_tools_javascript.py tests/test_maf_local_tools.py tests/test_discovery_local_tools.py -q
+        displayName: 'Run JavaScript local tool tests'
+
+  - job: "TestGoLocalTools"
+    displayName: "Test Go Local Tools with Go 1.25+ on Windows"
+
+    steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+      - task: GoTool@0
+        displayName: 'Use Go 1.25'
+        inputs:
+          version: '1.25'
+      - powershell: |
+          $version = go version
+          if ($version -notmatch 'go1\.(2[5-9]|[3-9][0-9])') {
+            throw "Go 1.25 or newer is required; found $version"
+          }
+          python -m pip install --upgrade pip
+          python -m pip install -U -e .[dev]
+          python -m pytest tests/test_local_tools_go.py tests/test_discovery_local_tools.py -q
+        displayName: 'Run Go local tool tests'
+
+  - job: "TestGoLocalToolsLinux"
+    displayName: "Test Go Local Tools with Go 1.25+ on Linux"
+
+    pool:
+      name: 1es-pool-azfunc-public
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+      - task: GoTool@0
+        displayName: 'Use Go 1.25'
+        inputs:
+          version: '1.25'
+      - bash: |
+          set -euo pipefail
+          go version | grep -E 'go1\.(2[5-9]|[3-9][0-9])'
+          python -m pip install --upgrade pip
+          python -m pip install -U -e .[dev]
+          python -m pytest tests/test_local_tools_go.py tests/test_discovery_local_tools.py -q
+        displayName: 'Run Go local tool tests'

@@ -144,6 +144,7 @@ def validate_copilot_agent(
         non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,
         debug_chat_ui=resolved.builtin_endpoints.debug_chat_ui,
         mcp_endpoint=resolved.builtin_endpoints.mcp,
+        javascript_local_tools=bool(capabilities.filtered_local_tools),
     )
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")

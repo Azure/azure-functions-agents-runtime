@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from .._local_tool_descriptor import PreparedLocalTool
 from .._tool_descriptor import ToolInput
 from ..config import ResolvedAgent, SubagentRef
 from ..config.schema import AgentConfiguration
@@ -34,6 +35,7 @@ class _HarnessRunner(Protocol):
         timeout: float | None = None,
         deadline: float,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -62,6 +64,7 @@ class _HarnessRunner(Protocol):
         timeout: float | None = None,
         deadline: float,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -108,6 +111,7 @@ class AgentRunner:
         timeout: float | None = None,
         deadline: float | None = None,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -136,6 +140,7 @@ class AgentRunner:
             timeout=timeout,
             deadline=effective_deadline,
             tools=tools,
+            local_tools=local_tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             model=model,
@@ -164,6 +169,7 @@ class AgentRunner:
         timeout: float | None = None,
         deadline: float | None = None,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -193,6 +199,7 @@ class AgentRunner:
             timeout=timeout,
             deadline=effective_deadline,
             tools=tools,
+            local_tools=local_tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             model=model,

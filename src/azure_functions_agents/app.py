@@ -12,6 +12,7 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from ._agent_identity import agent_id
+from ._local_tool_descriptor import LocalToolSpec, PreparedLocalTool
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
@@ -28,7 +29,13 @@ from .config.validation import (
 from .discovery.mcp import MCPServerDescriptor, discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
-from .harness._harness_binding import get_harness, validate_agent
+from .harness._harness_binding import (
+    HarnessKind,
+    UnsupportedCapabilityError,
+    get_harness,
+    validate_agent,
+)
+from .local_tools.preparation import prepare_local_tools
 from .registration.capabilities import (
     build_capabilities,
     validate_subagent_tool_names,
@@ -55,12 +62,14 @@ def _tool_name(tool: object) -> str:
 def _serialize_capabilities_for_log(
     *,
     user_tools: Sequence[ToolDescriptor] | None,
+    local_tools: Sequence[PreparedLocalTool],
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path],
     skill_name_by_path: dict[str, str],
 ) -> dict[str, list[str]]:
     return {
         "user_tools": sorted(tool.name for tool in (user_tools or ())),
+        "local_tools": sorted(tool.name for tool in local_tools),
         "mcp_servers": sorted(server.name for server in (mcp_tools or ())),
         "skills": sorted(
             skill_name_by_path.get(str(path.resolve()), path.name) for path in skill_paths
@@ -72,6 +81,24 @@ def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
     return bool(
         builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
     )
+
+
+def _fail_on_duplicate_local_tool_names(
+    user_tools: Sequence[ToolDescriptor],
+    local_tools: Sequence[LocalToolSpec],
+) -> None:
+    sources_by_name: dict[str, list[str]] = {}
+    for tool in user_tools:
+        source = getattr(tool.func, "__code__", None)
+        source_path = getattr(source, "co_filename", "<Python tool>")
+        sources_by_name.setdefault(tool.name, []).append(str(source_path))
+    for local_tool in local_tools:
+        sources_by_name.setdefault(local_tool.name, []).append(str(local_tool.metadata_path))
+    for name, sources in sorted(sources_by_name.items()):
+        if len(sources) > 1:
+            raise ValueError(
+                f"Duplicate tool name {name!r} is declared by: {', '.join(sorted(sources))}"
+            )
 
 
 def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
@@ -129,6 +156,15 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     user_tools = tool_result.user_tools
     workflow_tools = tool_result.workflow_tools
+    _fail_on_duplicate_local_tool_names(user_tools, tool_result.local_tool_specs)
+    if harness.name is HarnessKind.COPILOT and tool_result.local_tool_specs:
+        languages = sorted({tool.language.value for tool in tool_result.local_tool_specs})
+        raise UnsupportedCapabilityError(
+            f"Copilot preview does not support process-backed local tools: {languages}. "
+            "Restart with AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=false to use MAF."
+        )
+    local_tool_preparation = prepare_local_tools(tuple(tool_result.local_tool_specs))
+    local_tools = local_tool_preparation.tools
     mcp_tools = mcp_result.servers
     skills = skill_result.skills
     if DATA_DRIVEN_WORKFLOWS_SKILL_NAME in skills:
@@ -140,12 +176,14 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     mcp_names = list(mcp_tools)
     skill_name_by_path = {str(path.resolve()): name for name, path in skills.items()}
     discovered_user_tool_names = sorted(_tool_name(tool) for tool in user_tools)
+    discovered_local_tool_names = sorted(tool.name for tool in local_tools)
 
     logger.info(
-        "discovery_summary: mcp_servers=%s skills=%s user_tools=%s",
+        "discovery_summary: mcp_servers=%s skills=%s user_tools=%s local_tools=%s",
         sorted(mcp_names),
         sorted(skill_names),
         discovered_user_tool_names,
+        discovered_local_tool_names,
     )
 
     resolved_agents = [
@@ -205,6 +243,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             resolved,
             discovered_user_tools=user_tools,
             discovered_workflow_tools=workflow_tools,
+            discovered_local_tools=local_tools,
             discovered_mcp_tools=mcp_tools,
             discovered_skills=skills,
             discovered_skill_descriptors=skill_result.descriptors,
@@ -261,14 +300,17 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         capability_names = _serialize_capabilities_for_log(
             user_tools=direct_capabilities.filtered_user_tools,
+            local_tools=direct_capabilities.filtered_local_tools,
             mcp_tools=direct_capabilities.filtered_mcp_tools,
             skill_paths=direct_capabilities.enabled_skill_paths,
             skill_name_by_path=skill_name_by_path,
         )
         logger.info(
-            "agent_capabilities_registered: source_file=%s user_tools=%s mcp_servers=%s skills=%s",
+            "agent_capabilities_registered: source_file=%s user_tools=%s "
+            "local_tools=%s mcp_servers=%s skills=%s",
             source_marker(resolved.source_file),
             capability_names["user_tools"],
+            capability_names["local_tools"],
             capability_names["mcp_servers"],
             capability_names["skills"],
         )
@@ -337,16 +379,21 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             "mcp_servers": len(mcp_names),
             "skills": len(skill_names),
             "user_tools": len(user_tools),
+            "local_tools": len(local_tools),
         },
         "discovered_capability_names": {
             "mcp_servers": sorted(mcp_names),
             "skills": sorted(skill_names),
             "user_tools": discovered_user_tool_names,
+            "local_tools": discovered_local_tool_names,
         },
         "failed_loads": {
             "mcp_servers": [f"{name}: {error}" for name, error in mcp_result.failed_loads],
             "skills": [f"{path}: {error}" for path, error in skill_result.failed_loads],
             "user_tools": [f"{file}: {error}" for file, error in tool_result.failed_loads],
+            "local_tools": [
+                f"{file}: {error}" for file, error in local_tool_preparation.failed_loads
+            ],
         },
     }
     logger.info(

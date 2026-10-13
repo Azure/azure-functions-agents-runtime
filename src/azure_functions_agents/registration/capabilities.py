@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._function_tool import WorkflowTool
+from .._local_tool_descriptor import PreparedLocalTool
 from .._logger import logger
 from .._slug import delegate_tool_name
 from .._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
@@ -31,6 +32,7 @@ class AgentCapabilities:
     """Resolved capability bundle for one agent — passed through to the runner."""
 
     filtered_user_tools: tuple[ToolDescriptor, ...] | None = None
+    filtered_local_tools: tuple[PreparedLocalTool, ...] = ()
     filtered_workflow_tools: tuple[WorkflowTool, ...] = ()
     filtered_mcp_tools: tuple[MCPServerDescriptor, ...] | None = None
     enabled_skill_paths: tuple[Path, ...] = ()
@@ -44,6 +46,7 @@ class AgentCapabilities:
         cls,
         *,
         filtered_user_tools: Sequence[ToolInput] | None = None,
+        filtered_local_tools: Sequence[PreparedLocalTool] = (),
         filtered_workflow_tools: Sequence[WorkflowTool] = (),
         filtered_mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         enabled_skill_paths: Sequence[Path] = (),
@@ -60,6 +63,7 @@ class AgentCapabilities:
             filtered_user_tools=(
                 None if filtered_user_tools is None else describe_tools(filtered_user_tools)
             ),
+            filtered_local_tools=tuple(filtered_local_tools),
             filtered_workflow_tools=tuple(filtered_workflow_tools),
             filtered_mcp_tools=(
                 None if filtered_mcp_tools is None else tuple(filtered_mcp_tools)
@@ -133,6 +137,7 @@ def build_capabilities(
     *,
     discovered_user_tools: Sequence[ToolInput],
     discovered_workflow_tools: Sequence[WorkflowTool] | None = None,
+    discovered_local_tools: Sequence[PreparedLocalTool] = (),
     discovered_mcp_tools: Mapping[str, MCPServerDescriptor],
     discovered_skills: Mapping[str, Path],
     discovered_skill_descriptors: Sequence[SkillDescriptor] | None = None,
@@ -144,6 +149,11 @@ def build_capabilities(
         filtered_user_tools: tuple[ToolDescriptor, ...] = ()
     else:
         filtered_user_tools = _filter_tools_by_name(discovered_user_tools, exclude_names)
+    filtered_local_tools = (
+        ()
+        if resolved.tools_disabled
+        else tuple(tool for tool in discovered_local_tools if tool.name not in exclude_names)
+    )
 
     workflow_tools = list(discovered_workflow_tools or [])
     if _workflows_enabled(resolved):
@@ -191,6 +201,7 @@ def build_capabilities(
 
     return AgentCapabilities.create(
         filtered_user_tools=filtered_user_tools,
+        filtered_local_tools=filtered_local_tools,
         filtered_workflow_tools=filtered_workflow_tools,
         filtered_mcp_tools=filtered_mcp_tools,
         skills=approved_skills,
@@ -209,6 +220,7 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     independently rejects those collisions once expanded.
     """
     names = {tool.name for tool in capabilities.filtered_user_tools or ()}
+    names.update(tool.name for tool in capabilities.filtered_local_tools)
     names.update(tool.name for tool in capabilities.filtered_mcp_tools or ())
     names.update(tool.name for tool in capabilities.filtered_workflow_tools)
     names.update(tool.name for tool in capabilities.web_request_tools or ())

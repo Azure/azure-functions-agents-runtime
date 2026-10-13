@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,11 @@ from typing import Any
 import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._local_tool_descriptor import (
+    LocalToolLaunch,
+    LocalToolSpec,
+    PreparedLocalTool,
+)
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import SubagentRef, WebRequestConfig
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
@@ -59,6 +65,23 @@ def _mcp_server(name: str) -> MCPServerDescriptor:
     return MCPServerDescriptor(
         name=name, url="https://fixture.invalid/mcp", transport="streamable-http",
         headers=(), tools=None, auth_scope=None, client_id=None,
+    )
+
+
+def _local_tool(name: str) -> PreparedLocalTool:
+    path = Path(f"{name}.js").resolve()
+    spec = LocalToolSpec.create(
+        name=name,
+        description=f"Tool {name}",
+        entrypoint=name,
+        source_path=path,
+        metadata_path=path.with_name("tool.md"),
+        parameters=(),
+    )
+    return PreparedLocalTool(
+        spec=spec,
+        source_sha256="0" * 64,
+        launch=LocalToolLaunch.create(command=Path(sys.executable), arguments=()),
     )
 
 
@@ -188,6 +211,19 @@ def test_build_capabilities_filters_user_tools_by_exclude_name() -> None:
     assert [t.name for t in capabilities.filtered_user_tools] == ["keep"]
 
 
+def test_build_capabilities_filters_local_tools_by_exclude_name() -> None:
+    capabilities = build_capabilities(
+        _resolved(exclude=["keep_out"]),
+        discovered_user_tools=[],
+        discovered_local_tools=[_local_tool("keep"), _local_tool("keep_out")],
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    assert [tool.name for tool in capabilities.filtered_local_tools] == ["keep"]
+    assert "keep" in existing_tool_names(_resolved(), capabilities)
+
+
 def test_build_capabilities_warns_for_unknown_workflow_exclude(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -214,6 +250,18 @@ def test_build_capabilities_tools_disabled_returns_empty_user_tools() -> None:
         discovered_skills={},
     )
     assert capabilities.filtered_user_tools == ()
+
+
+def test_build_capabilities_tools_disabled_returns_empty_local_tools() -> None:
+    capabilities = build_capabilities(
+        _resolved(tools_disabled=True),
+        discovered_user_tools=[],
+        discovered_local_tools=[_local_tool("anything")],
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    assert capabilities.filtered_local_tools == ()
 
 
 def test_build_capabilities_mcp_disabled_returns_empty_mcp_tools() -> None:

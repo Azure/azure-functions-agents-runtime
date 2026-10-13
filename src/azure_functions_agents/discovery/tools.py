@@ -15,10 +15,16 @@ from .._function_tool import (
     get_workflow_tool_metadata,
     tool,
 )
+from .._local_tool_descriptor import LocalToolSpec
 from .._logger import logger
 from .._tool_descriptor import ToolDescriptor, is_harness_object, warn_unsupported_tool
+from .local_tools import discover_local_tools
 
-type _CachedProjectTools = tuple[tuple[ToolDescriptor, ...], tuple[WorkflowTool, ...]]
+type _CachedProjectTools = tuple[
+    tuple[ToolDescriptor, ...],
+    tuple[WorkflowTool, ...],
+    tuple[LocalToolSpec, ...],
+]
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,7 @@ class ProjectTools:
 
     user_tools: list[ToolDescriptor]
     workflow_tools: list[WorkflowTool]
+    local_tool_specs: list[LocalToolSpec]
     failed_loads: list[tuple[str, str]]
 
 
@@ -72,6 +79,7 @@ def _copy_cached(cached: _CachedProjectTools) -> ProjectTools:
     return ProjectTools(
         user_tools=list(cached[0]),
         workflow_tools=list(cached[1]),
+        local_tool_specs=list(cached[2]),
         failed_loads=[],
     )
 
@@ -142,10 +150,11 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
 
     if not os.path.exists(tools_dir):
         logger.warning("Tools directory not found: %s", tools_dir)
-        _DISCOVERED_TOOLS_CACHE[resolved_root] = (tuple(tools), tuple(workflow_tools))
+        _DISCOVERED_TOOLS_CACHE[resolved_root] = (tuple(tools), tuple(workflow_tools), ())
         return ProjectTools(
             user_tools=list(tools),
             workflow_tools=list(workflow_tools),
+            local_tool_specs=[],
             failed_loads=[],
         )
 
@@ -212,13 +221,25 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
             failed_loads.append((filename, error_msg))
             logger.warning("Failed to load tool from %s: %s", filename, exc, exc_info=True)
 
-    _DISCOVERED_TOOLS_CACHE[resolved_root] = (tuple(tools), tuple(workflow_tools))
-    logger.info("Discovered %d user tool(s) from %s", len(tools), tools_dir)
+    local_tools = discover_local_tools(resolved_root)
+    failed_loads.extend(local_tools.failed_loads)
+    _DISCOVERED_TOOLS_CACHE[resolved_root] = (
+        tuple(tools),
+        tuple(workflow_tools),
+        local_tools.tools,
+    )
+    logger.info(
+        "Discovered %d Python tool(s) and %d JavaScript tool declaration(s) from %s",
+        len(tools),
+        len(local_tools.tools),
+        tools_dir,
+    )
     if failed_loads:
         logger.warning("Failed to load %d tool file(s)", len(failed_loads))
     return ProjectTools(
         user_tools=list(tools),
         workflow_tools=list(workflow_tools),
+        local_tool_specs=list(local_tools.tools),
         failed_loads=failed_loads,
     )
 

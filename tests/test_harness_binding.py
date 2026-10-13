@@ -133,10 +133,16 @@ def test_request_retains_frozen_neutral_descriptors_and_standalone_skill_paths()
     assert [item.name for item in fields(request)] == [
         "prompt", "instructions", "agent_slug", "session_id", "new_session",
         "model", "tools", "max_output_tokens", "deadline",
-        "mcp_servers", "skills", "skill_catalog",
+        "local_tools", "mcp_servers", "skills", "skill_catalog",
         "execution_role", "event_sink",
     ]
-    assert request.mcp_servers == request.skills == request.skill_catalog == ()
+    assert (
+        request.local_tools
+        == request.mcp_servers
+        == request.skills
+        == request.skill_catalog
+        == ()
+    )
     assert request.execution_role == "primary"
     assert request.event_sink is None
     assert request.tools is tools

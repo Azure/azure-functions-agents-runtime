@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 from azure_functions_agents import runner as _runner
 
 from ..._agent_identity import agent_id
+from ..._local_tool_descriptor import PreparedLocalTool
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
@@ -30,6 +31,7 @@ from ...registration.catalog import AgentCatalog
 from .. import _harness_execution
 from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest
 from .._history_identity import validate_agent_slug
+from ._maf_local_tools import build_maf_local_tools
 from ._maf_tools import build_maf_tools
 
 if TYPE_CHECKING:
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         Content,
         FunctionTool,
         HistoryProvider,
+        MCPStdioTool,
         MCPStreamableHTTPTool,
         Message,
         ResponseStream,
@@ -54,7 +57,7 @@ if TYPE_CHECKING:
 
     from ...workflows.schema import WorkflowPlanPolicy
 type AgentFunctionTool = ToolInput
-type AgentTool = FunctionTool | MCPStreamableHTTPTool
+type AgentTool = FunctionTool | MCPStreamableHTTPTool | MCPStdioTool
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
 type _FunctionArguments = str | Mapping[str, Any] | None
 type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
@@ -255,6 +258,7 @@ def assemble_agent_inputs(
     *,
     instructions: str | None,
     tools: Sequence[ToolInput] | None,
+    local_tools: Sequence[PreparedLocalTool] = (),
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     sandbox_tools: Sequence[ToolInput] | None,
     web_request_tools: Sequence[ToolInput] | None,
@@ -287,6 +291,7 @@ def assemble_agent_inputs(
             )
         )
     resolved_tools: list[AgentTool] = list(build_maf_tools(descriptors))
+    resolved_tools.extend(build_maf_local_tools(local_tools))
     servers = (
         tuple(discover_mcp_servers(root).servers.values())
         if mcp_tools is None
@@ -374,6 +379,7 @@ def _build_delegated_agent(
     resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
+        local_tools=capabilities.filtered_local_tools,
         mcp_tools=list(capabilities.filtered_mcp_tools or []),
         sandbox_tools=None,
         web_request_tools=capabilities.web_request_tools,
@@ -454,6 +460,7 @@ async def _build_agent_session(
     instructions: str | None,
     session_id: str | None,
     tools: Sequence[AgentFunctionTool] | None,
+    local_tools: Sequence[PreparedLocalTool] = (),
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path] | None,
     model: str | None,
@@ -505,6 +512,7 @@ async def _build_agent_session(
     resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=instructions,
         tools=tools,
+        local_tools=local_tools,
         mcp_tools=mcp_tools,
         app_root=app_root,
         sandbox_tools=sandbox_tools,
@@ -630,6 +638,7 @@ async def run(
             instructions=instructions,
             session_id=session_id,
             tools=request.tools,
+            local_tools=request.local_tools,
             mcp_tools=request.mcp_servers,
             skill_paths=tuple(skill.path for skill in request.skills) or None,
             model=model,
@@ -755,6 +764,7 @@ async def run_stream(
                 instructions=instructions,
                 session_id=session_id,
                 tools=request.tools,
+                local_tools=request.local_tools,
                 mcp_tools=request.mcp_servers,
                 skill_paths=tuple(skill.path for skill in request.skills) or None,
                 model=model,

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from azure_functions_agents import runner as _runner
 
+from ..._local_tool_descriptor import PreparedLocalTool
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput
 from ...config import ResolvedAgent, SubagentRef
@@ -82,6 +83,7 @@ class _CopilotHarnessRunner:
         timeout: float | None = None,
         deadline: float,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -103,6 +105,10 @@ class _CopilotHarnessRunner:
         event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentResult:
         del timeout
+        if local_tools:
+            raise UnsupportedCapabilityError(
+                "Copilot preview does not support process-backed local tools."
+            )
 
         configuration = agent_configuration or AgentConfiguration()
         _copilot_preview.validate_configuration(configuration)
@@ -125,6 +131,7 @@ class _CopilotHarnessRunner:
             session_id=session_id,
             session_is_new=session_is_new,
             tools=tools,
+            local_tools=local_tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             skills=skills,
@@ -180,6 +187,7 @@ class _CopilotHarnessRunner:
         timeout: float | None = None,
         deadline: float,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -215,6 +223,7 @@ class _CopilotHarnessRunner:
                         timeout=timeout,
                         deadline=deadline,
                         tools=tools,
+                        local_tools=local_tools,
                         mcp_tools=mcp_tools,
                         skill_paths=skill_paths,
                         model=model,
@@ -305,6 +314,10 @@ class _CopilotHarnessRunner:
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str:
         _copilot_preview.validate_configuration(resolved.agent_configuration)
+        if capabilities.filtered_local_tools:
+            raise UnsupportedCapabilityError(
+                "Copilot preview does not support process-backed local tools."
+            )
         resolved_model = resolved.model or self._harness.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")

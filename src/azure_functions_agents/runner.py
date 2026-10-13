@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 from pydantic import BaseModel, Field
 
 from ._function_tool import tool
+from ._local_tool_descriptor import PreparedLocalTool
 from ._logger import logger
 from ._observability import (
     FaultDomain,
@@ -290,6 +291,7 @@ def _request(
     session_id: str | None,
     session_is_new: bool,
     tools: Sequence[ToolInput] | None,
+    local_tools: Sequence[PreparedLocalTool],
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path] | None,
     skills: Sequence[SkillDescriptor] | None,
@@ -337,6 +339,7 @@ def _request(
         new_session=validated_id is None or session_is_new,
         model=model or harness.default_model or "",
         tools=descriptors,
+        local_tools=tuple(local_tools),
         mcp_servers=servers,
         skills=approved,
         skill_catalog=_merge_skill_descriptors(discovered, approved),
@@ -351,6 +354,7 @@ async def run_agent(
     instructions: str | None = None,
     timeout: float | None = None,
     tools: Sequence[AgentFunctionTool] | None = None,
+    local_tools: Sequence[PreparedLocalTool] = (),
     mcp_tools: Sequence[MCPServerDescriptor] | None = None,
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
@@ -382,6 +386,7 @@ async def run_agent(
         timeout=timeout,
         deadline=coordinator_deadline,
         tools=tools,
+        local_tools=local_tools,
         mcp_tools=mcp_tools,
         skill_paths=skill_paths,
         skills=skills,
@@ -409,6 +414,7 @@ async def run_agent_stream(
     instructions: str | None = None,
     timeout: float | None = None,
     tools: Sequence[AgentFunctionTool] | None = None,
+    local_tools: Sequence[PreparedLocalTool] = (),
     mcp_tools: Sequence[MCPServerDescriptor] | None = None,
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
@@ -443,6 +449,7 @@ async def run_agent_stream(
             timeout=timeout,
             deadline=deadline,
             tools=tools,
+            local_tools=local_tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             skills=skills,

@@ -220,6 +220,34 @@ def test_preview_config_scenario_indexes_without_native_process(preview):
     assert not _harness.get_harness(root).storage_root.exists()
 
 
+def test_preview_rejects_javascript_local_tools_before_app_construction(
+    preview, monkeypatch,
+):
+    import azure_functions_agents.app as app_module
+
+    (preview / "main.agent.md").write_text(
+        "---\nname: Preview Agent\n---\n\nUse available tools.\n",
+        encoding="utf-8",
+    )
+    tool_dir = preview / "tools" / "greet"
+    tool_dir.mkdir(parents=True)
+    (tool_dir / "tool.md").write_text(
+        "---\nname: greet\ndescription: Create a greeting.\n---\n",
+        encoding="utf-8",
+    )
+    (tool_dir / "greet.js").write_text(
+        "export function greet() { return 'hello'; }\n",
+        encoding="utf-8",
+    )
+    app_constructor = Mock(side_effect=AssertionError("FunctionApp must not be constructed"))
+    monkeypatch.setattr(app_module.func, "FunctionApp", app_constructor)
+
+    with pytest.raises(UnsupportedCapabilityError, match="process-backed local tools"):
+        create_function_app(preview)
+
+    app_constructor.assert_not_called()
+
+
 def test_custom_manager_is_rejected_before_function_app_construction(
     preview, monkeypatch, replace_client_manager,
 ):

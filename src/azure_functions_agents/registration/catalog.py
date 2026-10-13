@@ -29,6 +29,7 @@ def build_catalog(entries: dict[str, CatalogEntry]) -> AgentCatalog:
             resolved=entry.resolved,
             capabilities=AgentCapabilities.create(
                 filtered_user_tools=capabilities.filtered_user_tools,
+                filtered_local_tools=capabilities.filtered_local_tools,
                 filtered_workflow_tools=capabilities.filtered_workflow_tools,
                 filtered_mcp_tools=capabilities.filtered_mcp_tools,
                 enabled_skill_paths=capabilities.enabled_skill_paths,

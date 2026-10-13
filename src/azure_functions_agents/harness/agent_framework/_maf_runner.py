@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
+from ..._local_tool_descriptor import PreparedLocalTool
 from ..._tool_descriptor import ToolInput
 from ...config import ResolvedAgent, SubagentRef
 from ...config.schema import AgentConfiguration
@@ -39,6 +40,7 @@ class _MAFHarnessRunner:
         timeout: float | None = None,
         deadline: float,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -66,6 +68,7 @@ class _MAFHarnessRunner:
             session_is_new=session_is_new,
             deadline=deadline,
             tools=tools,
+            local_tools=local_tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             skills=skills,
@@ -104,6 +107,7 @@ class _MAFHarnessRunner:
         timeout: float | None = None,
         deadline: float,
         tools: Sequence[AgentFunctionTool] | None = None,
+        local_tools: Sequence[PreparedLocalTool] = (),
         mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
@@ -132,6 +136,7 @@ class _MAFHarnessRunner:
             session_is_new=session_is_new,
             deadline=deadline,
             tools=tools,
+            local_tools=local_tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             skills=skills,

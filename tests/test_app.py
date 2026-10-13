@@ -787,9 +787,11 @@ class TestStructuredIndexingLog:
         assert "mcp_servers" in capabilities
         assert "skills" in capabilities
         assert "user_tools" in capabilities
+        assert "local_tools" in capabilities
         assert isinstance(capabilities["mcp_servers"], int)
         assert isinstance(capabilities["skills"], int)
         assert isinstance(capabilities["user_tools"], int)
+        assert isinstance(capabilities["local_tools"], int)
 
     def test_indexing_log_includes_discovered_capability_names(
         self,
@@ -819,7 +821,13 @@ class TestStructuredIndexingLog:
         log_json = json.loads(log_message[json_start:])
 
         discovered_names = log_json["discovered_capability_names"]
-        assert set(discovered_names.keys()) == {"mcp_servers", "skills", "user_tools"}
+        assert set(discovered_names.keys()) == {
+            "local_tools",
+            "mcp_servers",
+            "skills",
+            "user_tools",
+        }
+        assert isinstance(discovered_names["local_tools"], list)
         assert isinstance(discovered_names["mcp_servers"], list)
         assert isinstance(discovered_names["skills"], list)
         assert isinstance(discovered_names["user_tools"], list)
@@ -853,7 +861,13 @@ class TestStructuredIndexingLog:
 
         agent_entry = log_json["agents"][0]
         registered = agent_entry["registered_capabilities"]
-        assert set(registered.keys()) == {"mcp_servers", "skills", "user_tools"}
+        assert set(registered.keys()) == {
+            "local_tools",
+            "mcp_servers",
+            "skills",
+            "user_tools",
+        }
+        assert isinstance(registered["local_tools"], list)
         assert isinstance(registered["mcp_servers"], list)
         assert isinstance(registered["skills"], list)
         assert isinstance(registered["user_tools"], list)

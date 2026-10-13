@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from .._local_tool_descriptor import PreparedLocalTool
 from .._logger import logger
 from .._tool_descriptor import ToolDescriptor
 from ..client_manager import ProviderKind as ProviderKind
@@ -72,6 +73,7 @@ class HarnessRequest:
     tools: tuple[ToolDescriptor, ...]
     max_output_tokens: int | None
     deadline: float
+    local_tools: tuple[PreparedLocalTool, ...] = ()
     mcp_servers: tuple[MCPServerDescriptor, ...] = ()
     skills: tuple[SkillDescriptor, ...] = ()
     skill_catalog: tuple[SkillDescriptor, ...] = ()
