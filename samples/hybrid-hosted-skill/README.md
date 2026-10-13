@@ -43,9 +43,7 @@ prove conversation ownership. Callers that share endpoint access can resume a
 conversation when they know its ID, so applications that require per-user or
 per-tenant isolation must authorize session continuation themselves.
 
-The `summarizer.hostedskill.md` file has no trigger or built-in endpoints. The
-suffix is an authoring alias for `.agent.md` that signals its intended use; it
-does not restrict how the agent can be configured. This sample's file is an
-inert catalog entry selected by the `summarizer` filename slug. The sample is
+The `summarizer.agent.md` file has no trigger or built-in endpoints. It is an
+inert catalog entry selected by the `summarizer` filename slug. This sample is
 local-first and does not provision Azure resources; use the repository's
 deployable samples as a hosting baseline when moving it to Azure.

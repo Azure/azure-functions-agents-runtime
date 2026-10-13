@@ -15,7 +15,6 @@ from ._logger import logger
 _PREFIXED_AGENT_FILE_SUFFIXES = (
     ".agent.md",
     ".claude.md",
-    ".hostedskill.md",
 )
 
 

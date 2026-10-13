@@ -232,8 +232,7 @@ my-app/
 │                            #  only one may be present in the same app)
 ├── agents/                  # Optional folder for organization
 │   ├── chat.agent.md
-│   ├── report.claude.md     # *.claude.md is equivalent to *.agent.md — prefix becomes slug
-│   └── helper.hostedskill.md # Pure *.agent.md alias — prefix becomes slug
+│   └── report.claude.md     # *.claude.md is equivalent to *.agent.md — prefix becomes slug
 ├── tools/
 └── skills/
 ```
@@ -337,8 +336,7 @@ Agent instructions in markdown...
 > **Flexible filename conventions:** Beyond `*.agent.md`, the runtime also supports:
 > - **`agent.md`** (any casing: `Agent.md`, `AGENT.MD`) and **`CLAUDE.md`** (any casing: `Claude.md`, `claude.md`) — bare aliases for `main.agent.md` that produce slug `main` and `is_main=True`. `agent.md`, `CLAUDE.md`, and `main.agent.md` all produce the same slug so at most one may be present in the same app.
 > - **`*.claude.md`** — e.g. `summarizer.claude.md` is equivalent to `summarizer.agent.md`; the prefix becomes the slug.
-> - **`*.hostedskill.md`** — e.g. `summarizer.hostedskill.md` is a pure alias for `summarizer.agent.md`; it communicates authoring intent without restricting configuration. `main.hostedskill.md` produces slug `main`, while bare `hostedskill.md` is not recognized.
-> - **Case-insensitive suffix matching** — `.agent.md`, `.claude.md`, and `.hostedskill.md` suffixes are matched case-insensitively. Files that derive the same slug collide even when their suffixes differ.
+> - **Case-insensitive suffix matching** — `.agent.md` and `.claude.md` suffixes are matched case-insensitively. Files that derive the same slug collide even when their suffixes differ.
 
 > **⚠️ Breaking change**: Earlier releases silently auto-suffixed (`_2`, `_3`, ...) when two agent files
 > sanitized to the same name. **Slugs are now required to be globally unique across the whole app.** A

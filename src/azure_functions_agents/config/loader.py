@@ -254,8 +254,8 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
     """Read recognized agent markdown files from app_root and agents/.
 
     Searches for agent markdown files in these locations:
-     1. Top-level prefixed files: ``*.agent.md``, ``*.claude.md``, and
-         ``*.hostedskill.md`` (case-insensitive)
+    1. Top-level prefixed files: ``*.agent.md`` and ``*.claude.md``
+       (case-insensitive)
     2. Top-level single-agent: ``{app_root}/agent.md`` or ``{app_root}/CLAUDE.md`` (case-insensitive)
     3. Agents folder prefixed files with any recognized suffix
     4. Agents folder single-agent: ``{app_root}/agents/agent.md`` or ``{app_root}/agents/CLAUDE.md``
@@ -267,8 +267,8 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
     Prefixed aliases are normalized to *.agent.md internally, preserving the
     prefix for function naming.
     
-    Suffix matching is case-insensitive, supporting files like report.AGENT.md,
-    summary.CLAUDE.md, or helper.HOSTEDSKILL.MD.
+    Suffix matching is case-insensitive, supporting files like report.AGENT.md
+    or summary.CLAUDE.md.
 
     Files from all locations are combined and sorted by path for deterministic
     ordering. This allows customers to organize agents in a dedicated folder

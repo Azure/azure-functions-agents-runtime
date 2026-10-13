@@ -121,9 +121,8 @@ Your agent is now running at `http://localhost:7071/agents/main/` with a built-i
 ## Call an agent from your Function
 
 When your application owns the route or trigger, omit the agent's `trigger`
-and `builtin_endpoints`. Save the agent as `summarizer.hostedskill.md`, then
-inject it by filename-derived slug. The `.hostedskill.md` suffix is a pure alias
-for `.agent.md` that communicates authoring intent:
+and `builtin_endpoints`. Save the agent as `summarizer.agent.md`, then inject it
+by filename-derived slug:
 
 ```python
 from azurefunctions.extensions.http.fastapi import Request, Response

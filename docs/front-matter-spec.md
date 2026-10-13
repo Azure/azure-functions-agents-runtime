@@ -1514,7 +1514,7 @@ For agents, two related identifiers are derived from the source filename. The fr
 
 #### Flexible filename conventions
 
-In addition to the standard `<name>.agent.md` pattern, the runtime recognises three alternative conventions:
+In addition to the standard `<name>.agent.md` pattern, the runtime recognises two alternative conventions:
 
 **Bare single-agent aliases** — `agent.md` (any casing: `Agent.md`, `AGENT.MD`) and `CLAUDE.md` (any casing: `Claude.md`, `claude.md`) are treated as aliases for `main.agent.md` internally. Both produce slug `main` and are marked `is_main=True`. Use them when your function app contains exactly one agent and a simpler filename is preferable:
 
@@ -1532,11 +1532,9 @@ _(saved as `agent.md` — available at `/agents/main/chat`, same endpoint as `ma
 
 **`*.claude.md` prefix pattern** — `summarizer.claude.md` is equivalent to `summarizer.agent.md`: the prefix becomes the slug (`summarizer`). Use whichever suffix fits your workflow.
 
-**`*.hostedskill.md` prefix pattern** — `summarizer.hostedskill.md` is also equivalent to `summarizer.agent.md`. It can communicate that application code intends to select the agent through `@app.hosted_skill`, but it is a pure authoring alias and does not restrict triggers, endpoints, or any other configuration. `main.hostedskill.md` produces slug `main` and is marked as the main agent; bare `hostedskill.md` is not recognized.
+**Case-insensitive suffix matching** — `.agent.md` and `.claude.md` suffix detection is case-insensitive: `Report.AGENT.md` produces slug `report`, same as `report.agent.md`. Two filenames that produce the same slug collide and will fail startup.
 
-**Case-insensitive suffix matching** — `.agent.md`, `.claude.md`, and `.hostedskill.md` suffix detection is case-insensitive: `Report.AGENT.md` produces slug `report`, same as `report.agent.md`. Two filenames that produce the same slug collide and will fail startup, including collisions across different suffixes.
-
-> **Not supported:** `*.agents.md` (plural), bare `hostedskill.md`, and structural variants such as `*.hosted_skill.md` are not recognised patterns. Such files are silently ignored by the loader. Use `.agent.md`, `.claude.md`, or the exact prefixed `.hostedskill.md` suffix.
+> **Not supported:** `*.agents.md` (plural) is not a recognised pattern. Such files are silently ignored by the loader. Use `.agent.md` or `.claude.md`.
 
 > **Breaking change (FRD 0007):** Duplicate agent slugs — including two file stems that *sanitize* to the same value (for example `daily-report.agent.md` and `daily_report.agent.md`), and duplicates across the root and an `agents/` subfolder — now fail app startup instead of silently auto-suffixing. This unifies agent-slug collision handling with duplicate-workflow-tool checks, and is required because a slug is now also a prompt-visible identity (the `delegate_<slug>` tool name); a silently renamed agent could otherwise leave a `subagents:` reference pointing at the wrong agent, or leave two different agents indistinguishable to a coordinator's model. Skill content validation now belongs to the selected SDK, not startup discovery. If you relied on the old auto-suffix behavior, rename the colliding file(s) so every agent slug is unique.
 
@@ -1567,7 +1565,6 @@ invalid.
                             #   (agent.md, CLAUDE.md, and main.agent.md are aliases; only one per app)
   daily_report.agent.md     # Timer-triggered agent
   resource_summary.claude.md # *.claude.md is equivalent to *.agent.md — prefix becomes slug
-  summarizer.hostedskill.md # Pure *.agent.md alias — prefix becomes slug
   function_app.py           # Python Functions entry point
   host.json
   requirements.txt

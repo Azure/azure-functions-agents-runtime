@@ -193,45 +193,6 @@ def test_create_function_app_fails_fast_on_duplicate_function_names(
     assert "daily_report.agent.md" in message
 
 
-@pytest.mark.parametrize(
-    ("first_filename", "second_filename"),
-    [
-        ("summary.agent.md", "summary.hostedskill.md"),
-        ("summary.claude.md", "summary.hostedskill.md"),
-        ("agent.md", "main.hostedskill.md"),
-        ("CLAUDE.md", "main.hostedskill.md"),
-    ],
-)
-def test_create_function_app_rejects_hostedskill_cross_suffix_collisions(
-    tmp_path: Path,
-    first_filename: str,
-    second_filename: str,
-) -> None:
-    _write_agent(
-        tmp_path,
-        first_filename,
-        """
-        name: First
-        description: First collision candidate
-        """,
-    )
-    _write_agent(
-        tmp_path,
-        second_filename,
-        """
-        name: Second
-        description: Second collision candidate
-        """,
-    )
-
-    with pytest.raises(ValueError, match=r"[Dd]uplicate agent slug") as exc_info:
-        create_function_app(tmp_path)
-
-    message = str(exc_info.value)
-    assert first_filename in message
-    assert second_filename in message
-
-
 def test_create_function_app_fails_fast_on_duplicate_slugs_with_builtin_endpoints(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,

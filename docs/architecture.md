@@ -16,7 +16,7 @@ composition, registration or execution path (FRD 0010).
 
 ```mermaid
 flowchart LR
-    A["Agent project inputs<br/>*.agent.md / agent.md / CLAUDE.md / *.claude.md / *.hostedskill.md<br/>agents.config.yaml<br/>mcp.json<br/>skills/<br/>tools/"] -->|"Path"| B["config/paths.py"]
+    A["Agent project inputs<br/>*.agent.md / agent.md / CLAUDE.md / *.claude.md<br/>agents.config.yaml<br/>mcp.json<br/>skills/<br/>tools/"] -->|"Path"| B["config/paths.py"]
     B -->|"app_root: Path"| C["config/loader.py<br/>load_global_config<br/>load_agent_specs"]
     A -->|"Path"| D["discovery/*<br/>skills + tools + MCP"]
     C -->|"GlobalConfig + list of AgentSpec"| E["config/merge.py<br/>compose"]
@@ -161,7 +161,7 @@ When the host imports your app module and calls `create_function_app()` (or the 
    discovery or telemetry bootstrap. It does not launch a native process.
 2. `config/loader.py` reads `agents.config.yaml`.
 3. `app.py` calls `_observability.configure_observability()` for neutral OpenTelemetry export/configuration. MAF instrumentation is enabled later by the selected MAF runner only; a Copilot app does not import or initialize MAF instrumentation.
-4. `config/loader.py` reads every agent markdown file (`*.agent.md`, bare `agent.md`/`CLAUDE.md`, `*.claude.md`, and `*.hostedskill.md`) and creates `AgentSpec` values.
+4. `config/loader.py` reads every agent markdown file (`*.agent.md`, bare `agent.md`/`CLAUDE.md`, and `*.claude.md`) and creates `AgentSpec` values.
 5. `discovery/tools.py`, `discovery/mcp.py`, and `discovery/skills.py` build the shared inventories for the project.
 6. `config/merge.py` turns each `AgentSpec` plus `GlobalConfig` into one `ResolvedAgent`, computing its identity `slug` via `_slug.py`.
 7. `app.py`'s `_fail_on_duplicate_slugs()` builds the app-wide slug index and fails fast on collisions; `config/validation.py:validate_subagent_references()` then rejects unknown/duplicate/self `subagents:` references against that index.
@@ -203,7 +203,7 @@ The `_compose_function_app()` docstring in `src/azure_functions_agents/app.py:_c
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:_load_agent_spec()`, `src/azure_functions_agents/config/loader.py:load_agent_specs()`
    - **Input:** `app_root: Path`
    - **Output:** `list[AgentSpec]`
-  - **Notes:** the loader searches for agent markdown files in two locations: the app root and an optional `agents/` folder (`{app_root}/agents/`). The folder name is case-insensitive (`agents/` or `Agents/`). Within each location it collects prefixed `*.agent.md`, `*.claude.md`, and `*.hostedskill.md` files plus bare `agent.md` or `CLAUDE.md` aliases. All matching is case-insensitive. Prefixed aliases normalize to `*.agent.md` internally, and their non-empty prefix determines identity; `.hostedskill.md` is a pure authoring alias and adds no capability restrictions. Bare `hostedskill.md` is not recognized. Files from all locations are combined and sorted by path for deterministic ordering. Each file is parsed as YAML front matter plus markdown body. When substitution is enabled, front matter string values are normalized through `resolve_env_vars_in_data()` and the markdown body through `substitute_env_vars_in_text()`. The loader stamps `source_file` with the real on-disk path, sets `is_main` when the normalized filename is `main.agent.md` (regardless of location), and stores the markdown body in `AgentSpec.instructions`. Any filenames that derive the same slug, including collisions across suffixes or locations, are rejected app-wide in step 6 (`_fail_on_duplicate_slugs()`).
+  - **Notes:** the loader searches for agent markdown files in two locations: the app root and an optional `agents/` folder (`{app_root}/agents/`). The folder name is case-insensitive (`agents/` or `Agents/`). Within each location it collects prefixed `*.agent.md` and `*.claude.md` files plus bare `agent.md` or `CLAUDE.md` aliases. All matching is case-insensitive. Prefixed aliases normalize to `*.agent.md` internally, and their non-empty prefix determines identity. Files from all locations are combined and sorted by path for deterministic ordering. Each file is parsed as YAML front matter plus markdown body. When substitution is enabled, front matter string values are normalized through `resolve_env_vars_in_data()` and the markdown body through `substitute_env_vars_in_text()`. The loader stamps `source_file` with the real on-disk path, sets `is_main` when the normalized filename is `main.agent.md` (regardless of location), and stores the markdown body in `AgentSpec.instructions`. Any filenames that derive the same slug, including collisions across suffixes or locations, are rejected app-wide in step 6 (`_fail_on_duplicate_slugs()`).
 
 4. **Discover runtime inventories from disk**
   - **Implemented by:** `src/azure_functions_agents/app.py:_compose_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_project_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
