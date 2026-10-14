@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import re
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..._observability import (
@@ -15,21 +14,18 @@ from ..._observability import (
     ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
     ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
     RuntimeSpan,
+    TelemetryAttributeValue,
+    safe_telemetry_name,
 )
 
 if TYPE_CHECKING:
     from copilot.session_events import AssistantUsageData
 
-_METADATA_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]")
 _USAGE_EVENT_NAME = "af.copilot.model.usage"
 
 
 def _duration_ms(value: timedelta | None) -> float | None:
     return value.total_seconds() * 1000 if value is not None else None
-
-
-def _safe_metadata_name(value: str) -> str:
-    return _METADATA_NAME_PATTERN.sub("_", value)[:128]
 
 
 class CopilotEventTelemetry:
@@ -48,7 +44,7 @@ class CopilotEventTelemetry:
         if event_id in self._usage_event_ids:
             return False
         self._usage_event_ids.add(event_id)
-        attributes: dict[str, Any] = {
+        attributes: dict[str, TelemetryAttributeValue] = {
             ATTR_GEN_AI_REQUEST_MODEL: usage.model,
             ATTR_GEN_AI_USAGE_INPUT_TOKENS: usage.input_tokens,
             ATTR_GEN_AI_USAGE_OUTPUT_TOKENS: usage.output_tokens,
@@ -69,7 +65,7 @@ class CopilotEventTelemetry:
 
     def observe_skill(self, name: str) -> None:
         """Record only the sanitized skill name, never its prompt or file contents."""
-        safe_name = _safe_metadata_name(name)
+        safe_name = safe_telemetry_name(name)
         if safe_name:
             self._run_span.add_event(
                 "af.copilot.skill.invoked",

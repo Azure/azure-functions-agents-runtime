@@ -991,8 +991,11 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
             asyncio.run(handler({"past_due": False}))
 
     [span] = exporter.get_finished_spans()
-    assert span.name == "agent.run resolved-agent-slug"
+    assert span.name == "invoke_agent resolved-agent-slug"
+    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
     assert span.attributes["gen_ai.agent.name"] == "resolved-agent-slug"
+    assert span.attributes["gen_ai.conversation.id"]
+    assert "af.agent.session_id" not in span.attributes
     [usage_event] = [
         event for event in span.events if event.name == "af.copilot.model.usage"
     ]

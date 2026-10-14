@@ -18,7 +18,6 @@ from .._observability import (
     ATTR_AGENT_INPUT_BYTES,
     ATTR_AGENT_OUTCOME,
     ATTR_AGENT_RESPONSE_BYTES,
-    ATTR_AGENT_SESSION_ID,
     ATTR_AGENT_TOOL_CALL_COUNT,
     ATTR_AGENT_TOOL_ERROR_COUNT,
     ATTR_FAULT_DOMAIN,
@@ -26,7 +25,9 @@ from .._observability import (
     LifecycleStage,
     SpanOutcome,
     agent_run_attributes,
+    agent_run_span_name,
     capture_sensitive_data,
+    set_agent_session_attribute,
     start_span,
 )
 from .._source_marker import source_marker
@@ -279,7 +280,10 @@ def make_agent_handler(
 
         session_id = _new_session_id()
         with start_span(
-            f"agent.run {resolved.slug}",
+            agent_run_span_name(
+                agent_name=resolved.slug,
+                harness_name=harness.name,
+            ),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes=agent_run_attributes(
                 agent_name=resolved.slug,
@@ -287,6 +291,8 @@ def make_agent_handler(
                 trigger_type=trigger_type,
                 session_id=session_id,
                 model=resolved.model,
+                harness_name=harness.name,
+                provider_kind=harness.provider.kind if harness.provider else None,
             ),
         ) as span:
             try:
@@ -405,7 +411,10 @@ def make_http_agent_handler(
         )
 
         with start_span(
-            f"agent.run {resolved.slug}",
+            agent_run_span_name(
+                agent_name=resolved.slug,
+                harness_name=harness.name,
+            ),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes=agent_run_attributes(
                 agent_name=resolved.slug,
@@ -413,6 +422,8 @@ def make_http_agent_handler(
                 trigger_type="http",
                 session_id=None,
                 model=resolved.model,
+                harness_name=harness.name,
+                provider_kind=harness.provider.kind if harness.provider else None,
             ),
         ) as span:
             try:
@@ -420,7 +431,11 @@ def make_http_agent_handler(
                 session_state = HarnessSessionState(
                     caller_supplied=supplied_session_id is not None
                 )
-                span.set_attribute(ATTR_AGENT_SESSION_ID, session_id)
+                set_agent_session_attribute(
+                    span,
+                    session_id=session_id,
+                    harness_name=harness.name,
+                )
                 try:
                     body = await req.json()
                     body_json = json.dumps(body, ensure_ascii=False, default=str)

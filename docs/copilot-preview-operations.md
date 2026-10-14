@@ -235,11 +235,13 @@ It adds no new settings, caps, receiver, exporter, flush/shutdown hook, or
 create/resume session-open telemetry. MAF behavior stays unchanged.
 
 Each unique public `ASSISTANT_USAGE` event is recorded as a custom
-`af.copilot.model.usage` span event on the owning `agent.run`. It uses standard
-`gen_ai.usage.*` fields where reported semantics match exactly; reported
-duration, TTFT, and inter-token measures remain custom `af.copilot.*` values.
-No backdated inference span is created or implied. The existing once-only
-eight-field invocation totals stay unchanged.
+`af.copilot.model.usage` span event on the owning Copilot `invoke_agent` span.
+It uses standard `gen_ai.usage.*` fields where reported semantics match
+exactly; reported duration, TTFT, and inter-token measures remain custom
+`af.copilot.*` values. No backdated inference span is created or implied, and
+standard GenAI inference metrics remain deferred until the runtime has reliable
+boundary evidence. The existing once-only eight-field invocation totals stay
+unchanged.
 
 Completion records, including completion-only records, continue to contribute
 to `AgentResult` and aggregate tool counts. A timed telemetry span requires a
@@ -247,16 +249,16 @@ coherent call-ID/timestamp-matched `tool.execution_start` /
 `tool.execution_complete` pair. Custom tools restore captured host context
 before invocation, and the wrapper owns each wrapped call ID so one wrapped
 call is counted once. This preserves the host's nested
-`agent.run -> execute_tool delegate_<slug> -> child agent.run` trace shape for
+`agent.run -> execute_tool delegate_<slug> -> invoke_agent {child}` trace shape for
 delegates while leaving coordinator-visible SSE limited to the delegate tool
 boundary and final child text.
 
 | Source | Expectation |
 | --- | --- |
-| Direct HTTP and built-in chat UI turns | Use the same turn-scoped `agent.run` span, tool accounting, and usage observations. |
+| Direct HTTP and built-in chat UI turns | Use the same turn-scoped Copilot `invoke_agent` span, tool accounting, and usage observations. |
 | `/chatstream` SSE | Mirrors translated callbacks for the current turn only; it is not evidence of full native child-span hierarchy. |
 | Delegates | Preserve the nested host trace shape above; native specialist session events do not appear as a second coordinator stream. |
-| Workflow Sub Agent leaves | Each leaf is observed as its own run; model/duration appear only when reported by the SDK. |
+| Workflow Sub Agent leaves | Each leaf is observed as its own `invoke_agent` span; model/duration appear only when reported by the SDK. |
 | Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
 
 `ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but

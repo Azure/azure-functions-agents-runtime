@@ -20,6 +20,7 @@ from ..._observability import (
     LifecycleStage,
     SpanOutcome,
     agent_run_attributes,
+    agent_run_span_name,
     start_span,
 )
 from ..._tool_descriptor import ToolDescriptor, ToolInput
@@ -267,7 +268,10 @@ class _CopilotHarnessRunner:
                     events.finish()
 
             with start_span(
-                f"agent.run {agent_name or 'agent'}",
+                agent_run_span_name(
+                    agent_name=agent_name,
+                    harness_name=self._harness.name,
+                ),
                 lifecycle_stage=LifecycleStage.AGENT_RUN,
                 attributes=agent_run_attributes(
                     agent_name=agent_name,
@@ -275,6 +279,8 @@ class _CopilotHarnessRunner:
                     trigger_type="stream",
                     session_id=resolved_id,
                     model=model,
+                    harness_name=self._harness.name,
+                    provider_kind=self._harness.provider.kind if self._harness.provider else None,
                 ),
             ) as span:
                 execution = asyncio.create_task(execute())
@@ -336,7 +342,10 @@ class _CopilotHarnessRunner:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
         session_id = uuid.uuid4().hex
         with start_span(
-            f"agent.run {resolved.slug}",
+            agent_run_span_name(
+                agent_name=resolved.slug,
+                harness_name=self._harness.name,
+            ),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=False,
             attributes={
@@ -346,6 +355,8 @@ class _CopilotHarnessRunner:
                     trigger_type=None,
                     session_id=session_id,
                     model=resolved_model,
+                    harness_name=self._harness.name,
+                    provider_kind=self._harness.provider.kind if self._harness.provider else None,
                 ),
                 "af.agent.execution_role": execution_role,
             },

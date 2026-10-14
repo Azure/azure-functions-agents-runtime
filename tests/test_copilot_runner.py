@@ -318,13 +318,15 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     spans = {span.name: span for span in exporter.get_finished_spans()}
     root = spans["agent.run coordinator"]
     tool_span = spans["execute_tool delegate_analyst"]
-    leaf_span = spans["agent.run analyst"]
+    leaf_span = spans["invoke_agent analyst"]
     assert tool_span.parent.span_id == root.context.span_id
     assert leaf_span.parent.span_id == tool_span.context.span_id
     assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
     assert leaf_span.attributes["af.agent.outcome"] == "success"
+    assert leaf_span.attributes["gen_ai.operation.name"] == "invoke_agent"
     assert leaf_span.attributes["gen_ai.agent.name"] == "analyst"
-    assert leaf_span.attributes["af.agent.session_id"] == leaf_request.session_id
+    assert leaf_span.attributes["gen_ai.conversation.id"] == leaf_request.session_id
+    assert "af.agent.session_id" not in leaf_span.attributes
     [usage_event] = [
         event for event in leaf_span.events if event.name == "af.copilot.model.usage"
     ]
@@ -376,7 +378,9 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
 
     assert [event["type"] for event in events] == ["delta", "done"], events
     [span] = exporter.get_finished_spans()
-    assert span.name == "agent.run sse_agent"
+    assert span.name == "invoke_agent sse_agent"
+    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
+    assert span.attributes["gen_ai.conversation.id"] == "sse-session"
     [usage_event] = [
         event for event in span.events if event.name == "af.copilot.model.usage"
     ]
@@ -433,6 +437,8 @@ async def test_custom_tool_cancellation_closes_wrapper_span_without_exception_co
     spans = {span.name: span for span in exporter.get_finished_spans()}
     cancelled_span = spans["execute_tool cancel_tool"]
     assert cancelled_span.attributes["af.tool.outcome"] == "cancelled"
+    assert cancelled_span.status.status_code.name == "UNSET"
+    assert "af.fault_domain" not in cancelled_span.attributes
     assert all(event.name != "exception" for event in cancelled_span.events)
     assert "cancel" not in repr(cancelled_span.events)
 
@@ -605,14 +611,67 @@ async def test_workflow_leaf_failure_closes_run_span_without_exception_content(
         )
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
-    workflow_span = spans["agent.run analyst"]
+    workflow_span = spans["invoke_agent analyst"]
     assert workflow_span.parent.span_id == spans["agent.run workflow"].context.span_id
     assert workflow_span.attributes["af.agent.execution_role"] == "workflow_subagent"
     assert workflow_span.attributes["af.agent.outcome"] == "error"
+    assert workflow_span.attributes["error.type"] == "RuntimeError"
     assert workflow_span.status.description != "private session-open detail"
     assert all(event.name != "exception" for event in workflow_span.events)
     [usage_event] = [
         event for event in workflow_span.events if event.name == "af.copilot.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 6
+
+
+@pytest.mark.asyncio
+async def test_delegate_leaf_cancellation_closes_run_span_without_error_status(
+    preview, monkeypatch,
+):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-delegate-leaf-cancellation-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    async def cancel_with_usage(*_args, **_kwargs):
+        observability.current_span().add_event(
+            "af.copilot.model.usage",
+            {"gen_ai.usage.output_tokens": 6},
+        )
+        raise asyncio.CancelledError("private cancellation detail")
+
+    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=cancel_with_usage))
+    leaf_runner = _copilot_runner._CopilotHarnessRunner(preview)
+    parent = tracer.start_span("agent.run coordinator")
+
+    with trace.use_span(parent, end_on_exit=True), pytest.raises(asyncio.CancelledError):
+        await leaf_runner.run_leaf_agent_task(
+            _specialist(),
+            AgentCapabilities(_harness=preview),
+            "Analyze",
+            timeout=3,
+            execution_role="delegate",
+        )
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    leaf_span = spans["invoke_agent analyst"]
+    assert leaf_span.parent.span_id == spans["agent.run coordinator"].context.span_id
+    assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
+    assert leaf_span.attributes["af.agent.outcome"] == "cancelled"
+    assert leaf_span.status.status_code.name == "UNSET"
+    assert "af.fault_domain" not in leaf_span.attributes
+    assert all(event.name != "exception" for event in leaf_span.events)
+    [usage_event] = [
+        event for event in leaf_span.events if event.name == "af.copilot.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 6
 

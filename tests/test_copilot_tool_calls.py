@@ -333,6 +333,8 @@ def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch, mcp_
         calls = CopilotToolCalls(
             parent_context=observability.capture_current_context(),
             run_span=observability.current_span(),
+            agent_name="main",
+            session_id="session-123",
         )
         calls.start_native(
             _start(
@@ -377,9 +379,15 @@ def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch, mcp_
     assert tool_spans[0].parent.span_id != 0
     assert tool_spans[0].start_time == expected_start_ns
     assert tool_spans[0].end_time == expected_end_ns
+    assert tool_spans[0].attributes["gen_ai.operation.name"] == "execute_tool"
+    assert tool_spans[0].attributes["gen_ai.tool.call.id"] == "native-1"
     assert tool_spans[0].attributes["af.tool.source"] == "copilot.native"
+    assert tool_spans[0].attributes["gen_ai.agent.name"] == "main"
+    assert tool_spans[0].attributes["gen_ai.agent.id"] == "local/main"
+    assert tool_spans[0].attributes["gen_ai.conversation.id"] == "session-123"
     assert tool_spans[0].attributes["gen_ai.tool.name"] == "remote_lookup"
     assert tool_spans[0].attributes["af.tool.outcome"] == "success"
+    assert "af.tool.name" not in tool_spans[0].attributes
     if mcp_metadata:
         assert tool_spans[0].attributes["mcp.method.name"] == "tools/call"
     else:
@@ -406,6 +414,8 @@ def test_failed_native_tool_sets_error_status_without_exception_content(monkeypa
         calls = CopilotToolCalls(
             parent_context=observability.capture_current_context(),
             run_span=observability.current_span(),
+            agent_name="main",
+            session_id="session-123",
         )
         calls.start_native(
             _start(name="remote_lookup"),
@@ -428,6 +438,7 @@ def test_failed_native_tool_sets_error_status_without_exception_content(monkeypa
         if span.name == "execute_tool remote_lookup"
     ]
     assert failed_span.attributes["af.tool.outcome"] == "error"
+    assert failed_span.attributes["error.type"] == "tool_execution_error"
     assert failed_span.status.status_code.name == "ERROR"
     assert failed_span.status.description == "Native tool failed or was denied."
     assert failed_span.attributes["af.fault_domain"] == "unknown"
@@ -513,6 +524,8 @@ def test_custom_tool_wrapper_claims_reserved_native_call_once(monkeypatch, nativ
             parent_context=observability.capture_current_context(),
             run_span=observability.current_span(),
             custom_tool_names=("host_tool",),
+            agent_name="main",
+            session_id="session-123",
         )
 
         def emit_native_pair():
@@ -546,8 +559,12 @@ def test_custom_tool_wrapper_claims_reserved_native_call_once(monkeypatch, nativ
     spans = exporter.get_finished_spans()
     assert [span.name for span in spans].count("execute_tool host_tool") == 1
     [custom_span] = [span for span in spans if span.name == "execute_tool host_tool"]
+    assert custom_span.attributes["gen_ai.operation.name"] == "execute_tool"
+    assert custom_span.attributes["gen_ai.tool.call.id"] == "native-1"
     assert custom_span.attributes["af.tool.source"] == "copilot.wrapper"
     assert custom_span.attributes["gen_ai.tool.name"] == "host_tool"
+    assert custom_span.attributes["gen_ai.conversation.id"] == "session-123"
+    assert "af.tool.name" not in custom_span.attributes
 
 
 def test_duplicate_custom_start_claims_one_wrapper_span(monkeypatch):

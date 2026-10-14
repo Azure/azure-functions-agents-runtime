@@ -130,23 +130,32 @@ spans and the sandbox/`web_request` tool spans together.
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
 In the default-off Copilot preview, turn-scoped tool accounting comes from the
-active turn's public SDK events rather than a second receiver. Native MCP and
-`skill` / `view` / `bash` calls, including permission denials, populate
-`AgentResult.tool_calls` and the existing tool/error counts from completion
-records, including completion-only records. A timed telemetry span is emitted
-only when start and completion records have coherent call-ID ownership and
-matched timestamps; incomplete or ambiguous timing is not guessed. The custom
-wrapper restores captured host context before invocation, owns each wrapped
-call ID, and deduplicates native metadata so one wrapped call is counted once.
-Each unique public `ASSISTANT_USAGE` event becomes a custom
-`af.copilot.model.usage` span event on the owning `agent.run`. It uses standard
-`gen_ai.usage.*` fields where the reported semantics match exactly; reported
-duration, TTFT, and inter-token measures remain custom `af.copilot.*` values.
-No backdated inference span is created or implied. These observations stay
-separate from the existing once-only eight-field invocation totals.
-`skill.invoked` metadata is not an extra tool call. The same sensitive-data
-policy applies, and counting once is not a guarantee of exactly-once tool
-effects.
+active turn's public SDK events rather than a second receiver. The runtime's
+Copilot semantic alignment targets the OpenTelemetry GenAI semantic conventions
+**Development** revision
+`4e8a2812139b2a999d959e3650e24dfc64e21943`. Copilot uses one canonical
+`invoke_agent {gen_ai.agent.name}` span per actual invocation and one canonical
+`execute_tool {gen_ai.tool.name}` span per actual tool call; MAF keeps its
+existing instrumentation unchanged and the runtime does not add duplicate
+canonical wrappers on that path.
+
+Native MCP and `skill` / `view` / `bash` calls, including permission denials,
+populate `AgentResult.tool_calls` and the existing tool/error counts from
+completion records, including completion-only records. A timed telemetry span
+is emitted only when start and completion records have coherent call-ID
+ownership and matched timestamps; incomplete or ambiguous timing is not
+guessed. The custom wrapper restores captured host context before invocation,
+owns each wrapped call ID, and deduplicates native metadata so one wrapped call
+is counted once. Each unique public `ASSISTANT_USAGE` event becomes a custom
+`af.copilot.model.usage` span event on the owning Copilot `invoke_agent` span.
+It uses standard `gen_ai.usage.*` fields where the reported semantics match
+exactly; reported duration, TTFT, and inter-token measures remain custom
+`af.copilot.*` values. No backdated inference span is created or implied, and
+standard GenAI inference metrics remain deferred until the runtime has
+reliable model-boundary evidence. These observations stay separate from the
+existing once-only eight-field invocation totals. `skill.invoked` metadata is
+not an extra tool call. The same sensitive-data policy applies, and counting
+once is not a guarantee of exactly-once tool effects.
 
 #### Stable agent ID
 
@@ -211,10 +220,10 @@ telemetry:
 
 | Source | Expectation |
 | --- | --- |
-| Direct HTTP and built-in chat UI turns | One `agent.run` summary span per completed turn, with native tool accounting and `ASSISTANT_USAGE` observations attached only from public turn events. |
+| Direct HTTP and built-in chat UI turns | One Copilot `invoke_agent` span per completed turn, with native tool accounting and `ASSISTANT_USAGE` observations attached only from public turn events. |
 | `/chatstream` SSE | The stream reflects translated SDK callbacks for the same turn; it does not imply full native child-session hierarchy or session-open telemetry. |
-| `delegate_<slug>` calls | The host preserves the nested `agent.run -> execute_tool delegate_<slug> -> child agent.run` trace shape. Coordinator SSE still exposes only the delegate tool boundary and final child text. |
-| Workflow Sub Agent leaves | Each leaf is observed as its own run. Model and duration appear only when the SDK reports them; no model spans or timing are fabricated. |
+| `delegate_<slug>` calls | The host preserves the nested `agent.run -> execute_tool delegate_<slug> -> invoke_agent {child}` trace shape. Coordinator SSE still exposes only the delegate tool boundary and final child text. |
+| Workflow Sub Agent leaves | Each leaf is observed as its own `invoke_agent` span. Model and duration appear only when the SDK reports them; no model spans or timing are fabricated. |
 | Non-HTTP triggers, inbound MCP, and Debug UI continuation | When they route through the shared runner, they follow the same turn-scoped accounting rules. This remains offline-covered behavior, not live host/Application Insights qualification. |
 
 ### Span `dynamic_session.execute`

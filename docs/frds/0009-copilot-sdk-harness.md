@@ -341,7 +341,7 @@ requests always return caller-supplied session IDs, and return generated IDs
 only after resumability is confirmed, consistently across response surfaces.
 `shutdown_runtime()` is the public async cleanup entry point.
 
-### 4.9 Copilot telemetry addendum
+### 4.9 Copilot telemetry and semantic-alignment addendum
 
 This addendum extends the Copilot execution contract; it does not change MAF.
 
@@ -350,25 +350,28 @@ This addendum extends the Copilot execution contract; it does not change MAF.
   destination. Do not add a subscription, settings, sampling, caps, exporters,
   flush/shutdown calls, or create/resume telemetry; keep
   `continue_pending_work=False`.
-- Emit each unique public `ASSISTANT_USAGE` event as a custom
-  `af.copilot.model.usage` span event on its owning `agent.run`. Use standard
-  `gen_ai.usage.*` fields where reported semantics match exactly; reported
-  duration, TTFT, and inter-token measures remain custom `af.copilot.*` values.
-  Do not create or imply a backdated inference span. Keep observations separate
-  from unchanged, once-only eight-field invocation totals.
-- Capture and reactivate host context before custom-tool invocation. Native
-  custom events are metadata-only; the wrapper owns each custom call ID.
-  Completion records continue to contribute to `AgentResult` and aggregate
-  tool counts; emit a timed telemetry span only for a coherent
-  ID/timestamp-matched start/complete pair. Preserve the nested
-  `agent.run -> execute_tool delegate_<slug> -> child agent.run` trace.
-- Export only allowlisted telemetry. `ENABLE_SENSITIVE_DATA` may enable prompt/
-  request and response capture, but Copilot run-log payloads never include full
-  `tool_calls` records; MAF run logging remains unchanged. Credentials, authorization headers, raw envelopes,
-  stacks, reasoning text, and skill content/paths are never exported. Skill
-  events identify the sanitized name only. Content-free diagnostics and
-  best-effort telemetry cleanup must not change results, errors, cancellation,
-  or SSE termination.
+- Align Copilot runtime-owned invocation and tool telemetry to the selected
+  GenAI semantic-conventions snapshot without claiming blanket compliance for
+  every runtime path or downstream Azure surface. Copilot uses one canonical
+  `invoke_agent {name}` span per actual invocation and one canonical
+  `execute_tool {name}` span per actual tool call; MAF keeps its existing
+  instrumentation and the runtime does not add duplicate canonical wrappers on
+  that path.
+- Keep `ASSISTANT_USAGE` as a custom `af.copilot.model.usage` event on the
+  owning Copilot invocation span. Reuse standard `gen_ai.usage.*` fields only
+  where the reported SDK semantics match exactly, keep the existing once-only
+  eight-field usage recorder and counters unchanged, and defer inference spans
+  and standard GenAI metrics until the runtime has reliable evidence for exact
+  model boundaries and attribution.
+- Export only allowlisted telemetry. Standard identity, conversation, and tool
+  fields come only from stable runtime state, exact provider mapping is emitted
+  only when the runtime already knows it, and `ENABLE_SENSITIVE_DATA` remains
+  the only content opt-in. Copilot run-log payloads still exclude full
+  `tool_calls` records; MAF run logging remains unchanged. Credentials,
+  authorization headers, raw envelopes, stacks, reasoning text, and skill
+  content/paths are never exported. Content-free diagnostics and best-effort
+  telemetry cleanup must not change results, errors, cancellation, or SSE
+  termination.
 - Coverage is turn-scoped. Do not fabricate model spans or missing timing,
   claim complete native hierarchy, or promise recovery of lost events.
 
@@ -409,9 +412,9 @@ previously approved harness decisions above.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
-| 21 | Telemetry source and scope | new receiver / existing turn events and wrapper | Reuse the existing provider, active-turn subscription, and custom-tool wrapper; add no telemetry settings, event caps, or session-opening coverage. | Human (@larohra) | 2026-10-12 |
-| 22 | Trace and tool ownership | native callback context / explicit host context and wrapper ownership | Restore captured host context before custom invocation; preserve nested delegate run/tool/leaf spans, with matched native events only for native-only tools. | Human (@larohra) | 2026-10-12 |
-| 23 | Usage and privacy | merge observations into totals / separate observations and allowlisted telemetry | Deduplicate reported usage observations separately from unchanged invocation totals; allow prompt/request and response capture but never full `tool_calls` records in Copilot run logs; preserve MAF run logs, omit ambiguous fields, and isolate telemetry failures from request outcomes. | Human (@larohra) | 2026-10-12 |
+| 21 | Semantic-alignment scope | runtime-owned Copilot alignment / whole-runtime blanket compliance | Align only Copilot runtime-owned invocation and tool spans to the selected GenAI semantic-conventions snapshot; keep MAF unchanged and avoid any duplicate canonical wrappers. | Human (larohra) | 2026-10-13 |
+| 22 | Canonical invocation and tool boundaries | keep custom `agent.run` naming / adopt Copilot canonical GenAI names | Use `invoke_agent {name}` for Copilot invocation spans and `execute_tool {name}` for Copilot tool spans, preserving the existing session-event subscription, explicit host context, wrapper ownership, and matched native-timing rules. | Human (larohra) | 2026-10-13 |
+| 23 | Stable fields, usage, and privacy | infer missing provider/model semantics / emit only proven fields | Emit standard identity, conversation, provider, and tool fields only from stable runtime state; keep usage as the existing custom event plus exact-match `gen_ai.usage.*` fields; defer inference spans and standard metrics; keep allowlisted telemetry and never include full `tool_calls` records in Copilot run logs. | Human (larohra) | 2026-10-13 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -453,6 +456,8 @@ previously approved harness decisions above.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.
+- **Telemetry addendum sign-off:** larohra approved the revised telemetry and
+  semantic-alignment addendum on 2026-10-13.
 - **Telemetry addendum:** @larohra approved this addendum on 2026-10-12 after
   independent architecture review passed. The addendum decisions below govern
   Copilot telemetry only and do not alter the prior harness decisions.

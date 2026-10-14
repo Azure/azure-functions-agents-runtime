@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import types
 
@@ -27,6 +28,38 @@ def test_agent_run_attributes_preserve_extensible_trigger_values(monkeypatch) ->
         obs.ATTR_AGENT_SESSION_ID: "session-123",
         obs.ATTR_AGENT_MODEL: "model-name",
     }
+
+
+def test_copilot_agent_run_attributes_prefer_gen_ai_identity_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "Contoso-Agents")
+
+    attributes = obs.agent_run_attributes(
+        agent_name="billing",
+        display_name="Billing assistant",
+        trigger_type="http",
+        session_id="session-123",
+        model="gpt-4.1-mini",
+        harness_name="copilot",
+        provider_kind="azure_openai",
+    )
+
+    assert attributes[obs.ATTR_GEN_AI_OPERATION_NAME] == obs.GenAiOperationName.INVOKE_AGENT
+    assert attributes[obs.ATTR_GEN_AI_PROVIDER_NAME] == "azure.ai.openai"
+    assert attributes[obs.ATTR_GEN_AI_AGENT_NAME] == "Contoso-Agents/billing"
+    assert attributes[obs.ATTR_GEN_AI_AGENT_ID] == "contoso-agents/billing"
+    assert attributes[obs.ATTR_GEN_AI_CONVERSATION_ID] == "session-123"
+    assert attributes[obs.ATTR_GEN_AI_REQUEST_MODEL] == "gpt-4.1-mini"
+    assert obs.ATTR_AGENT_SESSION_ID not in attributes
+    assert obs.ATTR_AGENT_MODEL not in attributes
+
+
+def test_copilot_agent_run_span_name_uses_invoke_agent(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "Contoso-Agents")
+
+    assert obs.agent_run_span_name(agent_name="billing", harness_name="copilot") == (
+        "invoke_agent Contoso-Agents/billing"
+    )
+    assert obs.agent_run_span_name(agent_name="billing", harness_name="maf") == "agent.run billing"
 
 
 def test_common_span_outcome_and_tool_source_values() -> None:
@@ -588,3 +621,42 @@ def test_start_span_can_suppress_raw_exception_recording(monkeypatch) -> None:  
     assert span.status.status_code.name == "ERROR"
     assert span.status.description in (None, "")
     assert span.attributes[obs.ATTR_FAULT_DOMAIN] == obs.FaultDomain.RUNTIME
+    assert span.attributes[obs.ATTR_ERROR_TYPE] == "ValueError"
+
+
+def test_start_span_preserves_cancelled_outcome_without_error_status(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _provider, exporter = _install_test_tracer(monkeypatch)
+    with pytest.raises(asyncio.CancelledError, match="private cancellation"), obs.start_span(
+        "cancelled.span",
+        fault_domain=obs.FaultDomain.RUNTIME,
+        record_exception=False,
+    ) as span:
+        span.set_attribute(obs.ATTR_AGENT_OUTCOME, obs.SpanOutcome.CANCELLED)
+        raise asyncio.CancelledError("private cancellation")
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "cancelled.span")
+    assert span.attributes[obs.ATTR_AGENT_OUTCOME] == obs.SpanOutcome.CANCELLED
+    assert span.status.status_code.name == "UNSET"
+    assert obs.ATTR_FAULT_DOMAIN not in span.attributes
+    assert all(event.name != "exception" for event in span.events)
+
+
+def test_start_span_does_not_treat_delegate_outcome_as_cancellation_opt_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _provider, exporter = _install_test_tracer(monkeypatch)
+    with pytest.raises(asyncio.CancelledError, match="private cancellation"), obs.start_span(
+        "delegate.cancelled.span",
+        fault_domain=obs.FaultDomain.DELEGATE,
+        record_exception=False,
+    ) as span:
+        span.set_attribute("af.delegate.outcome", obs.SpanOutcome.CANCELLED)
+        raise asyncio.CancelledError("private cancellation")
+
+    span = next(
+        span for span in exporter.get_finished_spans() if span.name == "delegate.cancelled.span"
+    )
+    assert span.attributes["af.delegate.outcome"] == obs.SpanOutcome.CANCELLED
+    assert span.status.status_code.name == "ERROR"
+    assert span.status.description in (None, "")
+    assert span.attributes[obs.ATTR_FAULT_DOMAIN] == obs.FaultDomain.DELEGATE
+    assert obs.ATTR_ERROR_TYPE not in span.attributes
+    assert all(event.name != "exception" for event in span.events)

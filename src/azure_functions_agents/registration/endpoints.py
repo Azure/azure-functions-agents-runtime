@@ -17,11 +17,12 @@ from azurefunctions.extensions.http.fastapi import Request, Response, StreamingR
 from .._logger import logger
 from .._observability import (
     ATTR_AGENT_OUTCOME,
-    ATTR_AGENT_SESSION_ID,
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
     agent_run_attributes,
+    agent_run_span_name,
+    set_agent_session_attribute,
     start_span,
 )
 from .._session_id import SESSION_ID_PATTERN
@@ -337,17 +338,17 @@ def _register_http_chat(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
+    harness = bind_harness(resolved, capabilities)
+
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
         supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
         resolved_session_id = _resolve_builtin_endpoints_session_id(
             supplied_session_id
         )
         session_state = HarnessSessionState(caller_supplied=supplied_session_id is not None)
-        failure_headers = _session_id_response_headers(
-            resolved_session_id,
-            caller_supplied=supplied_session_id is not None,
-            state=session_state,
-        )
         # This endpoint calls `run_agent` directly rather than going through
         # `_handlers.py`'s trigger-registered handlers, so — unlike a
         # user-defined `trigger:` agent — nothing upstream opens an
@@ -356,7 +357,10 @@ def _register_http_chat(
         # `af.agent.tool_error_count`, which folds in delegate errors) that
         # `make_agent_handler`/`make_http_agent_handler` already provide.
         with start_span(
-            f"agent.run {resolved.slug}",
+            agent_run_span_name(
+                agent_name=resolved.slug,
+                harness_name=harness.name,
+            ),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes=agent_run_attributes(
                 agent_name=resolved.slug,
@@ -364,18 +368,11 @@ def _register_http_chat(
                 trigger_type="builtin_chat",
                 session_id=resolved_session_id,
                 model=resolved.model,
+                harness_name=harness.name,
+                provider_kind=harness.provider.kind if harness.provider else None,
             ),
         ) as span:
             try:
-                auth_error = authorize_entra_request(req.headers.get, auth)
-                if auth_error is not None:
-                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                    span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
-                    return _json_error(
-                        auth_error.message,
-                        status_code=auth_error.status_code,
-                        headers=failure_headers,
-                    )
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
                 result = await _run_builtin_agent(
@@ -577,13 +574,18 @@ def _register_mcp_endpoint(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
+    harness = bind_harness(resolved, capabilities)
+
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         # Same rationale as `handle_chat` above: this built-in MCP surface
         # calls `run_agent` directly, so nothing upstream opens an
         # `agent.run {name}` span for it — open one here to get the same
         # run-level attributes (including B3's `af.agent.tool_error_count`).
         with start_span(
-            f"agent.run {resolved.slug}",
+            agent_run_span_name(
+                agent_name=resolved.slug,
+                harness_name=harness.name,
+            ),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes=agent_run_attributes(
                 agent_name=resolved.slug,
@@ -591,6 +593,8 @@ def _register_mcp_endpoint(
                 trigger_type="builtin_mcp",
                 session_id=None,
                 model=resolved.model,
+                harness_name=harness.name,
+                provider_kind=harness.provider.kind if harness.provider else None,
             ),
         ) as span:
             session_id: str | None = None
@@ -611,7 +615,11 @@ def _register_mcp_endpoint(
                         {"error": "Missing 'prompt'", "session_id": session_id}
                     )
 
-                span.set_attribute(ATTR_AGENT_SESSION_ID, session_id)
+                set_agent_session_attribute(
+                    span,
+                    session_id=session_id,
+                    harness_name=harness.name,
+                )
                 resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
                 result = await _run_builtin_agent(
                     prompt.strip(),
@@ -632,7 +640,11 @@ def _register_mcp_endpoint(
                 # with it (N1) instead of leaving the pre-call `None` in place,
                 # which otherwise left this attribute permanently unset for
                 # every caller-omitted-session-id turn.
-                span.set_attribute(ATTR_AGENT_SESSION_ID, resolved_session_id)
+                set_agent_session_attribute(
+                    span,
+                    session_id=resolved_session_id,
+                    harness_name=harness.name,
+                )
                 _set_run_result_attributes(span, result)
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
                 return json.dumps(

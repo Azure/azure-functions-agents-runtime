@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -12,16 +11,19 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from ..._observability import (
-    ATTR_GEN_AI_TOOL_NAME,
     ATTR_MCP_METHOD_NAME,
+    ATTR_TOOL_OUTCOME,
     MCP_METHOD_TOOLS_CALL,
     FaultDomain,
     LifecycleStage,
     RuntimeSpan,
     SpanOutcome,
+    TelemetryAttributeValue,
     ToolSpanSource,
     record_timed_span,
+    safe_telemetry_name,
     start_span,
+    tool_span_attributes,
 )
 from ..._tool_descriptor import is_harness_object
 from .._stream_events import ToolEndEvent, ToolStartEvent
@@ -35,16 +37,13 @@ if TYPE_CHECKING:
     from ...runner import ToolCallEvidence
 
 
-_NATIVE_TOOL_FAILURE = '{"error":"Native tool failed or was denied."}'
+_SAFE_NATIVE_TOOL_FAILURE_MESSAGE = "Native tool failed or was denied."
+_NATIVE_TOOL_FAILURE = f'{{"error":"{_SAFE_NATIVE_TOOL_FAILURE_MESSAGE}"}}'
 _REDACTED = "[REDACTED]"
-_METADATA_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]")
+_SECONDS_PER_DAY = 86_400
+_NS_PER_SECOND = 1_000_000_000
+_NS_PER_MICROSECOND = 1_000
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-
-
-def _safe_name(value: str | None) -> str | None:
-    if not value:
-        return None
-    return _METADATA_NAME_PATTERN.sub("_", value)[:128]
 
 
 def _timestamp_ns(value: datetime | None) -> int | None:
@@ -52,8 +51,8 @@ def _timestamp_ns(value: datetime | None) -> int | None:
         return None
     delta = value.astimezone(UTC) - _EPOCH
     return (
-        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
-        + delta.microseconds * 1_000
+        (delta.days * _SECONDS_PER_DAY + delta.seconds) * _NS_PER_SECOND
+        + delta.microseconds * _NS_PER_MICROSECOND
     )
 
 
@@ -114,12 +113,16 @@ class CopilotToolCalls:
         parent_context: Context | None = None,
         run_span: RuntimeSpan | None = None,
         custom_tool_names: tuple[str, ...] = (),
+        agent_name: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self._records: dict[str, _ToolCall] = {}
         self._protected_values: set[str] = set()
         self._parent_context = parent_context
         self._run_span = run_span or RuntimeSpan(None)
         self._custom_tool_names = frozenset(custom_tool_names)
+        self._agent_name = agent_name
+        self._session_id = session_id
 
     @property
     def calls(self) -> list[ToolCallEvidence]:
@@ -216,17 +219,19 @@ class CopilotToolCalls:
         if not claimed:
             yield RuntimeSpan(None)
             return
-        name = _safe_name(invocation.tool_name) or "unknown"
+        name = safe_telemetry_name(invocation.tool_name) or "unknown"
         with start_span(
             f"execute_tool {name}",
             lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
             parent_context=self._parent_context,
             record_exception=False,
-            attributes={
-                ATTR_GEN_AI_TOOL_NAME: name,
-                "af.tool.name": name,
-                "af.tool.source": ToolSpanSource.COPILOT_WRAPPER,
-            },
+            attributes=tool_span_attributes(
+                tool_name=name,
+                tool_call_id=invocation.tool_call_id,
+                tool_source=ToolSpanSource.COPILOT_WRAPPER,
+                agent_name=self._agent_name,
+                session_id=self._session_id,
+            ),
         ) as span:
             yield span
 
@@ -361,12 +366,16 @@ class CopilotToolCalls:
         ):
             self._mark_incomplete(record, "invalid_interval")
             return
-        name = _safe_name(record.tool_name) or "unknown"
-        attributes: dict[str, Any] = {
-            ATTR_GEN_AI_TOOL_NAME: name,
-            "af.tool.name": name,
-            "af.tool.source": ToolSpanSource.COPILOT_NATIVE,
-            "af.tool.outcome": (
+        name = safe_telemetry_name(record.tool_name) or "unknown"
+        attributes: dict[str, TelemetryAttributeValue] = {
+            **tool_span_attributes(
+                tool_name=name,
+                tool_call_id=record.tool_call_id,
+                tool_source=ToolSpanSource.COPILOT_NATIVE,
+                agent_name=self._agent_name,
+                session_id=self._session_id,
+            ),
+            ATTR_TOOL_OUTCOME: (
                 SpanOutcome.SUCCESS if data.success and data.error is None else SpanOutcome.ERROR
             ),
         }
@@ -380,10 +389,13 @@ class CopilotToolCalls:
             lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
             attributes=attributes,
             status_description=(
-                None if data.success and data.error is None else "Native tool failed or was denied."
+                None if data.success and data.error is None else _SAFE_NATIVE_TOOL_FAILURE_MESSAGE
             ),
             fault_domain=(
                 None if data.success and data.error is None else FaultDomain.UNKNOWN
+            ),
+            error_type=(
+                None if data.success and data.error is None else "tool_execution_error"
             ),
         )
         if not emitted:
@@ -393,11 +405,11 @@ class CopilotToolCalls:
         if record.telemetry_incomplete_emitted:
             return
         record.telemetry_incomplete_emitted = True
-        name = _safe_name(record.tool_name)
+        name = safe_telemetry_name(record.tool_name)
         self._run_span.add_event(
             "af.copilot.tool.incomplete",
             {
-                "af.tool.name": name,
+                "gen_ai.tool.name": name,
                 "af.tool.incomplete_reason": reason,
             },
         )

@@ -18,13 +18,18 @@ so importing this module and calling its helpers is always safe.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
+from opentelemetry.util.types import AttributeValue
+
+from ._agent_identity import agent_id
 from ._logger import logger
 from .config.env import EnvVar, _to_bool, runtime_env_value
 
@@ -56,6 +61,7 @@ ATTR_OPERATION_ID = "af.operation_id"
 
 # Run attributes shared by registration surfaces and both execution harnesses.
 ATTR_AGENT_NAME = "af.agent.name"
+ATTR_AGENT_DISPLAY_NAME = "af.agent.display_name"
 ATTR_AGENT_TRIGGER_TYPE = "af.agent.trigger_type"
 ATTR_AGENT_SESSION_ID = "af.agent.session_id"
 ATTR_AGENT_MODEL = "af.agent.model"
@@ -64,8 +70,18 @@ ATTR_AGENT_TOOL_CALL_COUNT = "af.agent.tool_call_count"
 ATTR_AGENT_TOOL_ERROR_COUNT = "af.agent.tool_error_count"
 ATTR_AGENT_INPUT_BYTES = "af.agent.input_bytes"
 ATTR_AGENT_RESPONSE_BYTES = "af.agent.response_bytes"
+ATTR_ERROR_TYPE = "error.type"
+ATTR_GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
+ATTR_GEN_AI_AGENT_ID = "gen_ai.agent.id"
 ATTR_GEN_AI_AGENT_NAME = "gen_ai.agent.name"
+ATTR_GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
+ATTR_GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
+ATTR_GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
+ATTR_GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
 ATTR_GEN_AI_TOOL_NAME = "gen_ai.tool.name"
+ATTR_TOOL_NAME = "af.tool.name"
+ATTR_TOOL_SOURCE = "af.tool.source"
+ATTR_TOOL_OUTCOME = "af.tool.outcome"
 
 # Standard GenAI attributes are used only where the reported value has the same meaning.
 ATTR_GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
@@ -93,7 +109,19 @@ class ToolSpanSource(StrEnum):
     COPILOT_NATIVE = "copilot.native"
 
 
+class GenAiOperationName(StrEnum):
+    """Pinned GenAI operation values used by runtime-owned Copilot spans."""
+
+    INVOKE_AGENT = "invoke_agent"
+    EXECUTE_TOOL = "execute_tool"
+
+
 _TRACER_NAME = "azure.functions.AgentRuntime"
+_TELEMETRY_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]")
+TELEMETRY_NAME_MAX_LENGTH = 128
+
+type TelemetryAttributeValue = AttributeValue | None
+type TelemetryAttributes = Mapping[str, TelemetryAttributeValue]
 
 
 class FaultDomain:
@@ -166,6 +194,36 @@ def gen_ai_agent_name(agent_slug: str | None, *, default: str | None = None) -> 
     return f"{site_name}/{name}" if name else None
 
 
+def safe_telemetry_name(value: str | None) -> str | None:
+    """Return a bounded telemetry-safe name for tool and skill metadata."""
+    if not value:
+        return None
+    return _TELEMETRY_NAME_PATTERN.sub("_", value)[:TELEMETRY_NAME_MAX_LENGTH]
+
+
+def _is_copilot_harness(harness_name: str | None) -> bool:
+    return harness_name == "copilot"
+
+
+def gen_ai_provider_name(provider_kind: str | None) -> str | None:
+    """Return the pinned semconv provider value when the runtime knows it exactly."""
+    match provider_kind:
+        case "openai":
+            return "openai"
+        case "azure_openai":
+            return "azure.ai.openai"
+        case _:
+            return None
+
+
+def agent_run_span_name(*, agent_name: str | None, harness_name: str | None) -> str:
+    """Return the runtime-owned invocation span name for the selected harness."""
+    if _is_copilot_harness(harness_name):
+        name = gen_ai_agent_name(agent_name)
+        return f"invoke_agent {name}" if name else GenAiOperationName.INVOKE_AGENT
+    return f"agent.run {agent_name or 'agent'}"
+
+
 def agent_run_attributes(
     *,
     agent_name: str | None,
@@ -174,16 +232,68 @@ def agent_run_attributes(
     session_id: str | None,
     model: str | None,
     gen_ai_default: str | None = None,
-) -> dict[str, Any]:
+    harness_name: str | None = None,
+    provider_kind: str | None = None,
+) -> dict[str, TelemetryAttributeValue]:
     """Build shared agent.run attributes while leaving trigger names extensible."""
-    return {
+    attributes: dict[str, TelemetryAttributeValue] = {
         ATTR_AGENT_NAME: agent_name,
         ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name, default=gen_ai_default),
-        "af.agent.display_name": display_name,
+        ATTR_AGENT_DISPLAY_NAME: display_name,
         ATTR_AGENT_TRIGGER_TYPE: trigger_type,
-        ATTR_AGENT_SESSION_ID: session_id,
-        ATTR_AGENT_MODEL: model,
     }
+    if _is_copilot_harness(harness_name):
+        attributes[ATTR_GEN_AI_OPERATION_NAME] = GenAiOperationName.INVOKE_AGENT
+        attributes[ATTR_GEN_AI_PROVIDER_NAME] = gen_ai_provider_name(provider_kind)
+        attributes[ATTR_GEN_AI_CONVERSATION_ID] = session_id
+        attributes[ATTR_GEN_AI_REQUEST_MODEL] = model
+        attributes[ATTR_GEN_AI_AGENT_ID] = agent_id(agent_name) if agent_name else None
+    else:
+        attributes[ATTR_AGENT_SESSION_ID] = session_id
+        attributes[ATTR_AGENT_MODEL] = model
+    return attributes
+
+
+def tool_span_attributes(
+    *,
+    tool_name: str | None,
+    tool_call_id: str | None,
+    tool_source: ToolSpanSource,
+    agent_name: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, TelemetryAttributeValue]:
+    """Build shared Copilot execute_tool attributes without exporting tool content."""
+    return {
+        ATTR_GEN_AI_OPERATION_NAME: GenAiOperationName.EXECUTE_TOOL,
+        ATTR_GEN_AI_TOOL_NAME: tool_name,
+        ATTR_GEN_AI_TOOL_CALL_ID: tool_call_id,
+        ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name),
+        ATTR_GEN_AI_AGENT_ID: agent_id(agent_name) if agent_name else None,
+        ATTR_GEN_AI_CONVERSATION_ID: session_id,
+        ATTR_TOOL_SOURCE: tool_source,
+    }
+
+
+def set_agent_session_attribute(
+    span: RuntimeSpan,
+    *,
+    session_id: str | None,
+    harness_name: str | None,
+) -> None:
+    """Set the standard or legacy session/conversation attribute for one span."""
+    if _is_copilot_harness(harness_name):
+        span.set_attribute(ATTR_GEN_AI_CONVERSATION_ID, session_id)
+        return
+    span.set_attribute(ATTR_AGENT_SESSION_ID, session_id)
+
+
+def error_type_for_exception(exc: BaseException) -> str | None:
+    """Return a bounded `error.type` value for runtime-owned telemetry."""
+    if isinstance(exc, asyncio.CancelledError):
+        return None
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    return type(exc).__name__ or "_OTHER"
 
 
 def _resolve_capture_sensitive_data() -> bool:
@@ -412,14 +522,20 @@ def current_span() -> RuntimeSpan:
 class RuntimeSpan:
     """Thin wrapper over an OTel span that no-ops when tracing is unavailable."""
 
-    __slots__ = ("_span",)
+    __slots__ = ("_cancelled", "_span")
 
     def __init__(self, span: Any | None) -> None:
         self._span = span
+        self._cancelled = False
 
-    def set_attribute(self, key: str, value: Any) -> None:
+    def set_attribute(self, key: str, value: TelemetryAttributeValue) -> None:
         if self._span is None or value is None:
             return
+        if key in (ATTR_AGENT_OUTCOME, ATTR_TOOL_OUTCOME) and value in (
+            SpanOutcome.CANCELLED,
+            SpanOutcome.CANCELLED.value,
+        ):
+            self._cancelled = True
         with suppress(Exception):  # pragma: no cover - defensive
             self._span.set_attribute(key, value)
 
@@ -429,7 +545,7 @@ class RuntimeSpan:
             return
         self.set_attribute(key, bounded_content(value))
 
-    def add_event(self, name: str, attributes: Mapping[str, Any] | None = None) -> None:
+    def add_event(self, name: str, attributes: TelemetryAttributes | None = None) -> None:
         """Add a span event (a timestamped milestone) — no-op when tracing is unavailable."""
         if self._span is None:
             return
@@ -443,6 +559,7 @@ class RuntimeSpan:
         *,
         fault_domain: str | None = None,
         include_exception: bool = True,
+        error_type: str | None = None,
     ) -> None:
         if self._span is None:
             return
@@ -456,10 +573,18 @@ class RuntimeSpan:
                 message = ""
             self._span.set_status(Status(StatusCode.ERROR, message))
             self._span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain or FaultDomain.UNKNOWN)
+            if resolved_error_type := error_type or error_type_for_exception(exc):
+                self._span.set_attribute(ATTR_ERROR_TYPE, resolved_error_type)
         except Exception:  # pragma: no cover - defensive
             pass
 
-    def set_error(self, message: str, *, fault_domain: str) -> None:
+    def set_error(
+        self,
+        message: str,
+        *,
+        fault_domain: str,
+        error_type: str | None = None,
+    ) -> None:
         if self._span is None:
             return
         try:
@@ -467,8 +592,16 @@ class RuntimeSpan:
 
             self._span.set_status(Status(StatusCode.ERROR, message))
             self._span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain)
+            if error_type is not None:
+                self._span.set_attribute(ATTR_ERROR_TYPE, error_type)
         except Exception:  # pragma: no cover - defensive
             pass
+
+
+class _StartSpanOptions(TypedDict, total=False):
+    context: Context
+    record_exception: bool
+    set_status_on_exception: bool
 
 
 @contextmanager
@@ -477,7 +610,7 @@ def start_span(
     *,
     fault_domain: str | None = None,
     lifecycle_stage: str | None = None,
-    attributes: Mapping[str, Any] | None = None,
+    attributes: TelemetryAttributes | None = None,
     parent_context: Context | None = None,
     record_exception: bool = True,
 ) -> Iterator[RuntimeSpan]:
@@ -497,7 +630,7 @@ def start_span(
     raw_span: Any = None
     if tracer is not None:
         try:
-            span_options: dict[str, Any] = {}
+            span_options: _StartSpanOptions = {}
             if parent_context is not None:
                 span_options["context"] = parent_context
             if not record_exception:
@@ -519,14 +652,21 @@ def start_span(
     try:
         yield span
     except BaseException as exc:
-        span.record_exception(
-            exc,
-            fault_domain=fault_domain,
-            include_exception=record_exception,
+        suppress_cancellation_error = (
+            isinstance(exc, asyncio.CancelledError) and span._cancelled
         )
+        if not suppress_cancellation_error:
+            span.record_exception(
+                exc,
+                fault_domain=fault_domain,
+                include_exception=record_exception,
+            )
         if manager is not None:
             with suppress(Exception):  # pragma: no cover - defensive
-                manager.__exit__(type(exc), exc, exc.__traceback__)
+                if suppress_cancellation_error:
+                    manager.__exit__(None, None, None)
+                else:
+                    manager.__exit__(type(exc), exc, exc.__traceback__)
             manager = None
         raise
     finally:
@@ -542,9 +682,10 @@ def record_timed_span(
     start_time_ns: int,
     end_time_ns: int,
     lifecycle_stage: str | None = None,
-    attributes: Mapping[str, Any] | None = None,
+    attributes: TelemetryAttributes | None = None,
     status_description: str | None = None,
     fault_domain: str | None = None,
+    error_type: str | None = None,
 ) -> bool:
     """Emit a span with explicit parent and epoch-nanosecond timing; return whether it was emitted."""
 
@@ -580,7 +721,7 @@ def record_timed_span(
         if tracer is None:
             diagnose("tracer unavailable")
             return False
-        span_attributes = dict(attributes or {})
+        span_attributes: dict[str, TelemetryAttributeValue] = dict(attributes or {})
         if lifecycle_stage is not None:
             span_attributes[ATTR_LIFECYCLE_STAGE] = lifecycle_stage
         span = tracer.start_span(
@@ -595,6 +736,8 @@ def record_timed_span(
             span.set_status(Status(StatusCode.ERROR, status_description))
             if fault_domain is not None:
                 span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain)
+            if error_type is not None:
+                span.set_attribute(ATTR_ERROR_TYPE, error_type)
         span.end(end_time=end_time_ns)
     except Exception:  # pragma: no cover - defensive
         diagnose("OpenTelemetry span emission failed")

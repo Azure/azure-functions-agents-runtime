@@ -788,7 +788,11 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
         fake_run_builtin_agent,
     )
-    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+    )
     chat_route = next(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
     )
@@ -800,8 +804,11 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
 
     assert response.status_code == 200
     [span] = exporter.get_finished_spans()
-    assert span.name == f"agent.run {resolved.slug}"
+    assert span.name == f"invoke_agent {resolved.slug}"
+    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
     assert span.attributes["gen_ai.agent.name"] == resolved.slug
+    assert span.attributes["gen_ai.conversation.id"] == "continued"
+    assert "af.agent.session_id" not in span.attributes
     [usage_event] = [
         event for event in span.events if event.name == "af.copilot.model.usage"
     ]
@@ -858,11 +865,56 @@ def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     assert span.attributes["af.agent.name"] != resolved.name
 
 
-def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
+def test_handle_mcp_agent_chat_uses_canonical_conversation_id_when_caller_supplies_it(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+        source_file=source_file,
+    )
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        assert kwargs["_session_state"].caller_supplied is True
+        kwargs["_session_state"].resumable = True
+        return AgentResult(
+            session_id=kwargs["session_id"],
+            content="ok",
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        workflows_enabled=False,
+    )
+    mcp_handler = next(route for route in app.routes if route.get("mcp_tool_trigger"))["handler"]
+
+    result = asyncio.run(
+        mcp_handler(json.dumps({"arguments": {"prompt": "hello"}, "sessionId": "caller-id"}))
+    )
+
+    assert json.loads(result)["session_id"] == "caller-id"
+    [span] = spans
+    assert span.attributes["gen_ai.conversation.id"] == "caller-id"
+    assert "af.agent.session_id" not in span.attributes
+
+
+def test_handle_mcp_agent_chat_refreshes_canonical_conversation_id_when_caller_omits_it(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     """N1: when the caller supplies no explicit session id, the span's
-    ``af.agent.session_id`` attribute must reflect the id the runner actually
+    canonical conversation attribute must reflect the id the runner actually
     resolved/generated for the turn (``result.session_id``), not be left
     unset from the pre-call ``None``.
     """
@@ -890,7 +942,12 @@ def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
         fake_run_builtin_agent,
     )
 
-    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=False)
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        workflows_enabled=False,
+    )
     mcp_routes = [route for route in app.routes if route.get("mcp_tool_trigger")]
     assert len(mcp_routes) == 1
     mcp_handler = mcp_routes[0]["handler"]
@@ -901,7 +958,8 @@ def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
     response_session_id = json.loads(result)["session_id"]
     assert response_session_id
     [span] = spans
-    assert span.attributes["af.agent.session_id"] == response_session_id
+    assert span.attributes["gen_ai.conversation.id"] == response_session_id
+    assert "af.agent.session_id" not in span.attributes
 
 
 def test_extract_mcp_session_id_passes_through_safe_ids() -> None:
@@ -1715,6 +1773,7 @@ def test_entra_chat_without_identity_is_unauthorized(
     monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+    spans = _install_start_span_capture(monkeypatch)
 
     register_builtin_endpoints(app, resolved, AgentCapabilities())
     chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
@@ -1722,6 +1781,8 @@ def test_entra_chat_without_identity_is_unauthorized(
     response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
 
     assert response.status_code == 401
+    assert response.headers.get("x-ms-session-id") is None
+    assert spans == []
 
 
 def test_entra_chatstream_without_identity_emits_sse_error(

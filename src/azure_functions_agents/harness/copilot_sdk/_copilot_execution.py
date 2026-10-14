@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._logger import logger
 from ..._observability import (
+    ATTR_TOOL_OUTCOME,
     FaultDomain,
     SpanOutcome,
     capture_current_context,
@@ -80,6 +81,9 @@ class _SessionOptions(TypedDict):
 
 
 type _EventSink = Callable[[StreamEvent], None]
+
+_SAFE_CUSTOM_TOOL_FAILURE_MESSAGE = "Custom tool failed or returned unsupported content."
+_SAFE_CUSTOM_TOOL_FAILURE = f'{{"error":"{_SAFE_CUSTOM_TOOL_FAILURE_MESSAGE}"}}'
 
 
 def _emit_event(event_sink: _EventSink | None, event: StreamEvent | None) -> None:
@@ -191,20 +195,21 @@ def _tool(
                 )
                 text = tool_result_text(result)
             except asyncio.CancelledError:
-                span.set_attribute("af.tool.outcome", SpanOutcome.CANCELLED)
+                span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.CANCELLED)
                 raise
             except Exception:
                 logger.warning("Copilot custom tool failed: tool=%s", function.name)
-                text = '{"error":"Custom tool failed or returned unsupported content."}'
-                span.set_attribute("af.tool.outcome", SpanOutcome.ERROR)
+                text = _SAFE_CUSTOM_TOOL_FAILURE
+                span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.ERROR)
                 span.set_error(
-                    "Custom tool failed or returned unsupported content.",
+                    _SAFE_CUSTOM_TOOL_FAILURE_MESSAGE,
                     fault_domain=FaultDomain.APP,
+                    error_type="tool_execution_error",
                 )
                 calls.complete_custom(invocation.tool_call_id, text, success=False)
                 _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
                 return ToolResult(text_result_for_llm=text, result_type="failure")
-            span.set_attribute("af.tool.outcome", SpanOutcome.SUCCESS)
+            span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.SUCCESS)
             calls.complete_custom(invocation.tool_call_id, text, success=True)
             _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
             return ToolResult(text_result_for_llm=text, result_type="success")
@@ -461,6 +466,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         parent_context=capture_current_context(),
         run_span=run_span,
         custom_tool_names=tuple(tool.name for tool in request.tools),
+        agent_name=request.agent_slug,
+        session_id=request.session_id,
     )
     telemetry = CopilotEventTelemetry(run_span)
     messages: list[str] = []
