@@ -6,7 +6,7 @@ author: harshivcodes
 created: 2026-10-14
 updated: 2026-10-14
 issues: []
-pull_requests: []
+pull_requests: [#266]
 branch: harshivcodes/durable-agent-loop-changes
 ---
 
