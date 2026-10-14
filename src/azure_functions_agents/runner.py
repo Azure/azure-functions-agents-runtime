@@ -38,7 +38,6 @@ from .discovery.tools import discover_user_tools as discover_user_tools
 from .harness._agent_runner import get_agent_runner
 from .harness._harness_binding import (
     AppHarness,
-    HarnessKind,
     HarnessRequest,
     HarnessSessionState,
     get_harness,
@@ -170,10 +169,7 @@ def _record_generic_delegate_failure(
     tracker.record_error()
     record_delegate_call(error=True)
     span.set_attribute("af.delegate.outcome", SpanOutcome.ERROR)
-    if harness is not None and harness.name is HarnessKind.COPILOT:
-        span.set_error("delegate specialist failed", fault_domain=FaultDomain.DELEGATE)
-    else:
-        span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return _sanitize_delegate_failure(slug, exc)
 
 
@@ -189,10 +185,7 @@ def _record_delegate_timeout(
     record_delegate_call(error=True)
     span.set_attribute("af.delegate.outcome", "timeout")
     span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
-    if harness is not None and harness.name is HarnessKind.COPILOT:
-        span.set_error("delegate specialist timed out", fault_domain=FaultDomain.DELEGATE)
-    else:
-        span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return (
         f"The '{slug}' specialist did not respond in time and was "
         "stopped. Consider a narrower request, trying again, or proceeding without it."

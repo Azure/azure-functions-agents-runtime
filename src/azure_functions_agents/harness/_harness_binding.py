@@ -10,6 +10,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 from .._logger import logger
+from .._observability import (
+    RuntimeSpan,
+    TelemetryAttributeValue,
+)
+from .._observability import (
+    agent_run_attributes as common_agent_run_attributes,
+)
+from .._observability import (
+    agent_run_span_name as common_agent_run_span_name,
+)
+from .._observability import (
+    set_agent_session_attribute as common_set_agent_session_attribute,
+)
 from .._tool_descriptor import ToolDescriptor
 from ..config.env import EnvVar, raw_env_value
 from ..config.paths import get_app_root
@@ -96,6 +109,65 @@ class HarnessRequest:
     execution_role: ExecutionRole = "primary"
     event_sink: Callable[[StreamEvent], None] | None = None
     session_state: HarnessSessionState = field(default_factory=HarnessSessionState)
+
+
+def agent_run_span_name_for_harness(harness: AppHarness, *, agent_name: str | None) -> str:
+    """Return the runtime-owned invocation span name for the selected harness."""
+    if harness.name is HarnessKind.COPILOT:
+        from .copilot_sdk import _copilot_observability as copilot_observability
+
+        return copilot_observability.agent_run_span_name(agent_name=agent_name)
+    return common_agent_run_span_name(agent_name=agent_name)
+
+
+def agent_run_attributes_for_harness(
+    harness: AppHarness,
+    *,
+    agent_name: str | None,
+    display_name: str | None,
+    trigger_type: str | None,
+    session_id: str | None,
+    model: str | None,
+) -> dict[str, TelemetryAttributeValue]:
+    """Return runtime-owned invocation attributes for the selected harness."""
+    if harness.name is HarnessKind.COPILOT:
+        from .copilot_sdk import _copilot_observability as copilot_observability
+
+        return copilot_observability.agent_run_attributes(
+            agent_name=agent_name,
+            display_name=display_name,
+            trigger_type=trigger_type,
+            session_id=session_id,
+            model=model,
+            provider_kind=harness.provider.kind if harness.provider else None,
+        )
+    return common_agent_run_attributes(
+        agent_name=agent_name,
+        display_name=display_name,
+        trigger_type=trigger_type,
+        session_id=session_id,
+        model=model,
+    )
+
+
+def set_agent_session_attribute_for_harness(
+    harness: AppHarness,
+    span: RuntimeSpan,
+    *,
+    session_id: str | None,
+) -> None:
+    """Set the runtime-owned session/conversation attribute for one invocation span."""
+    if harness.name is HarnessKind.COPILOT:
+        from .copilot_sdk import _copilot_observability as copilot_observability
+
+        copilot_observability.set_agent_session_attribute(span, session_id=session_id)
+        return
+    common_set_agent_session_attribute(span, session_id=session_id)
+
+
+def auto_record_exceptions_for_harness(harness: AppHarness) -> bool:
+    """Return whether `start_span()` should rely on automatic exception capture."""
+    return harness.name is not HarnessKind.COPILOT
 
 
 _HARNESSES: dict[Path, AppHarness] = {}

@@ -22,7 +22,6 @@ def test_agent_run_attributes_preserve_extensible_trigger_values(monkeypatch) ->
 
     assert attributes == {
         obs.ATTR_AGENT_NAME: "billing",
-        obs.ATTR_GEN_AI_AGENT_NAME: "billing",
         "af.agent.display_name": "Billing assistant",
         obs.ATTR_AGENT_TRIGGER_TYPE: "future_connector_trigger",
         obs.ATTR_AGENT_SESSION_ID: "session-123",
@@ -30,36 +29,8 @@ def test_agent_run_attributes_preserve_extensible_trigger_values(monkeypatch) ->
     }
 
 
-def test_copilot_agent_run_attributes_prefer_gen_ai_identity_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("WEBSITE_SITE_NAME", "Contoso-Agents")
-
-    attributes = obs.agent_run_attributes(
-        agent_name="billing",
-        display_name="Billing assistant",
-        trigger_type="http",
-        session_id="session-123",
-        model="gpt-4.1-mini",
-        harness_name="copilot",
-        provider_kind="azure_openai",
-    )
-
-    assert attributes[obs.ATTR_GEN_AI_OPERATION_NAME] == obs.GenAiOperationName.INVOKE_AGENT
-    assert attributes[obs.ATTR_GEN_AI_PROVIDER_NAME] == "azure.ai.openai"
-    assert attributes[obs.ATTR_GEN_AI_AGENT_NAME] == "Contoso-Agents/billing"
-    assert attributes[obs.ATTR_GEN_AI_AGENT_ID] == "contoso-agents/billing"
-    assert attributes[obs.ATTR_GEN_AI_CONVERSATION_ID] == "session-123"
-    assert attributes[obs.ATTR_GEN_AI_REQUEST_MODEL] == "gpt-4.1-mini"
-    assert obs.ATTR_AGENT_SESSION_ID not in attributes
-    assert obs.ATTR_AGENT_MODEL not in attributes
-
-
-def test_copilot_agent_run_span_name_uses_invoke_agent(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("WEBSITE_SITE_NAME", "Contoso-Agents")
-
-    assert obs.agent_run_span_name(agent_name="billing", harness_name="copilot") == (
-        "invoke_agent Contoso-Agents/billing"
-    )
-    assert obs.agent_run_span_name(agent_name="billing", harness_name="maf") == "agent.run billing"
+def test_agent_run_span_name_uses_legacy_runtime_name() -> None:
+    assert obs.agent_run_span_name(agent_name="billing") == "agent.run billing"
 
 
 def test_common_span_outcome_and_tool_source_values() -> None:
@@ -603,6 +574,7 @@ def test_start_span_exception_recording_defaults_to_existing_behavior(monkeypatc
     exception_events = [event for event in span.events if event.name == "exception"]
     assert exception_events
     assert exception_events[0].attributes["exception.message"] == "sensitive details"
+    assert span.status.description == "ValueError: sensitive details"
 
 
 def test_start_span_can_suppress_raw_exception_recording(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -6,8 +6,11 @@ from uuid import uuid4
 from copilot.session_events import AssistantUsageData
 
 from azure_functions_agents._observability import RuntimeSpan
+from azure_functions_agents.harness._provider_config import ProviderKind
 from azure_functions_agents.harness.copilot_sdk._copilot_observability import (
     CopilotEventTelemetry,
+    agent_run_attributes,
+    agent_run_span_name,
 )
 
 
@@ -61,3 +64,32 @@ def test_copilot_skill_event_keeps_only_sanitized_name() -> None:
     assert raw_span.events == [
         ("af.copilot.skill.invoked", {"af.skill.name": "review_private_skill"})
     ]
+
+
+def test_copilot_agent_run_attributes_prefer_gen_ai_identity_fields(monkeypatch) -> None:
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "Contoso-Agents")
+
+    attributes = agent_run_attributes(
+        agent_name="billing",
+        display_name="Billing assistant",
+        trigger_type="http",
+        session_id="session-123",
+        model="gpt-4.1-mini",
+        provider_kind=ProviderKind.AZURE_OPENAI,
+    )
+
+    assert attributes["af.agent.name"] == "billing"
+    assert attributes["gen_ai.operation.name"] == "invoke_agent"
+    assert attributes["gen_ai.provider.name"] == "azure.ai.openai"
+    assert attributes["gen_ai.agent.name"] == "Contoso-Agents/billing"
+    assert attributes["gen_ai.agent.id"] == "contoso-agents/billing"
+    assert attributes["gen_ai.conversation.id"] == "session-123"
+    assert attributes["gen_ai.request.model"] == "gpt-4.1-mini"
+    assert "af.agent.session_id" not in attributes
+    assert "af.agent.model" not in attributes
+
+
+def test_copilot_agent_run_span_name_uses_invoke_agent(monkeypatch) -> None:
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "Contoso-Agents")
+
+    assert agent_run_span_name(agent_name="billing") == "invoke_agent Contoso-Agents/billing"

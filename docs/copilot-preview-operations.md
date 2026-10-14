@@ -249,7 +249,7 @@ coherent call-ID/timestamp-matched `tool.execution_start` /
 `tool.execution_complete` pair. Custom tools restore captured host context
 before invocation, and the wrapper owns each wrapped call ID so one wrapped
 call is counted once. This preserves the host's nested
-`agent.run -> execute_tool delegate_<slug> -> invoke_agent {child}` trace shape for
+`invoke_agent {coordinator} -> execute_tool delegate_<slug> -> invoke_agent {child}` trace shape for
 delegates while leaving coordinator-visible SSE limited to the delegate tool
 boundary and final child text.
 
@@ -263,9 +263,13 @@ boundary and final child text.
 
 `ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but
 Copilot run-log payloads never include full `tool_calls` records; MAF run logging is unchanged. Credentials,
-authorization headers, raw event envelopes, stack traces, reasoning text, and
-skill paths or content are never exported; skill telemetry uses the sanitized
-skill name only.
+authorization headers, raw event envelopes, reasoning text, and skill paths or
+content are never exported; skill telemetry uses the sanitized skill name only.
+Copilot runtime-owned ingress, delegate, leaf, and custom-tool spans still
+record caught Python exception messages and stack traces regardless of
+`ENABLE_SENSITIVE_DATA`, matching installed MAF behavior; prompt/request/
+response capture rules do not change, but arbitrary exception text may still be
+sensitive if application code includes it.
 Diagnostics and telemetry cleanup stay best-effort and non-throwing so they do
 not change request outcomes, cancellation, or SSE termination.
 

@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import azure_functions_agents._observability as observability
 from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import (
     CopilotToolCalls,
+    _timestamp_ns,
     tool_result_text,
 )
 from azure_functions_agents.registration._handlers import _tool_error_count
@@ -39,6 +40,12 @@ class _DictionaryResult:
 
 class _TextResult:
     text = "ordinary custom text"
+
+
+def test_timestamp_ns_uses_exact_integer_epoch_conversion() -> None:
+    moment = datetime(2042, 3, 4, 5, 6, 7, 890123, tzinfo=UTC)
+
+    assert _timestamp_ns(moment) == 2_277_522_367_890_123_000
 
 
 @pytest.mark.parametrize(

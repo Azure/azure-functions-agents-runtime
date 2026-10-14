@@ -19,8 +19,6 @@ from ..._observability import (
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
-    agent_run_attributes,
-    agent_run_span_name,
     start_span,
 )
 from ..._tool_descriptor import ToolDescriptor, ToolInput
@@ -37,6 +35,8 @@ from .._harness_binding import (
     HarnessSessionState,
     SessionHistory,
     UnsupportedCapabilityError,
+    agent_run_attributes_for_harness,
+    agent_run_span_name_for_harness,
 )
 from .._stream_events import (
     ContentEvent,
@@ -268,19 +268,16 @@ class _CopilotHarnessRunner:
                     events.finish()
 
             with start_span(
-                agent_run_span_name(
-                    agent_name=agent_name,
-                    harness_name=self._harness.name,
-                ),
+                agent_run_span_name_for_harness(self._harness, agent_name=agent_name),
                 lifecycle_stage=LifecycleStage.AGENT_RUN,
-                attributes=agent_run_attributes(
+                record_exception=False,
+                attributes=agent_run_attributes_for_harness(
+                    self._harness,
                     agent_name=agent_name,
                     display_name=display_name,
                     trigger_type="stream",
                     session_id=resolved_id,
                     model=model,
-                    harness_name=self._harness.name,
-                    provider_kind=self._harness.provider.kind if self._harness.provider else None,
                 ),
             ) as span:
                 execution = asyncio.create_task(execute())
@@ -342,21 +339,17 @@ class _CopilotHarnessRunner:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
         session_id = uuid.uuid4().hex
         with start_span(
-            agent_run_span_name(
-                agent_name=resolved.slug,
-                harness_name=self._harness.name,
-            ),
+            agent_run_span_name_for_harness(self._harness, agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=False,
             attributes={
-                **agent_run_attributes(
+                **agent_run_attributes_for_harness(
+                    self._harness,
                     agent_name=resolved.slug,
                     display_name=None,
                     trigger_type=None,
                     session_id=session_id,
                     model=resolved_model,
-                    harness_name=self._harness.name,
-                    provider_kind=self._harness.provider.kind if self._harness.provider else None,
                 ),
                 "af.agent.execution_role": execution_role,
             },
@@ -388,8 +381,9 @@ class _CopilotHarnessRunner:
             except asyncio.CancelledError:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
                 raise
-            except Exception:
+            except Exception as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
+                span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
                 raise
             span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
         return result.content

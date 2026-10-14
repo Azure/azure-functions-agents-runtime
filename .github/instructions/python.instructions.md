@@ -65,6 +65,10 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 - When behavior varies by a provider/backend/kind enum, prefer an interface with
   one implementation per kind plus a registry over repeated `if`/`elif` chains
   across modules.
+- Keep common modules and shared interfaces harness-neutral. Put MAF- or
+  Copilot-specific behavior in that harness's own module behind the existing
+  harness interface, rather than adding concrete-adapter branches or imports to
+  shared runtime modules.
 - Declare each finite domain vocabulary once in its owning module. Use a
   `StrEnum` when the vocabulary is a runtime concept or crosses a persistence,
   serialization, logging, or API boundary; consumers should use named enum

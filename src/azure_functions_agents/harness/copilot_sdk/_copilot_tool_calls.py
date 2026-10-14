@@ -23,10 +23,10 @@ from ..._observability import (
     record_timed_span,
     safe_telemetry_name,
     start_span,
-    tool_span_attributes,
 )
 from ..._tool_descriptor import is_harness_object
 from .._stream_events import ToolEndEvent, ToolStartEvent
+from ._copilot_observability import tool_span_attributes
 from ._tool_result import tool_result_text as _ordinary_tool_result_text
 
 if TYPE_CHECKING:
@@ -47,6 +47,7 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def _timestamp_ns(value: datetime | None) -> int | None:
+    """Convert an aware datetime to exact epoch nanoseconds using integer arithmetic."""
     if value is None or value.tzinfo is None or value.utcoffset() is None:
         return None
     delta = value.astimezone(UTC) - _EPOCH

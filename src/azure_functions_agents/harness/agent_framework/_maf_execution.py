@@ -793,7 +793,6 @@ async def run_stream(
             trigger_type="stream",
             session_id=resolved_id,
             model=model,
-            gen_ai_default="main",
         ),
     ) as span:
         ordinary_tool_error_count = 0

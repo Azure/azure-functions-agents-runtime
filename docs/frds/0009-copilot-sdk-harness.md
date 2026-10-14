@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-07
+updated: 2026-10-14
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -341,7 +341,7 @@ requests always return caller-supplied session IDs, and return generated IDs
 only after resumability is confirmed, consistently across response surfaces.
 `shutdown_runtime()` is the public async cleanup entry point.
 
-### 4.9 Copilot telemetry and semantic-alignment addendum
+### 4.9 Copilot telemetry addendum
 
 This addendum extends the Copilot execution contract; it does not change MAF.
 
@@ -350,13 +350,13 @@ This addendum extends the Copilot execution contract; it does not change MAF.
   destination. Do not add a subscription, settings, sampling, caps, exporters,
   flush/shutdown calls, or create/resume telemetry; keep
   `continue_pending_work=False`.
-- Align Copilot runtime-owned invocation and tool telemetry to the selected
-  GenAI semantic-conventions snapshot without claiming blanket compliance for
-  every runtime path or downstream Azure surface. Copilot uses one canonical
-  `invoke_agent {name}` span per actual invocation and one canonical
-  `execute_tool {name}` span per actual tool call; MAF keeps its existing
-  instrumentation and the runtime does not add duplicate canonical wrappers on
-  that path.
+- The new Copilot telemetry follows the selected GenAI
+  semantic-conventions snapshot where the runtime has exact matching values,
+  without claiming blanket compliance for every runtime path or downstream
+  Azure surface. Copilot uses one canonical `invoke_agent {name}` span per
+  actual invocation and one canonical `execute_tool {name}` span per actual
+  tool call; MAF keeps its existing instrumentation and the runtime does not
+  add duplicate canonical wrappers on that path.
 - Keep `ASSISTANT_USAGE` as a custom `af.copilot.model.usage` event on the
   owning Copilot invocation span. Reuse standard `gen_ai.usage.*` fields only
   where the reported SDK semantics match exactly, keep the existing once-only
@@ -366,12 +366,16 @@ This addendum extends the Copilot execution contract; it does not change MAF.
 - Export only allowlisted telemetry. Standard identity, conversation, and tool
   fields come only from stable runtime state, exact provider mapping is emitted
   only when the runtime already knows it, and `ENABLE_SENSITIVE_DATA` remains
-  the only content opt-in. Copilot run-log payloads still exclude full
-  `tool_calls` records; MAF run logging remains unchanged. Credentials,
-  authorization headers, raw envelopes, stacks, reasoning text, and skill
-  content/paths are never exported. Content-free diagnostics and best-effort
-  telemetry cleanup must not change results, errors, cancellation, or SSE
-  termination.
+  the only content opt-in for prompt/request/response and tool content.
+  Copilot run-log payloads still exclude full `tool_calls` records; MAF run
+  logging remains unchanged. Credentials, authorization headers, raw
+  envelopes, reasoning text, and skill content/paths are never exported.
+  **Carve-out:** per Decision 24, runtime-owned Copilot ingress, delegate,
+  leaf, and custom-tool spans still record caught Python exception messages and
+  stack traces regardless of `ENABLE_SENSITIVE_DATA`, so arbitrary exception
+  text may contain sensitive content if application code includes it.
+  Content-free diagnostics and best-effort telemetry cleanup must not change
+  results, errors, cancellation, or SSE termination.
 - Coverage is turn-scoped. Do not fabricate model spans or missing timing,
   claim complete native hierarchy, or promise recovery of lost events.
 
@@ -412,9 +416,10 @@ previously approved harness decisions above.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
-| 21 | Semantic-alignment scope | runtime-owned Copilot alignment / whole-runtime blanket compliance | Align only Copilot runtime-owned invocation and tool spans to the selected GenAI semantic-conventions snapshot; keep MAF unchanged and avoid any duplicate canonical wrappers. | Human (larohra) | 2026-10-13 |
+| 21 | GenAI-semantics scope | new Copilot telemetry follows GenAI semantics / whole-runtime blanket compliance | Have the new Copilot runtime-owned invocation and tool telemetry follow the selected GenAI semantic-conventions snapshot only where the runtime has exact matching values; keep MAF unchanged and avoid any duplicate canonical wrappers. | Human (larohra) | 2026-10-13 |
 | 22 | Canonical invocation and tool boundaries | keep custom `agent.run` naming / adopt Copilot canonical GenAI names | Use `invoke_agent {name}` for Copilot invocation spans and `execute_tool {name}` for Copilot tool spans, preserving the existing session-event subscription, explicit host context, wrapper ownership, and matched native-timing rules. | Human (larohra) | 2026-10-13 |
 | 23 | Stable fields, usage, and privacy | infer missing provider/model semantics / emit only proven fields | Emit standard identity, conversation, provider, and tool fields only from stable runtime state; keep usage as the existing custom event plus exact-match `gen_ai.usage.*` fields; defer inference spans and standard metrics; keep allowlisted telemetry and never include full `tool_calls` records in Copilot run logs. | Human (larohra) | 2026-10-13 |
+| 24 | Copilot exception diagnostics | keep Copilot exception details suppressed/content-free / match installed MAF exception capture at runtime-owned boundaries | Disable automatic OTel exception/status recording on Copilot runtime-owned ingress, delegate, leaf, and custom-tool spans, then explicitly capture actual caught Python failures once per span with OpenTelemetry exception events, `error.type`, `ERROR` status, and `af.fault_domain` regardless of `ENABLE_SENSITIVE_DATA`; keep prompt/request/response gating unchanged, preserve cancellation as nonfailure, and keep native-only SDK tool failures as structured statuses without fabricated exception events. | Human (larohra) | 2026-10-14 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -456,10 +461,8 @@ previously approved harness decisions above.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.
-- **Telemetry addendum sign-off:** larohra approved the revised telemetry and
-  semantic-alignment addendum on 2026-10-13.
-- **Telemetry addendum:** @larohra approved this addendum on 2026-10-12 after
-  independent architecture review passed. The addendum decisions below govern
+- **Telemetry addendum sign-off:** larohra approved the revised Copilot
+  telemetry addendum on 2026-10-13. The addendum decisions above govern
   Copilot telemetry only and do not alter the prior harness decisions.
 - **Scope note:** This FRD records the durable feature contract only. It does
   not preserve superseded iteration history, review churn, or qualification

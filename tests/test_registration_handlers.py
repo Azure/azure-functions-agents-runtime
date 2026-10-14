@@ -1005,6 +1005,62 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
     assert '"tool_calls"' not in caplog.text
 
 
+@pytest.mark.parametrize("entrypoint", ["http", "timer"])
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+def test_copilot_agent_ingress_records_exception_once_without_changing_content_gating(
+    monkeypatch: Any, entrypoint: str, capture_sensitive_data: bool, tmp_path: Path
+) -> None:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(
+        observability, "get_tracer", lambda: provider.get_tracer("agent-ingress-failure-test")
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.start_span",
+        observability.start_span,
+    )
+
+    async def fail_run_agent(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("private ingress failure")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fail_run_agent,
+    )
+    resolved = _resolved_agent(response_schema=None)
+    capabilities = AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
+
+    if entrypoint == "http":
+        handler = make_http_agent_handler(resolved, capabilities)
+        response = asyncio.run(handler(DummyRequest({"prompt": "secret prompt"})))
+        assert response.status_code == 500
+        assert json.loads(response.body) == {"error": "private ingress failure"}
+    else:
+        handler = make_agent_handler(resolved, "timer_trigger", capabilities)
+        with pytest.raises(RuntimeError, match="private ingress failure"):
+            asyncio.run(handler({"private": "trigger payload"}))
+
+    [span] = exporter.get_finished_spans()
+    assert span.name == "invoke_agent resolved-agent-slug"
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert span.attributes["af.fault_domain"] == "unknown"
+    assert span.attributes["error.type"] == "RuntimeError"
+    assert span.status.description == "RuntimeError('private ingress failure')"
+    [event] = [item for item in span.events if item.name == "exception"]
+    assert event.attributes["exception.message"] == "private ingress failure"
+    assert "RuntimeError: private ingress failure" in event.attributes["exception.stacktrace"]
+    assert ("af.agent.input" in span.attributes) is capture_sensitive_data
+
+
 @pytest.mark.parametrize(
     ("harness_kind", "expects_tool_calls"),
     [

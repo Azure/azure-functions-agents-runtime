@@ -240,6 +240,7 @@ def _install_start_span_capture(monkeypatch: Any) -> list[_CapturedSpan]:
         fault_domain: str | None = None,
         lifecycle_stage: str | None = None,
         attributes: dict[str, Any] | None = None,
+        **_kwargs: Any,
     ) -> Iterator[_CapturedSpan]:
         span = _CapturedSpan(attributes or {})
         spans.append(span)
@@ -813,6 +814,77 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
         event for event in span.events if event.name == "af.copilot.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 3
+
+
+@pytest.mark.parametrize("surface", ["chat", "mcp"])
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+def test_copilot_builtin_ingress_records_exception_once(
+    monkeypatch: Any, surface: str, capture_sensitive_data: bool, tmp_path: Path
+) -> None:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        builtin_endpoints=(
+            BuiltinEndpointsConfig(debug_chat_ui=True)
+            if surface == "chat"
+            else BuiltinEndpointsConfig(mcp=True)
+        ),
+        source_file=source_file,
+    )
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(
+        observability, "get_tracer", lambda: provider.get_tracer("builtin-ingress-failure-test")
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.start_span",
+        observability.start_span,
+    )
+
+    async def fail_run_builtin_agent(*_args: Any, **_kwargs: Any) -> AgentResult:
+        raise RuntimeError("private builtin failure")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fail_run_builtin_agent,
+    )
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+    )
+
+    if surface == "chat":
+        route = next(route for route in app.routes if route["route"] == "agents/secondary_agent/chat")
+        response = asyncio.run(route["handler"](DummyRequest({"prompt": "hello"})))
+        assert response.status_code == 500
+        assert json.loads(response.body) == {"error": "private builtin failure"}
+    else:
+        route = next(route for route in app.routes if route.get("mcp_tool_trigger"))
+        result = asyncio.run(route["handler"](json.dumps({"arguments": {"prompt": "hello"}})))
+        assert json.loads(result)["error"] == "private builtin failure"
+
+    [span] = exporter.get_finished_spans()
+    assert span.name == f"invoke_agent {resolved.slug}"
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert span.attributes["af.fault_domain"] == "unknown"
+    assert span.attributes["error.type"] == "RuntimeError"
+    assert span.status.description == "RuntimeError('private builtin failure')"
+    [event] = [item for item in span.events if item.name == "exception"]
+    assert event.attributes["exception.message"] == "private builtin failure"
+    assert "RuntimeError: private builtin failure" in event.attributes["exception.stacktrace"]
 
 
 def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
@@ -1791,6 +1863,7 @@ def test_entra_chatstream_without_identity_emits_sse_error(
     monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+    spans = _install_start_span_capture(monkeypatch)
 
     register_builtin_endpoints(app, resolved, AgentCapabilities())
     stream_route = next(
@@ -1812,6 +1885,56 @@ def test_entra_chatstream_without_identity_emits_sse_error(
         "type": "session",
         "session_id": "caller-id",
     }
+    assert spans == []
+
+
+class _BadJsonRequest(DummyRequest):
+    async def json(self) -> Any:
+        raise ValueError("invalid json")
+
+
+@pytest.mark.parametrize(
+    ("input_request", "message"),
+    [
+        pytest.param(_BadJsonRequest(None), "invalid json", id="invalid-json"),
+        pytest.param(DummyRequest({}), "Missing 'prompt'", id="missing-prompt"),
+    ],
+)
+def test_chatstream_rejected_requests_do_not_open_invocation_spans(
+    monkeypatch: Any, tmp_path: Path, input_request: DummyRequest, message: str
+) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    spans = _install_start_span_capture(monkeypatch)
+    invoked = {"count": 0}
+
+    def fail_if_invoked(*args: Any, **kwargs: Any) -> Any:
+        invoked["count"] += 1
+        raise AssertionError("_run_builtin_agent_stream should not run")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent_stream",
+        fail_if_invoked,
+    )
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    stream_route = next(
+        route for route in app.routes if route["route"] == "agents/test_agent/chatstream"
+    )
+
+    response = asyncio.run(stream_route["handler"](input_request))
+
+    assert response.status_code == 400
+
+    async def collect() -> list[dict[str, Any]]:
+        return [
+            json.loads(chunk.removeprefix("data: ").strip())
+            async for chunk in response.body_iterator
+        ]
+
+    events = asyncio.run(collect())
+    assert events == [{"type": "error", "content": message}]
+    assert invoked["count"] == 0
+    assert spans == []
 
 
 def test_entra_chat_with_easy_auth_principal_proceeds(

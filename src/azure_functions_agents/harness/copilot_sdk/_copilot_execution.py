@@ -197,15 +197,11 @@ def _tool(
             except asyncio.CancelledError:
                 span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.CANCELLED)
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.warning("Copilot custom tool failed: tool=%s", function.name)
                 text = _SAFE_CUSTOM_TOOL_FAILURE
                 span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.ERROR)
-                span.set_error(
-                    _SAFE_CUSTOM_TOOL_FAILURE_MESSAGE,
-                    fault_domain=FaultDomain.APP,
-                    error_type="tool_execution_error",
-                )
+                span.record_exception(exc, fault_domain=FaultDomain.APP)
                 calls.complete_custom(invocation.tool_call_id, text, success=False)
                 _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
                 return ToolResult(text_result_for_llm=text, result_type="failure")

@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 from opentelemetry.util.types import AttributeValue
 
-from ._agent_identity import agent_id
 from ._logger import logger
 from .config.env import EnvVar, _to_bool, runtime_env_value
 
@@ -201,26 +200,8 @@ def safe_telemetry_name(value: str | None) -> str | None:
     return _TELEMETRY_NAME_PATTERN.sub("_", value)[:TELEMETRY_NAME_MAX_LENGTH]
 
 
-def _is_copilot_harness(harness_name: str | None) -> bool:
-    return harness_name == "copilot"
-
-
-def gen_ai_provider_name(provider_kind: str | None) -> str | None:
-    """Return the pinned semconv provider value when the runtime knows it exactly."""
-    match provider_kind:
-        case "openai":
-            return "openai"
-        case "azure_openai":
-            return "azure.ai.openai"
-        case _:
-            return None
-
-
-def agent_run_span_name(*, agent_name: str | None, harness_name: str | None) -> str:
-    """Return the runtime-owned invocation span name for the selected harness."""
-    if _is_copilot_harness(harness_name):
-        name = gen_ai_agent_name(agent_name)
-        return f"invoke_agent {name}" if name else GenAiOperationName.INVOKE_AGENT
+def agent_run_span_name(*, agent_name: str | None) -> str:
+    """Return the harness-neutral runtime invocation span name."""
     return f"agent.run {agent_name or 'agent'}"
 
 
@@ -231,59 +212,19 @@ def agent_run_attributes(
     trigger_type: str | None,
     session_id: str | None,
     model: str | None,
-    gen_ai_default: str | None = None,
-    harness_name: str | None = None,
-    provider_kind: str | None = None,
 ) -> dict[str, TelemetryAttributeValue]:
-    """Build shared agent.run attributes while leaving trigger names extensible."""
-    attributes: dict[str, TelemetryAttributeValue] = {
+    """Build harness-neutral invocation attributes while leaving trigger names extensible."""
+    return {
         ATTR_AGENT_NAME: agent_name,
-        ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name, default=gen_ai_default),
         ATTR_AGENT_DISPLAY_NAME: display_name,
         ATTR_AGENT_TRIGGER_TYPE: trigger_type,
-    }
-    if _is_copilot_harness(harness_name):
-        attributes[ATTR_GEN_AI_OPERATION_NAME] = GenAiOperationName.INVOKE_AGENT
-        attributes[ATTR_GEN_AI_PROVIDER_NAME] = gen_ai_provider_name(provider_kind)
-        attributes[ATTR_GEN_AI_CONVERSATION_ID] = session_id
-        attributes[ATTR_GEN_AI_REQUEST_MODEL] = model
-        attributes[ATTR_GEN_AI_AGENT_ID] = agent_id(agent_name) if agent_name else None
-    else:
-        attributes[ATTR_AGENT_SESSION_ID] = session_id
-        attributes[ATTR_AGENT_MODEL] = model
-    return attributes
-
-
-def tool_span_attributes(
-    *,
-    tool_name: str | None,
-    tool_call_id: str | None,
-    tool_source: ToolSpanSource,
-    agent_name: str | None = None,
-    session_id: str | None = None,
-) -> dict[str, TelemetryAttributeValue]:
-    """Build shared Copilot execute_tool attributes without exporting tool content."""
-    return {
-        ATTR_GEN_AI_OPERATION_NAME: GenAiOperationName.EXECUTE_TOOL,
-        ATTR_GEN_AI_TOOL_NAME: tool_name,
-        ATTR_GEN_AI_TOOL_CALL_ID: tool_call_id,
-        ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name),
-        ATTR_GEN_AI_AGENT_ID: agent_id(agent_name) if agent_name else None,
-        ATTR_GEN_AI_CONVERSATION_ID: session_id,
-        ATTR_TOOL_SOURCE: tool_source,
+        ATTR_AGENT_SESSION_ID: session_id,
+        ATTR_AGENT_MODEL: model,
     }
 
 
-def set_agent_session_attribute(
-    span: RuntimeSpan,
-    *,
-    session_id: str | None,
-    harness_name: str | None,
-) -> None:
-    """Set the standard or legacy session/conversation attribute for one span."""
-    if _is_copilot_harness(harness_name):
-        span.set_attribute(ATTR_GEN_AI_CONVERSATION_ID, session_id)
-        return
+def set_agent_session_attribute(span: RuntimeSpan, *, session_id: str | None) -> None:
+    """Set the shared runtime session attribute on one invocation span."""
     span.set_attribute(ATTR_AGENT_SESSION_ID, session_id)
 
 
@@ -294,6 +235,11 @@ def error_type_for_exception(exc: BaseException) -> str | None:
     if isinstance(exc, TimeoutError):
         return "timeout"
     return type(exc).__name__ or "_OTHER"
+
+
+def exception_status_description(exc: BaseException, *, include_exception: bool) -> str:
+    """Return the status description emitted for a recorded exception."""
+    return repr(exc) if include_exception else ""
 
 
 def _resolve_capture_sensitive_data() -> bool:
@@ -501,11 +447,11 @@ def current_span() -> RuntimeSpan:
     """Wrap whatever OTel span is already active, without starting a new one.
 
     Used by the ``delegate_<slug>`` tool adapter (``runner.build_subagent_tools``)
-    to annotate the *existing* ``execute_tool delegate_<slug>`` span (opened by
-    MAF's ``FunctionTool.invoke()``) with ``af.delegate.*`` attributes, rather
-    than nesting a second span underneath it — see FRD 0007 §4.12, whose span
-    diagram shows exactly one ``execute_tool delegate_<slug>`` span per
-    delegation. Contrast with :func:`start_span`, which always creates a new
+    and by Copilot turn-local telemetry helpers to annotate the *existing* active
+    span rather than nesting a duplicate child underneath it. Delegation uses
+    this to stamp ``af.delegate.*`` onto the already-open
+    ``execute_tool delegate_<slug>`` span, preserving exactly one delegate tool
+    span per call. Contrast with :func:`start_span`, which always creates a new
     span. Returns a no-op :class:`RuntimeSpan` when tracing is unavailable or
     disabled.
     """
@@ -522,11 +468,12 @@ def current_span() -> RuntimeSpan:
 class RuntimeSpan:
     """Thin wrapper over an OTel span that no-ops when tracing is unavailable."""
 
-    __slots__ = ("_cancelled", "_span")
+    __slots__ = ("_cancelled", "_error_recorded", "_span")
 
     def __init__(self, span: Any | None) -> None:
         self._span = span
         self._cancelled = False
+        self._error_recorded = False
 
     def set_attribute(self, key: str, value: TelemetryAttributeValue) -> None:
         if self._span is None or value is None:
@@ -568,13 +515,16 @@ class RuntimeSpan:
 
             if include_exception:
                 self._span.record_exception(exc)
-                message = str(exc)
-            else:
-                message = ""
-            self._span.set_status(Status(StatusCode.ERROR, message))
+            self._span.set_status(
+                Status(
+                    StatusCode.ERROR,
+                    exception_status_description(exc, include_exception=include_exception),
+                )
+            )
             self._span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain or FaultDomain.UNKNOWN)
             if resolved_error_type := error_type or error_type_for_exception(exc):
                 self._span.set_attribute(ATTR_ERROR_TYPE, resolved_error_type)
+            self._error_recorded = True
         except Exception:  # pragma: no cover - defensive
             pass
 
@@ -594,6 +544,7 @@ class RuntimeSpan:
             self._span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain)
             if error_type is not None:
                 self._span.set_attribute(ATTR_ERROR_TYPE, error_type)
+            self._error_recorded = True
         except Exception:  # pragma: no cover - defensive
             pass
 
@@ -655,7 +606,7 @@ def start_span(
         suppress_cancellation_error = (
             isinstance(exc, asyncio.CancelledError) and span._cancelled
         )
-        if not suppress_cancellation_error:
+        if not suppress_cancellation_error and not span._error_recorded:
             span.record_exception(
                 exc,
                 fault_domain=fault_domain,

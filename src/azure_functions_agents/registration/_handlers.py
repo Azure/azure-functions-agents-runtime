@@ -24,16 +24,22 @@ from .._observability import (
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
-    agent_run_attributes,
-    agent_run_span_name,
     capture_sensitive_data,
-    set_agent_session_attribute,
     start_span,
 )
 from .._source_marker import source_marker
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
-from ..harness._harness_binding import AppHarness, HarnessKind, HarnessSessionState, bind_harness
+from ..harness._harness_binding import (
+    AppHarness,
+    HarnessKind,
+    HarnessSessionState,
+    agent_run_attributes_for_harness,
+    agent_run_span_name_for_harness,
+    auto_record_exceptions_for_harness,
+    bind_harness,
+    set_agent_session_attribute_for_harness,
+)
 from ..harness._session_storage import SessionStorageError
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
@@ -280,19 +286,16 @@ def make_agent_handler(
 
         session_id = _new_session_id()
         with start_span(
-            agent_run_span_name(
-                agent_name=resolved.slug,
-                harness_name=harness.name,
-            ),
+            agent_run_span_name_for_harness(harness, agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes=agent_run_attributes(
+            record_exception=auto_record_exceptions_for_harness(harness),
+            attributes=agent_run_attributes_for_harness(
+                harness,
                 agent_name=resolved.slug,
                 display_name=resolved.name,
                 trigger_type=trigger_type,
                 session_id=session_id,
                 model=resolved.model,
-                harness_name=harness.name,
-                provider_kind=harness.provider.kind if harness.provider else None,
             ),
         ) as span:
             try:
@@ -411,19 +414,16 @@ def make_http_agent_handler(
         )
 
         with start_span(
-            agent_run_span_name(
-                agent_name=resolved.slug,
-                harness_name=harness.name,
-            ),
+            agent_run_span_name_for_harness(harness, agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes=agent_run_attributes(
+            record_exception=auto_record_exceptions_for_harness(harness),
+            attributes=agent_run_attributes_for_harness(
+                harness,
                 agent_name=resolved.slug,
                 display_name=resolved.name,
                 trigger_type="http",
                 session_id=None,
                 model=resolved.model,
-                harness_name=harness.name,
-                provider_kind=harness.provider.kind if harness.provider else None,
             ),
         ) as span:
             try:
@@ -431,10 +431,10 @@ def make_http_agent_handler(
                 session_state = HarnessSessionState(
                     caller_supplied=supplied_session_id is not None
                 )
-                set_agent_session_attribute(
+                set_agent_session_attribute_for_harness(
+                    harness,
                     span,
                     session_id=session_id,
-                    harness_name=harness.name,
                 )
                 try:
                     body = await req.json()
