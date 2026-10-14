@@ -14,6 +14,7 @@ from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as runtime,
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
+from tests._harness_helpers import copilot_state, make_copilot_harness
 from tests.test_copilot_execution import _fake_client
 from tests.test_copilot_execution import preview as preview
 
@@ -22,7 +23,7 @@ def test_owner_construction_is_thread_safe_and_resource_free(preview):
     with ThreadPoolExecutor(max_workers=8) as pool:
         owners = list(pool.map(lambda _: runtime.get_runtime(preview), range(32)))
     assert all(owner is owners[0] for owner in owners)
-    assert preview._resources.runtime is owners[0]
+    assert copilot_state(preview).runtime is owners[0]
     assert owners[0]._client is owners[0]._credential is None
     assert not owners[0].workspace.exists()
     assert not lifecycle._SHUTDOWN_CALLBACKS
@@ -41,7 +42,7 @@ def test_unselected_binding_cannot_acquire_an_owner(tmp_path):
     binding = AppHarness(HarnessKind.MAF, tmp_path)
     with pytest.raises(CopilotPreviewError, match="not selected"):
         runtime.get_runtime(binding)
-    assert binding._resources.runtime is None
+    assert binding._resources.runner is None
 
 
 @pytest.mark.asyncio
@@ -69,7 +70,7 @@ async def test_concurrent_startup_shares_one_client(preview, monkeypatch):
     finally:
         release.set()
         await owner.close()
-    assert preview._resources.runtime is None
+    assert copilot_state(preview).runtime is None
 
 
 @pytest.mark.asyncio
@@ -88,7 +89,7 @@ async def test_failed_start_cleanup_drops_the_failed_handle(preview, monkeypatch
     assert owner._client is None
     assert owner._close_callback in lifecycle._SHUTDOWN_CALLBACKS
     await owner.close()
-    assert preview._resources.runtime is None
+    assert copilot_state(preview).runtime is None
     assert not lifecycle._SHUTDOWN_CALLBACKS
     factory.assert_called_once()
 
@@ -116,9 +117,9 @@ async def test_owner_shutdown_clears_failed_credential_and_visits_every_owner(pr
     good_credential.close.assert_awaited_once()
     client.stop.assert_awaited_once()
     assert first._credential is None
-    assert preview._resources.runtime is None
+    assert copilot_state(preview).runtime is None
     assert first._close_callback not in lifecycle._SHUTDOWN_CALLBACKS
-    assert second_binding._resources.runtime is None
+    assert copilot_state(second_binding).runtime is None
     assert not lifecycle._SHUTDOWN_CALLBACKS
 
 
@@ -135,7 +136,7 @@ async def test_acquired_owner_registers_a_stable_bound_close_callback(preview, m
     await lifecycle._shutdown_harnesses()
     replacement.assert_not_awaited()
     client.stop.assert_awaited_once()
-    assert preview._resources.runtime is None
+    assert copilot_state(preview).runtime is None
 
 
 @pytest.mark.asyncio
@@ -196,7 +197,7 @@ async def test_failed_start_uses_sdk_stop_and_force_stop_then_retries(preview, m
 async def test_shutdown_closes_every_app_owner_even_if_one_fails(preview, monkeypatch):
     import copilot
 
-    second_binding = replace(preview, storage_root=preview.storage_root / "other")
+    second_binding = make_copilot_harness(preview.app_root, storage_root=copilot_state(preview).storage_root / "other")
     first = runtime.get_runtime(preview)
     second = runtime.get_runtime(second_binding)
     assert runtime.get_runtime(preview) is first
@@ -212,8 +213,8 @@ async def test_shutdown_closes_every_app_owner_even_if_one_fails(preview, monkey
     failed_client.force_stop.assert_awaited_once()
     good_client.stop.assert_awaited_once()
     assert first._client is None
-    assert preview._resources.runtime is None
-    assert second_binding._resources.runtime is None
+    assert copilot_state(preview).runtime is None
+    assert copilot_state(second_binding).runtime is None
     assert not lifecycle._SHUTDOWN_CALLBACKS
 
 

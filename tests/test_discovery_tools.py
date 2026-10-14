@@ -159,6 +159,11 @@ def test_discovery_records_neutral_metadata_without_maf_construction(
 
 
 def test_raw_maf_tools_are_ignored_in_discovery(tmp_path: Path, caplog) -> None:
+    from azure_functions_agents.harness.agent_framework._maf_tool_validation import (
+        register_maf_tool_predicate,
+    )
+
+    register_maf_tool_predicate()
     _write_tool_file(
         tmp_path,
         "legacy",

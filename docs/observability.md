@@ -20,7 +20,7 @@ The app's `function_app.py` stays two lines — you enable telemetry through con
    runtime configures Azure Monitor **automatically** when that extra is installed and no
    OpenTelemetry provider is already active.
 
-That's it — when a real OpenTelemetry provider is active, the runtime's `agent.run` /
+That's it — when a real OpenTelemetry provider is active, the runtime's invocation and
 `dynamic_session.execute` spans and metrics flow to Application Insights. Without the `[monitor]`
 extra, the runtime's worker spans are not exported unless another OpenTelemetry provider is already
 active, and if a connection string is set in that state the runtime logs a warning telling you to
@@ -39,9 +39,9 @@ runtime is already configuring the exporter.
 
 `create_function_app()` calls `_observability.configure_observability()` to configure the optional
 Azure Monitor exporter when available and no OpenTelemetry provider is already active. This shared
-bootstrap does not import or initialize an agent harness. MAF `gen_ai` instrumentation is enabled
-only when the MAF harness initializes; the Copilot path does not load MAF instrumentation. Runtime
-span/content helpers continue using the active OpenTelemetry provider or no-op when none is active.
+bootstrap does not import or initialize an agent harness. Runtime span/content helpers continue
+using the active OpenTelemetry provider or no-op when none is active; any selected SDK-native
+instrumentation is initialized by the selected harness only.
 
 ## Where the runtime's output shows up (traces, not logs)
 
@@ -56,10 +56,10 @@ require the `PYTHON_ENABLE_DEBUG_LOGGING` app setting. This is by design.
 
 **So to debug a run, use the spans — not the log list:**
 
-- `agent.run {name}` (MAF wrappers), `invoke_agent {gen_ai.agent.name}` (Copilot), and
-  `dynamic_session.execute`, with all the `af.*` attributes below.
-- Runtime **span events** on the runtime-owned invocation span (input/response-contract
-  milestones — see that span's section) and MAF's `gen_ai.*` child spans (per model/tool call).
+- The runtime-owned invocation span, `dynamic_session.execute`, and tool spans, with the `af.*`
+  attributes below.
+- Runtime **span events** on the invocation span (input/response-contract milestones — see that
+  span's section) and any framework- or SDK-owned child spans.
 - **Failures are captured on the span**, not just in logs: a failing run is marked error with
   `record_exception` + `af.fault_domain`, so it is fully visible in the transaction view and the
   `AppExceptions` table.
@@ -77,28 +77,21 @@ This distinction:
 - keeps custom runtime attributes separate from standard names,
 - lets queries use standard names for reported model, token-usage, agent, and tool metadata.
 
-Four sub-namespaces group the detail, plus two cross-cutting attributes:
+Four sub-namespaces group the detail, plus three cross-cutting attributes:
 
 | Namespace | Used for |
 | --- | --- |
-| `af.agent.*` | attributes on the runtime-owned invocation span (`agent.run {name}` on MAF wrappers, `invoke_agent {gen_ai.agent.name}` on Copilot) |
+| `af.agent.*` | attributes on the runtime-owned invocation span |
 | `af.dynamic_session.*` | attributes on the `dynamic_session.execute` (code sandbox) span |
 | `af.web_request.*` | attributes on the `web_request` (outbound HTTP tool) span |
 | `af.delegate.*` | attributes on the `execute_tool delegate_<slug>` span (chat-time sub-agent delegation) |
-| `af.fault_domain`, `af.lifecycle_stage` | cross-cutting; may appear on any runtime span |
+| `af.fault_domain`, `af.lifecycle_stage`, `af.harness` | cross-cutting; may appear on runtime-owned spans |
 
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
-name — for example `server.address` for the session-pool host. MAF continues emitting its own
-`gen_ai.*` model/tool spans. Copilot emits the same standard agent/tool names and token-usage
-attributes where the SDK reports matching semantics; its usage observation remains a custom event
-on the owning Copilot `invoke_agent`, not a synthetic model span. A timed Copilot MCP tool span sets
-`mcp.method.name=tools/call` only when the SDK event identifies an MCP server/tool invocation.
-
-The Copilot preview addendum reuses the active turn's existing session-event
-subscription, the current OpenTelemetry provider, and the runtime's custom-tool
-wrapper. It does **not** add a second receiver, new telemetry settings, event
-caps, extra exporters, flush/shutdown hooks, or create/resume session-open
-telemetry. MAF behavior is unchanged.
+name — for example `server.address` for the session-pool host. Standard GenAI attributes are emitted
+only where the runtime has matching evidence for provider, model, agent, conversation, tool, or
+usage semantics. The runtime does not fabricate model spans or timing when the selected SDK does not
+report a reliable model boundary.
 
 ## Spans and attributes we emit today
 
@@ -111,17 +104,18 @@ telemetry. MAF behavior is unchanged.
 
 ### Runtime-owned invocation span
 
-One per agent invocation (timer, connector, HTTP, …). MAF names this span
-`agent.run {name}`; Copilot names it `invoke_agent {gen_ai.agent.name}`. It is
-the parent that ties the MAF `gen_ai` spans and the runtime's sandbox /
-`web_request` tool spans together.
+One per agent invocation (timer, connector, HTTP, …). This is the runtime-level run span for
+`af.agent.*` attributes, lifecycle events, and aggregate tool/error counts. Use these attributes,
+not the span name alone, for dashboards that need to work across runtime versions and selected
+harnesses. It is the parent for runtime tool spans and harness-reported child spans.
 
 | Attribute | Meaning |
 | --- | --- |
-| `af.agent.name` | Canonical agent slug, not the app-qualified MAF name or frontmatter display name. |
+| `af.agent.name` | Canonical agent slug, not an app-qualified display label or frontmatter display name. |
 | `af.agent.trigger_type` | `timer`, `connectorTrigger`, `http`, … |
-| `af.agent.model` | Model/deployment used on MAF wrappers. Copilot uses `gen_ai.request.model` instead. |
-| `af.agent.session_id` | Conversation/session id on MAF wrappers. Copilot uses `gen_ai.conversation.id` instead. |
+| `af.agent.model` | Model/deployment used for the run, when emitted on the runtime invocation surface. |
+| `af.agent.session_id` | Conversation/session id, when emitted on the runtime invocation surface. |
+| `af.harness` | Selected app-level harness for this runtime-owned span: `maf` or `copilot`. This is an attribute, not a synthetic span. |
 | `af.agent.outcome` | `success` or `error`. |
 | `af.agent.tool_call_count` | Number of tool calls in the run. |
 | `af.agent.tool_error_count` | Tool calls that failed — includes a "successful" call whose result carried an error or non-empty stderr, **plus** any `delegate_<slug>` call the coordinator recovered from (a specialist failure or timeout — see [Span `execute_tool delegate_<slug>`](#span-execute_tool-delegate_slug-chat-time-sub-agent-delegation)). |
@@ -132,37 +126,23 @@ the parent that ties the MAF `gen_ai` spans and the runtime's sandbox /
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
-In the default-off Copilot preview, turn-scoped tool accounting comes from the
-active turn's public SDK events rather than a second receiver. The runtime's
-Copilot semantic alignment targets the OpenTelemetry GenAI semantic conventions
-**Development** revision
-`4e8a2812139b2a999d959e3650e24dfc64e21943`. Copilot uses one canonical
-`invoke_agent {gen_ai.agent.name}` span per actual invocation and one canonical
-`execute_tool {gen_ai.tool.name}` span per actual tool call; MAF keeps its
-existing instrumentation unchanged and the runtime does not add duplicate
-canonical wrappers on that path.
+For SDK-reported tool and usage events, the runtime records only public,
+content-free metadata. Timed tool spans require coherent start and completion
+records; incomplete or ambiguous timing is not guessed. Each unique usage event
+is attached to the owning invocation span as `af.agent.model.usage` with
+standard `gen_ai.usage.*` fields where semantics match. Counting a tool once in
+telemetry is not a guarantee of exactly-once tool effects.
 
-Native MCP and `skill` / `view` / `bash` calls, including permission denials,
-populate `AgentResult.tool_calls` and the existing tool/error counts from
-completion records, including completion-only records. A timed telemetry span
-is emitted only when start and completion records have coherent call-ID
-ownership and matched timestamps; incomplete or ambiguous timing is not
-guessed. The custom wrapper restores captured host context before invocation,
-owns each wrapped call ID, and deduplicates native metadata so one wrapped call
-is counted once. Each unique public `ASSISTANT_USAGE` event becomes a custom
-`af.copilot.model.usage` span event on the owning Copilot `invoke_agent` span.
-It uses standard `gen_ai.usage.*` fields where the reported semantics match
-exactly; reported duration, TTFT, and inter-token measures remain custom
-`af.copilot.*` values. No backdated inference span is created or implied, and
-standard GenAI inference metrics remain deferred until the runtime has
-reliable model-boundary evidence. These observations stay separate from the
-existing once-only eight-field invocation totals. `skill.invoked` metadata is
-not an extra tool call. The same sensitive-data policy applies, and counting
-once is not a guarantee of exactly-once tool effects.
+Runtime-owned invocation spans are intentionally harness-neutral. They use
+`agent.run {slug}` and the `af.agent.*` attributes regardless of the selected
+backend. SDK- or framework-owned child spans may still use their own GenAI span
+names and attributes when the underlying implementation emits them. The runtime
+does not add duplicate invocation spans or fabricate unavailable provider/model
+hierarchy just to normalize optional SDK coverage.
 
 #### Stable agent ID
 
-MAF `gen_ai.*` spans set `gen_ai.agent.id` to a deterministic, human-readable
+When the runtime emits `gen_ai.agent.id`, it uses a deterministic, human-readable
 `<site-name>/<agent-slug>` string. The site name comes only from trimmed,
 lower-cased `WEBSITE_SITE_NAME`; an unset, empty, or whitespace-only value uses
 `local`. The agent name is the canonical filename-derived runtime slug, not the
@@ -183,30 +163,30 @@ Agent 365, or Foundry.
 
 #### Readable agent name
 
-MAF `gen_ai.agent.name` is separate from the stable `gen_ai.agent.id`.
-For primary agents, streaming, chat delegates, and workflow leaf specialists,
-the name is `<Function App name>/<canonical agent slug>` when the trimmed
-`WEBSITE_SITE_NAME` is non-blank. Site-name casing is preserved; owner,
-deployment id, and the frontmatter display `name:` do not choose this label.
+When the runtime emits `gen_ai.agent.name`, it keeps it separate from the stable
+`gen_ai.agent.id`. For primary agents, streaming, chat delegates, and workflow
+leaf specialists, the name is `<Function App name>/<canonical agent slug>` when
+the trimmed `WEBSITE_SITE_NAME` is non-blank. Site-name casing is preserved;
+owner, deployment id, and the frontmatter display `name:` do not choose this
+label.
 For example, `WEBSITE_SITE_NAME=Contoso-Agents` gives the billing agent the name
 `Contoso-Agents/billing`, while its ID is `contoso-agents/billing`.
-MAF can also use this readable name as response `author_name` metadata; it is
-not a new canonical runtime identity.
+Some harnesses can also use this readable name as response author metadata; it
+is not a new canonical runtime identity.
 
-An unset, empty, or whitespace-only site name preserves the existing MAF name:
-the caller's canonical slug, or `None` when the caller omitted the name. With a
-site name, an omitted or empty caller name uses the same `main` suffix as the ID.
+An unset, empty, or whitespace-only site name preserves the caller's canonical
+slug, or `None` when the caller omitted the name. With a site name, an omitted
+or empty caller name uses the same `main` suffix as the ID.
 Qualification does not change files, routes, `delegate_<slug>` tool names,
-catalog lookup, history/session scope, locks, workflow authorization, or the
-Copilot preview namespace. Runtime `af.agent.name` stays the canonical slug.
+Catalog lookup, history/session scope, locks, workflow authorization, or
+backend storage namespaces. Runtime `af.agent.name` stays the canonical slug.
 
 #### Span events (runtime lifecycle milestones)
 
 These runtime-owned invocation-span events mark input/output-contract
 boundaries. They carry only non-sensitive metadata (names/status/counts —
-never request/response/model content). MAF's `gen_ai.*` child spans cover its
-per-model/per-tool detail; Copilot uses its turn-scoped usage event and tool
-spans for reported detail.
+never request/response/model content). Harness-owned child spans and usage
+events carry per-model/per-tool detail when the selected SDK reports it.
 
 - `af.input.validation_failed` — HTTP input-schema validation failed before agent execution; includes
   `af.fault_domain=app` and `af.http.status_code`.
@@ -217,18 +197,17 @@ spans for reported detail.
 - `af.agent.invoke.completed` — `_run_agent(...)` returned successfully and the runtime is handling
   the final response contract.
 
-#### Copilot preview source coverage
+#### Runtime source coverage
 
-These expectations apply only to the default-off Copilot preview's turn-scoped
-telemetry:
+These expectations apply to runtime-captured turn telemetry:
 
 | Source | Expectation |
 | --- | --- |
-| Direct HTTP and built-in chat UI turns | One Copilot `invoke_agent` span per completed turn, with native tool accounting and `ASSISTANT_USAGE` observations attached only from public turn events. |
-| `/chatstream` SSE | The stream reflects translated SDK callbacks for the same turn; it does not imply full native child-session hierarchy or session-open telemetry. |
-| `delegate_<slug>` calls | The host preserves the nested runtime invocation -> `execute_tool delegate_<slug>` -> `invoke_agent {child}` trace shape. Coordinator SSE still exposes only the delegate tool boundary and final child text. |
-| Workflow Sub Agent leaves | Each leaf is observed as its own `invoke_agent` span. Model and duration appear only when the SDK reports them; no model spans or timing are fabricated. |
-| Non-HTTP triggers, inbound MCP, and Debug UI continuation | When they route through the shared runner, they follow the same turn-scoped accounting rules. This remains offline-covered behavior, not live host/Application Insights qualification. |
+| Direct HTTP and built-in chat UI turns | One runtime-owned invocation span per completed turn, with tool accounting and usage observations attached from public events where available. |
+| `/chatstream` SSE | The stream reflects callbacks for the same turn; it does not imply full native child-session hierarchy or session-open telemetry. |
+| `delegate_<slug>` calls | The host records the delegate tool boundary and child invocation telemetry where available. Coordinator SSE still exposes only the delegate tool boundary and final child text. |
+| Workflow Sub Agent leaves | Each leaf is observed as its own invocation. Model and duration appear only when reported; no model spans or timing are fabricated. |
+| Non-HTTP triggers, inbound MCP, and Debug UI continuation | When they route through the shared runner, they follow the same turn-scoped accounting rules. |
 
 ### Span `dynamic_session.execute`
 
@@ -273,36 +252,10 @@ the span ERROR with `af.fault_domain=web_request`.
 
 ### Span `execute_tool delegate_<slug>` (chat-time sub-agent delegation)
 
-The span tree below is the default MAF path. The local Copilot preview does
-not enable SDK telemetry or claim native child spans: it retains the host
-delegate metrics, sanitized failure accounting, role-specific usage records,
-and the request's existing runtime span. The public SSE envelope is translated
-from SDK callbacks and host-authorized tool calls; specialist native session
-events do not appear in the coordinator's public stream.
-
-Chat-time delegation ([FRD 0007](./frds/0007-multi-agent-delegation.md)) needs **no new span** —
-the `delegate_<slug>` tool's handler calls the specialist's plain, non-streaming `Agent.run(task)`
-directly, and MAF already traces every `Agent.run()` and
-every `FunctionTool.invoke()`. A coordinator that declares `subagents:` gets this nested span tree
-for free the moment a `delegate_<slug>` tool is called:
-
-```
-agent.run {coordinator}              runtime span (af.*)
-└─ invoke_agent {coordinator}        MAF
-   ├─ chat {model}                   the routing decision
-   └─ execute_tool delegate_<slug>   the delegation (an ordinary tool span)
-      └─ invoke_agent {specialist}   auto-nested
-         └─ chat {model}             the specialist's own model call
-```
-
-All of these spans share one trace, so Application Insights ties the whole fan-out together under a
-single `OperationId` — including **concurrent** specialists (`asyncio.gather`), because OpenTelemetry
-context propagates through `contextvars` into each gathered task.
-
-The runtime does not open a *new* span for delegation — it annotates the existing
-`execute_tool delegate_<slug>` span (already opened by MAF's `FunctionTool.invoke()`) with
-`af.delegate.*` attributes, the same way `agent.run` is annotated, for parity with the
-sandbox/`web_request` tools:
+Chat-time delegation ([FRD 0007](./frds/0007-multi-agent-delegation.md)) records the coordinator's
+`delegate_<slug>` tool boundary and annotates it with `af.delegate.*` attributes. When the selected
+harness reports a nested child invocation, that child span is linked by the active OpenTelemetry
+context.
 
 | Attribute | Meaning |
 | --- | --- |
@@ -327,13 +280,11 @@ failures explicitly and folds them into `af.agent.tool_error_count` on top of th
 
 **Accepted limitations (v1):**
 - **SSE is a black box at the boundary.** The coordinator's stream emits `tool_start`/`tool_end` for
-  `delegate_<slug>` (task in, final text out) exactly like the sandbox/`web_request` tools — a
-  specialist's own internal deltas and nested tool calls do not surface on the wire unless a MAF
-  `stream_callback` is wired into `run_agent_stream` (out of scope for v1).
-- **Token usage does not roll up across the boundary.** MAF records usage per-run on each
-  `invoke_agent`/`chat` span; the `execute_tool` span carries no usage, and a specialist's tokens are
-  not merged into the coordinator's totals. Sum the child spans by trace (`OperationId`) in the
-  backend for a combined per-request total.
+  `delegate_<slug>` (task in, final text out) exactly like the sandbox/`web_request` tools; a
+  specialist's own internal deltas and nested tool calls do not surface on the wire.
+- **Token usage does not roll up across the boundary.** The delegate tool span carries no usage, and
+  a specialist's tokens are not merged into the coordinator's totals. Sum child spans or usage events
+  in the backend for a combined per-request total.
 
 ### Metrics
 
@@ -350,28 +301,27 @@ Namespace `azure_functions_agents.*`:
 
 ## Sensitive data
 
-Sensitive-data capture is controlled by the single `ENABLE_SENSITIVE_DATA` environment variable from
-Microsoft Agent Framework, **default off**.
+Sensitive-data capture is controlled by the single `ENABLE_SENSITIVE_DATA` environment variable,
+**default off**.
 
 - **Off (default):** only metadata is recorded — sizes, counts, outcome, fault domain. The
   `*_bytes` attributes above are emitted; the content attributes are not.
 - **On:** content attributes are attached (bounded in length): `af.agent.input`, `af.agent.response`,
-  `af.dynamic_session.code` / `.stdout` / `.stderr`, `af.delegate.task` / `.result`, plus MAF
-  prompt/response/tool-arg content (via `enable_instrumentation(enable_sensitive_data=True)`).
-  Copilot prompt/request and response capture are also permitted by this switch.
-- **Copilot addendum:** Copilot run-log payloads never include full `tool_calls` records,
-  regardless of the switch; MAF run logging is unchanged. Skill telemetry keeps the sanitized skill name only.
+  `af.dynamic_session.code` / `.stdout` / `.stderr`, and `af.delegate.task` / `.result`, plus
+  harness-owned prompt/response/tool-argument content when that harness supports the shared setting.
+  Runtime run-log payloads add response content only when this switch is on. Raw tool-call records
+  follow the selected harness policy: MAF can include them when the switch is on, while Copilot run
+  logs keep them excluded.
 - **Never captured, regardless of the flag:** secrets — MCP `Authorization` headers/tokens,
   connection strings, raw native envelopes, reasoning text, skill paths or
   content, and the ACA system key. Endpoints are reduced to host only. The `web_request` span never
   carries the full request URL (query string or userinfo stripped), request/response bodies, or
   header values — it is host/status/size metadata only, unaffected by `ENABLE_SENSITIVE_DATA`.
-- **Copilot exception diagnostics:** runtime-owned Copilot ingress, delegate, leaf, and custom-tool
-  spans explicitly record caught Python exceptions with their normal OpenTelemetry
-  `exception.message` / `exception.stacktrace`, `error.type`, and `af.fault_domain` even when
-  `ENABLE_SENSITIVE_DATA` is off, matching the installed MAF exception policy. This does **not**
-  widen prompt/request/response/tool-argument capture, but arbitrary exception text can still contain
-  sensitive data if application code includes it.
+- **Exception diagnostics:** recorded Python exceptions may include normal OpenTelemetry
+  `exception.message` / `exception.stacktrace` and `af.fault_domain` even when
+  `ENABLE_SENSITIVE_DATA` is off. This does **not** widen prompt/request/response/tool-argument
+  capture, but arbitrary exception text can still contain sensitive data if application code
+  includes it.
 
 Best-effort diagnostics and telemetry cleanup are intentionally non-throwing:
 they must not change request results, cancellations, or SSE termination.
@@ -379,7 +329,7 @@ they must not change request results, cancellations, or SSE termination.
 ## Noise & cost control
 
 Most Application Insights volume from a function app is **not** the runtime's spans — on a real app,
-runtime + MAF spans were only a few KB/run, while over 90% of ingestion was low-signal traces:
+runtime and harness spans were only a few KB/run, while over 90% of ingestion was low-signal traces:
 Azure SDK HTTP request/response dumps, the Azure Monitor exporter's own "Transmission succeeded…"
 logs, credential chatter, and Functions host startup dumps.
 
@@ -415,7 +365,7 @@ Monitor setup, so enabling the worker exporter path will not double-export — i
 unnecessary when the runtime is already handling exporter configuration.
 
 **Delegation-heavy apps:** a single coordinator turn with several `subagents:` can fan out into many
-child spans (coordinator + N specialists + MAF's own `chat`/`invoke_agent` children — see
+child spans (coordinator + N specialists + harness-owned model/tool children — see
 [Span `execute_tool delegate_<slug>`](#span-execute_tool-delegate_slug-chat-time-sub-agent-delegation)).
 Azure Monitor's default rate-limited sampler counts spans, so a large fan-out can exhaust its budget
 and drop whole traces under load — prefer the explicit `OTEL_TRACES_SAMPLER=parentbased_traceidratio`
@@ -458,11 +408,11 @@ billed bytes per item.
 
 ```kql
 // Average billed volume per agent run, broken down by table.
-// A "run" = an operation that contains an invoke_agent span for this app role.
+// A "run" = an operation that contains an invocation span for this app role.
 let runs = AppDependencies
 | where TimeGenerated > ago(30d)
 | where AppRoleName == "func-agents-6q2arnxahkobm"        // <-- your function app role name
-| where Name startswith "invoke_agent "
+| where Name startswith "agent.run "
 | distinct OperationId;
 union withsource=TableName AppRequests, AppDependencies, AppTraces, AppExceptions, AppMetrics
 | where TimeGenerated > ago(30d)
@@ -474,20 +424,20 @@ union withsource=TableName AppRequests, AppDependencies, AppTraces, AppException
 
 ```kql
 // Bucket span volume by emitted span-name family only.
-// `invoke_agent` / `execute_tool` names can come from both Copilot runtime-owned
-// telemetry and framework-owned GenAI spans, so these labels stay descriptive
-// rather than claiming ownership.
+// `invoke_agent` / `execute_tool` names come from SDK/framework-owned or
+// runtime tool telemetry, so these labels stay descriptive rather than
+// claiming invocation ownership.
 let runs = AppDependencies
 | where TimeGenerated > ago(7d)
 | where AppRoleName == "func-agents-6q2arnxahkobm"
-| where Name startswith "invoke_agent "
+| where Name startswith "agent.run "
 | distinct OperationId;
 AppDependencies
 | where TimeGenerated > ago(7d)
 | where OperationId in (runs)
 | summarize
-    legacyRuntimeItems = countif(Name == "dynamic_session.execute" or Name startswith "agent.run "),
-    legacyRuntimeBytes = sumif(_BilledSize, Name == "dynamic_session.execute" or Name startswith "agent.run "),
+    runtimeNamedItems = countif(Name == "dynamic_session.execute" or Name startswith "agent.run "),
+    runtimeNamedBytes = sumif(_BilledSize, Name == "dynamic_session.execute" or Name startswith "agent.run "),
     invokeAgentNamedItems = countif(Name startswith "invoke_agent "),
     invokeAgentNamedBytes = sumif(_BilledSize, Name startswith "invoke_agent "),
     executeToolNamedItems = countif(Name startswith "execute_tool "),
@@ -495,7 +445,7 @@ AppDependencies
     chatNamedItems = countif(Name startswith "chat "),
     chatNamedBytes = sumif(_BilledSize, Name startswith "chat ")
   by OperationId
-| summarize avgLegacyRuntimeItems = avg(legacyRuntimeItems), avgLegacyRuntimeBytes = avg(legacyRuntimeBytes),
+| summarize avgRuntimeNamedItems = avg(runtimeNamedItems), avgRuntimeNamedBytes = avg(runtimeNamedBytes),
             avgInvokeAgentNamedItems = avg(invokeAgentNamedItems), avgInvokeAgentNamedBytes = avg(invokeAgentNamedBytes),
             avgExecuteToolNamedItems = avg(executeToolNamedItems), avgExecuteToolNamedBytes = avg(executeToolNamedBytes),
             avgChatNamedItems = avg(chatNamedItems), avgChatNamedBytes = avg(chatNamedBytes)
@@ -509,8 +459,8 @@ These make monitoring easier for app authors but are **not required** — share 
 wants richer dashboards. They build on the spans/metrics above.
 
 - **Tier 0 — Native portal (automatic).** With telemetry on, Transaction Search, Application Map,
-  Failures, and the GenAI/Agents views work with no queries, because the runtime emits the
-  `agent.run` parent span plus MAF `gen_ai` children.
+  Failures, and the GenAI/Agents views work with no queries, because the runtime emits invocation
+  spans plus harness-owned child spans where available.
 - **Tier 1 — One `azd`-provisioned Workbook.** An Azure Monitor Workbook
   (`Microsoft.Insights/workbooks`) wired to the app's App Insights: runs over time, failure rate,
   tool failure rate, dynamic-session errors, token usage, and a failed-runs drilldown by

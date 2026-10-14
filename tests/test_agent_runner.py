@@ -26,6 +26,13 @@ from azure_functions_agents.harness._harness_binding import AppHarness, HarnessK
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runtime
 from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
+from tests._harness_helpers import copilot_state, make_copilot_harness
+
+
+def _harness_for(kind: HarnessKind, root: Path) -> AppHarness:
+    if kind is HarnessKind.COPILOT:
+        return make_copilot_harness(root, default_model="fixture-model")
+    return AppHarness(HarnessKind.MAF, root)
 
 
 @pytest.mark.asyncio
@@ -60,7 +67,7 @@ async def test_shared_scenario_inventory_is_filtered_once_and_forwarded_unchange
     monkeypatch.setattr(backend, "run", execution)
     no_parse = Mock(side_effect=AssertionError("Filtered descriptors must not be rediscovered"))
     monkeypatch.setattr(runner, "describe_skill_catalog", no_parse)
-    harness = AppHarness(kind, root, default_model="fixture-model")
+    harness = _harness_for(kind, root)
 
     await _agent_runner.get_agent_runner(harness).run_agent(
         "prompt",
@@ -179,7 +186,7 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
 async def test_copilot_unsupported_configuration_rejects_before_native_acquisition(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    harness = AppHarness(HarnessKind.COPILOT, tmp_path)
+    harness = make_copilot_harness(tmp_path)
     get_runtime = Mock(side_effect=AssertionError("native runtime should not start"))
     native_run = AsyncMock(side_effect=AssertionError("native run should not start"))
     monkeypatch.setattr(_copilot_runtime, "get_runtime", get_runtime)
@@ -212,7 +219,7 @@ async def test_copilot_unsupported_configuration_rejects_before_native_acquisiti
 async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution(
     kind, monkeypatch, tmp_path
 ):
-    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
+    harness = _harness_for(kind, tmp_path)
     selected = _agent_runner.get_agent_runner(harness)
     assert _agent_runner.get_agent_runner(harness) is selected
     descriptor = ToolDescriptor.create(
@@ -241,6 +248,7 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
         skill_catalog=(approved, excluded),
         session_id="session",
         session_is_new=True,
+        model="fixture-model",
     )
 
     assert result.content == "answer"
@@ -307,7 +315,7 @@ async def test_cached_leaf_facade_binds_immutable_capabilities_to_its_app_root(
 async def test_cached_facade_preserves_none_vs_empty_skill_path_semantics(
     kind, paths, expected_calls, monkeypatch, tmp_path
 ):
-    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
+    harness = _harness_for(kind, tmp_path)
     selected = _agent_runner.get_agent_runner(harness)
     observed = []
     parser_calls = []
@@ -343,7 +351,7 @@ async def test_cached_facade_preserves_none_vs_empty_skill_path_semantics(
 async def test_cached_facade_expands_nested_skill_paths_once_before_selected_execution(
     kind, monkeypatch, tmp_path
 ):
-    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
+    harness = _harness_for(kind, tmp_path)
     selected = _agent_runner.get_agent_runner(harness)
     observed = []
     parser_calls = []
@@ -391,8 +399,8 @@ async def test_cached_facade_expands_nested_skill_paths_once_before_selected_exe
 
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 def test_real_facades_keep_same_root_app_and_clone_ownership_independent(kind, tmp_path, monkeypatch):
-    first = AppHarness(kind, tmp_path)
-    second = AppHarness(kind, tmp_path)
+    first = _harness_for(kind, tmp_path)
+    second = _harness_for(kind, tmp_path)
     clone = replace(first)
     facades = [_agent_runner.get_agent_runner(app) for app in (first, second, clone)]
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "false" if kind is HarnessKind.COPILOT else "true")
@@ -403,4 +411,5 @@ def test_real_facades_keep_same_root_app_and_clone_ownership_independent(kind, t
         assert _agent_runner.get_agent_runner(app) is facade
         assert app._resources.runner is facade
         assert facade._backend._harness is app
-        assert app._resources.runtime is None
+        if app.name is HarnessKind.COPILOT:
+            assert copilot_state(app).runtime is None

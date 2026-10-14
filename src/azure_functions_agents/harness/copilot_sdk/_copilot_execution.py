@@ -28,7 +28,7 @@ from ._copilot_capabilities import (
     permission_handler,
 )
 from ._copilot_observability import CopilotEventTelemetry
-from ._copilot_preview import CopilotPreviewError
+from ._copilot_preview import CopilotPreviewError, copilot_adapter
 from ._copilot_runtime import CopilotRuntime, get_runtime
 from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
@@ -130,6 +130,7 @@ class _ExecutionLifecycle:
     def create(
         cls, harness: AppHarness, owner: CopilotRuntime, request: HarnessRequest
     ) -> _ExecutionLifecycle:
+        adapter = copilot_adapter(harness)
         leaf = request.execution_role != "primary"
         if leaf and not request.new_session:
             raise CopilotPreviewError("Copilot specialist sessions cannot be resumed.")
@@ -142,7 +143,7 @@ class _ExecutionLifecycle:
             copilot_id=copilot_id,
             session_storage=StorageRoute(owner.native_root / "ephemeral")
             if leaf
-            else harness.session_storage,
+            else adapter.session_storage,
             session_storage_id=copilot_id if leaf else request.session_id,
             leaf=leaf,
         )
@@ -201,7 +202,11 @@ def _tool(
                 logger.warning("Copilot custom tool failed: tool=%s", function.name)
                 text = _SAFE_CUSTOM_TOOL_FAILURE
                 span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.APP)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.APP,
+                    infer_error_type=True,
+                )
                 calls.complete_custom(invocation.tool_call_id, text, success=False)
                 _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
                 return ToolResult(text_result_for_llm=text, result_type="failure")
@@ -221,20 +226,19 @@ def _tool(
 
 
 def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
-    if harness.provider is None:
-        raise CopilotPreviewError("Copilot preview has no valid provider target.")
+    adapter = copilot_adapter(harness)
     try:
-        return harness.provider.sdk_config(model, tokens)
+        return adapter.provider.sdk_config(model, tokens)
     except CopilotPreviewError:
         raise
     except Exception:
         logger.error(
             "Copilot provider setup failed: provider=%s authentication=%s; "
             "underlying details were not logged.",
-            harness.provider.kind,
-            harness.provider.auth_label,
+            adapter.provider.kind,
+            adapter.provider.auth_label,
         )
-        raise CopilotPreviewError(harness.provider.setup_diagnostic()) from None
+        raise CopilotPreviewError(adapter.provider.setup_diagnostic()) from None
 
 
 async def _abort(session: CopilotSession) -> None:
@@ -455,6 +459,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
 
     from ...runner import AgentResult
 
+    adapter = copilot_adapter(harness)
     owner = get_runtime(harness)
     lifecycle = _ExecutionLifecycle.create(harness, owner, request)
     run_span = current_span()
@@ -473,7 +478,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         agent_name=request.agent_slug,
         execution_role=request.execution_role,
         inference_target=InferenceTarget(
-            harness.provider.kind if harness.provider is not None else None,
+            adapter.provider.kind,
             request.model,
         ),
     )
@@ -593,7 +598,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     )
                     logger.info(
                         "Copilot request target: provider=%s model=%s",
-                        harness.provider.kind if harness.provider is not None else None,
+                        adapter.provider.kind,
                         request.model,
                     )
                     content = await _run_session_turn(

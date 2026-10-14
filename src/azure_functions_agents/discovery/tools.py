@@ -80,6 +80,17 @@ def _is_workflow_marked(obj: object) -> bool:
     return get_workflow_tool_metadata(obj) is not None
 
 
+def _is_unsupported_member_object(module_name: str, obj: object) -> bool:
+    if isinstance(obj, ToolDescriptor) or inspect.isfunction(obj):
+        return False
+    if inspect.isclass(obj) or inspect.ismodule(obj) or inspect.isroutine(obj):
+        return False
+    if isinstance(obj, str | int | float | bool | bytes | tuple | list | dict | set | frozenset):
+        return False
+    obj_module = getattr(type(obj), "__module__", "")
+    return obj_module == module_name or "." in obj_module
+
+
 def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> WorkflowTool | None:
     if is_harness_object(obj):
         warn_unsupported_tool()
@@ -169,7 +180,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
             for name, obj in inspect.getmembers(module):
                 if name.startswith("_"):
                     continue
-                if is_harness_object(obj):
+                if is_harness_object(obj) or _is_unsupported_member_object(module_name, obj):
                     warn_unsupported_tool()
                     continue
                 members.append((name, obj))

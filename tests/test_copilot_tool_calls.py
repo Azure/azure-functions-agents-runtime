@@ -388,7 +388,7 @@ def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch, mcp_
     assert tool_spans[0].end_time == expected_end_ns
     assert tool_spans[0].attributes["gen_ai.operation.name"] == "execute_tool"
     assert tool_spans[0].attributes["gen_ai.tool.call.id"] == "native-1"
-    assert tool_spans[0].attributes["af.tool.source"] == "copilot.native"
+    assert tool_spans[0].attributes["af.tool.source"] == "native"
     assert tool_spans[0].attributes["gen_ai.agent.name"] == "main"
     assert tool_spans[0].attributes["gen_ai.agent.id"] == "local/main"
     assert tool_spans[0].attributes["gen_ai.conversation.id"] == "session-123"
@@ -507,7 +507,7 @@ def test_invalid_native_timing_emits_incomplete_metadata_not_a_span(
     spans = exporter.get_finished_spans()
     assert [span.name for span in spans] == ["agent.run main"]
     [incomplete] = spans[0].events
-    assert incomplete.name == "af.copilot.tool.incomplete"
+    assert incomplete.name == "af.tool.incomplete"
     assert incomplete.attributes["af.tool.incomplete_reason"] == reason
 
 
@@ -568,7 +568,7 @@ def test_custom_tool_wrapper_claims_reserved_native_call_once(monkeypatch, nativ
     [custom_span] = [span for span in spans if span.name == "execute_tool host_tool"]
     assert custom_span.attributes["gen_ai.operation.name"] == "execute_tool"
     assert custom_span.attributes["gen_ai.tool.call.id"] == "native-1"
-    assert custom_span.attributes["af.tool.source"] == "copilot.wrapper"
+    assert custom_span.attributes["af.tool.source"] == "wrapper"
     assert custom_span.attributes["gen_ai.tool.name"] == "host_tool"
     assert custom_span.attributes["gen_ai.conversation.id"] == "session-123"
     assert "af.tool.name" not in custom_span.attributes
@@ -642,7 +642,7 @@ def test_reused_native_event_id_is_incomplete_not_timed(monkeypatch):
 
     [run_span] = exporter.get_finished_spans()
     [incomplete] = run_span.events
-    assert incomplete.name == "af.copilot.tool.incomplete"
+    assert incomplete.name == "af.tool.incomplete"
     assert incomplete.attributes["af.tool.incomplete_reason"] == "duplicate_event_id"
 
 
@@ -681,7 +681,7 @@ def test_duplicate_native_starts_are_incomplete_not_timed(monkeypatch):
 
     [run_span] = exporter.get_finished_spans()
     [incomplete] = run_span.events
-    assert incomplete.name == "af.copilot.tool.incomplete"
+    assert incomplete.name == "af.tool.incomplete"
     assert incomplete.attributes["af.tool.incomplete_reason"] == "ambiguous_start_events"
 
 
@@ -713,7 +713,7 @@ def test_native_start_without_terminal_marks_incomplete_during_cleanup(monkeypat
 
     [run_span] = exporter.get_finished_spans()
     [incomplete] = run_span.events
-    assert incomplete.name == "af.copilot.tool.incomplete"
+    assert incomplete.name == "af.tool.incomplete"
     assert incomplete.attributes["af.tool.incomplete_reason"] == "missing_completion"
 
 
@@ -751,5 +751,5 @@ def test_native_completion_before_start_remains_incomplete(monkeypatch):
 
     [run_span] = exporter.get_finished_spans()
     [incomplete] = run_span.events
-    assert incomplete.name == "af.copilot.tool.incomplete"
+    assert incomplete.name == "af.tool.incomplete"
     assert incomplete.attributes["af.tool.incomplete_reason"] == "invalid_interval"

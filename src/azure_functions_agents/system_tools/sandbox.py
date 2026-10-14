@@ -329,10 +329,9 @@ def create_sandbox_tools(
     fallback_session_id:
         Used as the ACA session identifier so the REPL state persists across
         ``execute_python`` calls within the same conversation. The runner
-        passes the resolved agent-runtime session id here. MAF does not
-        currently expose the active session id to tools, so the runner bakes
-        it into the tool closure on every request. When omitted, a fresh GUID
-        is generated so independent invocations do not share a sandbox.
+        passes the resolved agent-runtime session id here. When omitted, a
+        fresh GUID is generated so independent invocations do not share a
+        sandbox.
 
     Returns a list with one tool, or an empty list if the config is invalid.
     """

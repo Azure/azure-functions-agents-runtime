@@ -20,7 +20,6 @@ from ..._observability import (
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
-    agent_run_attributes,
     gen_ai_agent_name,
     start_span,
 )
@@ -36,7 +35,14 @@ from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .. import _harness_execution
-from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest, HarnessSessionState
+from .._harness_binding import (
+    AppHarness,
+    ExecutionRole,
+    HarnessRequest,
+    HarnessSessionState,
+    agent_run_attributes_for_harness,
+    agent_run_span_name_for_harness,
+)
 from .._history_identity import validate_agent_slug
 from .._provider_config import InferenceTarget
 from ._maf_client import build_chat_client
@@ -785,9 +791,10 @@ async def run_stream(
         yield _sse_frame({"type": "session", "session_id": resolved_id})
 
     with start_span(
-        f"agent.run {agent_name or 'agent'}",
+        agent_run_span_name_for_harness(harness, agent_name=agent_name),
         lifecycle_stage=LifecycleStage.AGENT_RUN,
-        attributes=agent_run_attributes(
+        attributes=agent_run_attributes_for_harness(
+            harness,
             agent_name=agent_name,
             display_name=display_name,
             trigger_type="stream",

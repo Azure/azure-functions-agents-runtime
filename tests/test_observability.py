@@ -26,6 +26,7 @@ def test_agent_run_attributes_preserve_extensible_trigger_values(monkeypatch) ->
         obs.ATTR_AGENT_TRIGGER_TYPE: "future_connector_trigger",
         obs.ATTR_AGENT_SESSION_ID: "session-123",
         obs.ATTR_AGENT_MODEL: "model-name",
+        obs.ATTR_HARNESS: None,
     }
 
 
@@ -39,8 +40,8 @@ def test_common_span_outcome_and_tool_source_values() -> None:
         "error",
         "cancelled",
     ]
-    assert obs.ToolSpanSource.COPILOT_WRAPPER.value == "copilot.wrapper"
-    assert obs.ToolSpanSource.COPILOT_NATIVE.value == "copilot.native"
+    assert obs.ToolSpanSource.WRAPPER.value == "wrapper"
+    assert obs.ToolSpanSource.NATIVE.value == "native"
 
 
 def _clear_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -593,7 +594,24 @@ def test_start_span_can_suppress_raw_exception_recording(monkeypatch) -> None:  
     assert span.status.status_code.name == "ERROR"
     assert span.status.description in (None, "")
     assert span.attributes[obs.ATTR_FAULT_DOMAIN] == obs.FaultDomain.RUNTIME
-    assert span.attributes[obs.ATTR_ERROR_TYPE] == "ValueError"
+    assert obs.ATTR_ERROR_TYPE not in span.attributes
+
+
+def test_record_exception_error_type_is_opt_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _provider, exporter = _install_test_tracer(monkeypatch)
+    with obs.start_span("default.exception.type") as span:
+        span.record_exception(ValueError("default"), fault_domain=obs.FaultDomain.RUNTIME)
+
+    with obs.start_span("explicit.exception.type") as span:
+        span.record_exception(
+            RuntimeError("opt in"),
+            fault_domain=obs.FaultDomain.RUNTIME,
+            infer_error_type=True,
+        )
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert obs.ATTR_ERROR_TYPE not in spans["default.exception.type"].attributes
+    assert spans["explicit.exception.type"].attributes[obs.ATTR_ERROR_TYPE] == "RuntimeError"
 
 
 def test_start_span_preserves_cancelled_outcome_without_error_status(monkeypatch) -> None:  # type: ignore[no-untyped-def]

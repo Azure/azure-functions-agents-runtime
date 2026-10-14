@@ -36,6 +36,13 @@ from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
+from tests._harness_helpers import make_copilot_harness
+
+
+def _harness_for(kind: HarnessKind) -> AppHarness:
+    if kind is HarnessKind.COPILOT:
+        return make_copilot_harness(Path.cwd(), default_model="fixture-model")
+    return AppHarness(HarnessKind.MAF, Path.cwd())
 
 
 def test_agent_result_preserves_existing_positional_argument_order() -> None:
@@ -73,7 +80,7 @@ async def test_both_bound_runners_ignore_unsupported_values_before_execution(
         return "allowed"
 
     raw = FunctionTool(name="private-raw-name", func=undecorated, max_invocations=1)
-    harness = AppHarness(kind, Path.cwd(), default_model="fixture-model")
+    harness = _harness_for(kind)
     invoke = AsyncMock(return_value=runner.AgentResult("session", "captured"))
     backend = maf if kind is HarnessKind.MAF else _copilot_execution
     monkeypatch.setattr(backend, "run", invoke)
@@ -101,7 +108,7 @@ async def test_copilot_backend_rejects_authored_approval_before_effects(monkeypa
 
     invoke = AsyncMock()
     monkeypatch.setattr(_copilot_execution, "run", invoke)
-    harness = AppHarness(HarnessKind.COPILOT, Path.cwd(), default_model="fixture-model")
+    harness = make_copilot_harness(Path.cwd(), default_model="fixture-model")
     with pytest.raises(UnsupportedCapabilityError, match="approval"):
         await runner.run_agent(
             "fixture", tools=[bounded], mcp_tools=[], _harness=harness,

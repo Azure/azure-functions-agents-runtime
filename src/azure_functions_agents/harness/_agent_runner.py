@@ -16,7 +16,6 @@ from ..registration.capabilities import AgentCapabilities
 from ..registration.catalog import AgentCatalog
 from ._harness_binding import (
     AppHarness,
-    HarnessKind,
     HarnessSessionState,
     SessionHistory,
 )
@@ -249,12 +248,7 @@ class AgentRunner:
 
 
 def _build_runner(harness: AppHarness) -> AgentRunner:
-    if harness.name is HarnessKind.COPILOT:
-        from .copilot_sdk._copilot_runner import create_runner
-    else:
-        from .agent_framework._maf_runner import create_runner
-
-    return create_runner(harness)
+    return harness.adapter.create_runner(harness)
 
 
 def get_agent_runner(harness: AppHarness) -> AgentRunner:

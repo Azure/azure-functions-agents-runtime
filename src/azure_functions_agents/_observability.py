@@ -64,6 +64,7 @@ ATTR_AGENT_DISPLAY_NAME = "af.agent.display_name"
 ATTR_AGENT_TRIGGER_TYPE = "af.agent.trigger_type"
 ATTR_AGENT_SESSION_ID = "af.agent.session_id"
 ATTR_AGENT_MODEL = "af.agent.model"
+ATTR_HARNESS = "af.harness"
 ATTR_AGENT_OUTCOME = "af.agent.outcome"
 ATTR_AGENT_TOOL_CALL_COUNT = "af.agent.tool_call_count"
 ATTR_AGENT_TOOL_ERROR_COUNT = "af.agent.tool_error_count"
@@ -102,14 +103,14 @@ class SpanOutcome(StrEnum):
 
 
 class ToolSpanSource(StrEnum):
-    """Origin of a Copilot tool execution span."""
+    """Origin of a runtime tool execution span."""
 
-    COPILOT_WRAPPER = "copilot.wrapper"
-    COPILOT_NATIVE = "copilot.native"
+    WRAPPER = "wrapper"
+    NATIVE = "native"
 
 
 class GenAiOperationName(StrEnum):
-    """Pinned GenAI operation values used by runtime-owned Copilot spans."""
+    """Pinned GenAI operation values used when semantics match SDK events."""
 
     INVOKE_AGENT = "invoke_agent"
     EXECUTE_TOOL = "execute_tool"
@@ -185,7 +186,7 @@ def capture_sensitive_data() -> bool:
 
 
 def gen_ai_agent_name(agent_slug: str | None, *, default: str | None = None) -> str | None:
-    """Match MAF's app-qualified GenAI agent name without changing the runtime slug."""
+    """Return the app-qualified GenAI agent name without changing the runtime slug."""
     site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
     if not site_name:
         return agent_slug
@@ -212,6 +213,7 @@ def agent_run_attributes(
     trigger_type: str | None,
     session_id: str | None,
     model: str | None,
+    harness: str | None = None,
 ) -> dict[str, TelemetryAttributeValue]:
     """Build harness-neutral invocation attributes while leaving trigger names extensible."""
     return {
@@ -220,6 +222,7 @@ def agent_run_attributes(
         ATTR_AGENT_TRIGGER_TYPE: trigger_type,
         ATTR_AGENT_SESSION_ID: session_id,
         ATTR_AGENT_MODEL: model,
+        ATTR_HARNESS: harness,
     }
 
 
@@ -444,17 +447,7 @@ def bounded_content(value: str) -> str:
 
 
 def current_span() -> RuntimeSpan:
-    """Wrap whatever OTel span is already active, without starting a new one.
-
-    Used by the ``delegate_<slug>`` tool adapter (``runner.build_subagent_tools``)
-    and by Copilot turn-local telemetry helpers to annotate the *existing* active
-    span rather than nesting a duplicate child underneath it. Delegation uses
-    this to stamp ``af.delegate.*`` onto the already-open
-    ``execute_tool delegate_<slug>`` span, preserving exactly one delegate tool
-    span per call. Contrast with :func:`start_span`, which always creates a new
-    span. Returns a no-op :class:`RuntimeSpan` when tracing is unavailable or
-    disabled.
-    """
+    """Wrap the active OTel span without starting a child span."""
     if not _enabled:
         return RuntimeSpan(None)
     try:
@@ -507,6 +500,7 @@ class RuntimeSpan:
         fault_domain: str | None = None,
         include_exception: bool = True,
         error_type: str | None = None,
+        infer_error_type: bool = False,
     ) -> None:
         if self._span is None:
             return
@@ -522,7 +516,12 @@ class RuntimeSpan:
                 )
             )
             self._span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain or FaultDomain.UNKNOWN)
-            if resolved_error_type := error_type or error_type_for_exception(exc):
+            resolved_error_type = (
+                error_type if error_type is not None
+                else error_type_for_exception(exc) if infer_error_type
+                else None
+            )
+            if resolved_error_type:
                 self._span.set_attribute(ATTR_ERROR_TYPE, resolved_error_type)
             self._error_recorded = True
         except Exception:  # pragma: no cover - defensive

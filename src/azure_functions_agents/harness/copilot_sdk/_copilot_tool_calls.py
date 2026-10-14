@@ -24,9 +24,9 @@ from ..._observability import (
     safe_telemetry_name,
     start_span,
 )
-from ..._tool_descriptor import is_harness_object
 from .._stream_events import ToolEndEvent, ToolStartEvent
 from ._copilot_observability import tool_span_attributes
+from ._copilot_tool_validation import is_native_tool_result_object
 from ._tool_result import tool_result_text as _ordinary_tool_result_text
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ def _timestamp_ns(value: datetime | None) -> int | None:
 
 
 def _reject_harness_result(value: object) -> None:
-    if is_harness_object(value):
+    if is_native_tool_result_object(value):
         raise TypeError(
             "Copilot custom tools must return ordinary Python values, not harness SDK objects."
         )
@@ -229,7 +229,7 @@ class CopilotToolCalls:
             attributes=tool_span_attributes(
                 tool_name=name,
                 tool_call_id=invocation.tool_call_id,
-                tool_source=ToolSpanSource.COPILOT_WRAPPER,
+                tool_source=ToolSpanSource.WRAPPER,
                 agent_name=self._agent_name,
                 session_id=self._session_id,
             ),
@@ -372,7 +372,7 @@ class CopilotToolCalls:
             **tool_span_attributes(
                 tool_name=name,
                 tool_call_id=record.tool_call_id,
-                tool_source=ToolSpanSource.COPILOT_NATIVE,
+                tool_source=ToolSpanSource.NATIVE,
                 agent_name=self._agent_name,
                 session_id=self._session_id,
             ),
@@ -408,7 +408,7 @@ class CopilotToolCalls:
         record.telemetry_incomplete_emitted = True
         name = safe_telemetry_name(record.tool_name)
         self._run_span.add_event(
-            "af.copilot.tool.incomplete",
+            "af.tool.incomplete",
             {
                 "gen_ai.tool.name": name,
                 "af.tool.incomplete_reason": reason,

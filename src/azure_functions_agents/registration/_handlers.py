@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -32,12 +33,12 @@ from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ..harness._harness_binding import (
     AppHarness,
-    HarnessKind,
     HarnessSessionState,
     agent_run_attributes_for_harness,
     agent_run_span_name_for_harness,
     auto_record_exceptions_for_harness,
     bind_harness,
+    include_raw_tool_calls_in_sensitive_logs,
     set_agent_session_attribute_for_harness,
 )
 from ..harness._session_storage import SessionStorageError
@@ -183,7 +184,7 @@ def _set_run_result_attributes(span: Any, result: Any) -> None:
 
 
 def _should_log_raw_tool_calls(harness: AppHarness) -> bool:
-    return harness.name is HarnessKind.MAF
+    return include_raw_tool_calls_in_sensitive_logs(harness)
 
 
 def _run_log_payload(harness: AppHarness, result: Any) -> dict[str, Any]:
@@ -337,24 +338,26 @@ def make_agent_handler(
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
 
                 if _should_log(resolved):
-                    payload = {
-                        "session_id": result.session_id,
-                        "response": result.content,
-                    }
-                    if _should_log_raw_tool_calls(harness):
-                        payload["tool_calls"] = list(getattr(result, "tool_calls", None) or [])
                     logger.info(
                         "Agent response: source_file=%s payload=%s",
                         source_marker(resolved.source_file),
                         json.dumps(
-                            payload,
+                            _run_log_payload(harness, result),
                             ensure_ascii=False,
                             default=str,
                         ),
                     )
+            except asyncio.CancelledError:
+                if not auto_record_exceptions_for_harness(harness):
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
+                raise
             except Exception as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.UNKNOWN,
+                    infer_error_type=not auto_record_exceptions_for_harness(harness),
+                )
                 logger.exception(
                     "Agent execution failed: source_file=%s error=%s",
                     source_marker(resolved.source_file),
@@ -604,7 +607,14 @@ def make_http_agent_handler(
                 )
             except SessionStorageError as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                if auto_record_exceptions_for_harness(harness):
+                    span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
+                else:
+                    span.record_exception(
+                        exc,
+                        fault_domain=FaultDomain.UNKNOWN,
+                        infer_error_type=True,
+                    )
                 logger.error("HTTP agent '%s' storage failed: %s", resolved.name, exc)
                 return Response(
                     content=json.dumps({"error": str(exc)}),
@@ -616,9 +626,17 @@ def make_http_agent_handler(
                         state=session_state,
                     ),
                 )
+            except asyncio.CancelledError:
+                if not auto_record_exceptions_for_harness(harness):
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
+                raise
             except Exception as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.UNKNOWN,
+                    infer_error_type=not auto_record_exceptions_for_harness(harness),
+                )
                 logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
                 return Response(
                     content=json.dumps({"error": str(exc)}),

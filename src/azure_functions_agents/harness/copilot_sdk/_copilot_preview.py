@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,9 +15,14 @@ from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...workflows.tools import build_workflow_tools
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .._provider_config import resolve_inference_target
+from ._copilot_tool_validation import register_copilot_tool_predicate
 
 if TYPE_CHECKING:
     from ...registration.capabilities import AgentCapabilities
+    from .._agent_runner import AgentRunner
+    from ._copilot_providers import CopilotProvider
+    from ._copilot_runtime import CopilotRuntime
+    from ._copilot_session_identity import StorageRoute
 
 FLAG = EnvVar.ENABLE_COPILOT
 SDK_DISTRIBUTION = "github-copilot-sdk"
@@ -26,6 +32,59 @@ WORKER_COUNT_ENV = EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT
 
 class CopilotPreviewError(RuntimeError):
     """A safe, actionable preview error without underlying SDK details."""
+
+
+@dataclass
+class CopilotHarnessAdapter:
+    """Copilot-owned app state behind the neutral harness binding."""
+
+    storage_root: Path
+    default_model: str
+    provider: CopilotProvider
+    session_storage: StorageRoute
+    runtime: CopilotRuntime | None = field(default=None, init=False, repr=False)
+
+    @property
+    def auto_record_exceptions(self) -> bool:
+        return False
+
+    @property
+    def include_raw_tool_calls_in_sensitive_logs(self) -> bool:
+        return False
+
+    @property
+    def session_history_unavailable_message(self) -> str:
+        return (
+            "Copilot preview does not support transcript replay. Native state is separate "
+            "from MAF history."
+        )
+
+    def create_runner(self, harness: AppHarness) -> AgentRunner:
+        from ._copilot_runner import create_runner
+
+        return create_runner(harness)
+
+    def validate_agent(
+        self, harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
+    ) -> None:
+        validate_copilot_agent(harness, resolved, capabilities)
+
+    def new_binding(self) -> CopilotHarnessAdapter:
+        return CopilotHarnessAdapter(
+            storage_root=self.storage_root,
+            default_model=self.default_model,
+            provider=self.provider,
+            session_storage=self.session_storage,
+        )
+
+
+def copilot_adapter(harness: AppHarness) -> CopilotHarnessAdapter:
+    """Return Copilot-owned state for a selected Copilot harness."""
+    if harness.name is not HarnessKind.COPILOT or not isinstance(
+        harness.adapter, CopilotHarnessAdapter
+    ):
+        raise CopilotPreviewError("Copilot was not selected for this app.")
+    return harness.adapter
 
 
 def check_sdk_dependency() -> None:
@@ -43,6 +102,7 @@ def select_copilot_harness(root: Path) -> AppHarness:
     from ._copilot_providers import _PROVIDERS
     from ._copilot_session_identity import resolve_route
 
+    register_copilot_tool_predicate()
     check_sdk_dependency()
     try:
         target = resolve_inference_target(None)
@@ -67,10 +127,12 @@ def select_copilot_harness(root: Path) -> AppHarness:
     return AppHarness(
         HarnessKind.COPILOT,
         root,
-        route.local_dir / "copilot-preview",
-        model,
-        copilot_provider,
-        session_storage=route,
+        CopilotHarnessAdapter(
+            storage_root=route.local_dir / "copilot-preview",
+            default_model=model,
+            provider=copilot_provider,
+            session_storage=route,
+        ),
     )
 
 

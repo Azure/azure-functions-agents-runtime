@@ -29,6 +29,7 @@ from azure_functions_agents.registration.capabilities import (
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
+from tests._harness_helpers import copilot_state, make_copilot_harness
 from tests.test_copilot_execution import _fake_client, _request
 from tests.test_copilot_execution import preview as preview
 
@@ -91,8 +92,12 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
     locks = dict(_harness_execution._SESSION_LOCKS)
     # Ephemeral leaves must not open the primary route, even when it is configured for Blob.
     monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
-    primary = replace(preview, session_storage=resolve_route(preview.app_root))
-    assert primary.session_storage.mode is StorageMode.BLOB
+    primary = make_copilot_harness(
+        preview.app_root,
+        storage_root=copilot_state(preview).storage_root,
+        session_storage=resolve_route(preview.app_root),
+    )
+    assert copilot_state(primary).session_storage.mode is StorageMode.BLOB
     try:
         results = await asyncio.gather(*[
             runner.run_leaf_agent_task(
@@ -105,7 +110,7 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
         assert ids[0] != ids[1]
         assert {call.args[0] for call in native.delete_session.call_args_list} == set(ids)
         assert locks == _harness_execution._SESSION_LOCKS
-        assert not (primary.session_storage.local_dir / "copilot-native").exists()
+        assert not (copilot_state(primary).session_storage.local_dir / "copilot-native").exists()
         for provider in providers:
             assert not provider.backend.root.exists()
         native.resume_session.assert_not_awaited()
@@ -283,7 +288,7 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
         nonlocal leaf_request
         leaf_request = request
         observability.current_span().add_event(
-            "af.copilot.model.usage",
+            "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 4},
         )
         return leaf_result
@@ -325,17 +330,16 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     spans = {span.name: span for span in exporter.get_finished_spans()}
     root = spans["agent.run coordinator"]
     tool_span = spans["execute_tool delegate_analyst"]
-    leaf_span = spans["invoke_agent analyst"]
+    leaf_span = spans["agent.run analyst"]
     assert tool_span.parent.span_id == root.context.span_id
     assert leaf_span.parent.span_id == tool_span.context.span_id
     assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
     assert leaf_span.attributes["af.agent.outcome"] == "success"
-    assert leaf_span.attributes["gen_ai.operation.name"] == "invoke_agent"
-    assert leaf_span.attributes["gen_ai.agent.name"] == "analyst"
-    assert leaf_span.attributes["gen_ai.conversation.id"] == leaf_request.session_id
-    assert "af.agent.session_id" not in leaf_span.attributes
+    assert leaf_span.attributes["af.harness"] == "copilot"
+    assert "gen_ai.operation.name" not in leaf_span.attributes
+    assert leaf_span.attributes["af.agent.session_id"] == leaf_request.session_id
     [usage_event] = [
-        event for event in leaf_span.events if event.name == "af.copilot.model.usage"
+        event for event in leaf_span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 4
     assert result.text_result_for_llm == "leaf answer"
@@ -358,7 +362,7 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
 
     async def fake_execution(harness, request):
         observability.current_span().add_event(
-            "af.copilot.model.usage",
+            "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 5},
         )
         return runner.AgentResult(
@@ -385,11 +389,12 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
 
     assert [event["type"] for event in events] == ["delta", "done"], events
     [span] = exporter.get_finished_spans()
-    assert span.name == "invoke_agent sse_agent"
-    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
-    assert span.attributes["gen_ai.conversation.id"] == "sse-session"
+    assert span.name == "agent.run sse_agent"
+    assert span.attributes["af.harness"] == "copilot"
+    assert span.attributes["af.agent.session_id"] == "sse-session"
+    assert "gen_ai.operation.name" not in span.attributes
     [usage_event] = [
-        event for event in span.events if event.name == "af.copilot.model.usage"
+        event for event in span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 5
 
@@ -574,7 +579,7 @@ async def test_delegate_tool_error_records_exception_once_and_keeps_model_visibl
     assert delegate_span.attributes["af.fault_domain"] == "delegate"
     assert delegate_span.status.status_code.name == "ERROR"
     assert delegate_span.status.description == "RuntimeError('private leaf failure')"
-    assert delegate_span.attributes["error.type"] == "RuntimeError"
+    assert "error.type" not in delegate_span.attributes
     _exception_event(delegate_span, message="private leaf failure")
 
 
@@ -600,7 +605,7 @@ async def test_workflow_leaf_failure_records_exception_once_without_changing_usa
 
     async def fail_with_usage(*_args, **_kwargs):
         observability.current_span().add_event(
-            "af.copilot.model.usage",
+            "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 6},
         )
         raise RuntimeError("private session-open detail")
@@ -622,7 +627,7 @@ async def test_workflow_leaf_failure_records_exception_once_without_changing_usa
         )
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
-    workflow_span = spans["invoke_agent analyst"]
+    workflow_span = spans["agent.run analyst"]
     assert workflow_span.parent.span_id == spans["agent.run workflow"].context.span_id
     assert workflow_span.attributes["af.agent.execution_role"] == "workflow_subagent"
     assert workflow_span.attributes["af.agent.outcome"] == "error"
@@ -631,7 +636,7 @@ async def test_workflow_leaf_failure_records_exception_once_without_changing_usa
     assert workflow_span.status.description == "RuntimeError('private session-open detail')"
     _exception_event(workflow_span, message="private session-open detail")
     [usage_event] = [
-        event for event in workflow_span.events if event.name == "af.copilot.model.usage"
+        event for event in workflow_span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 6
 
@@ -657,7 +662,7 @@ async def test_stream_failure_records_exception_once_without_changing_sse_error_
 
     async def fail_with_usage(*_args, **_kwargs):
         observability.current_span().add_event(
-            "af.copilot.model.usage",
+            "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 4},
         )
         raise RuntimeError("private stream failure")
@@ -679,14 +684,14 @@ async def test_stream_failure_records_exception_once_without_changing_sse_error_
 
     assert chunks == ['data: {"type": "error", "content": "private stream failure"}\n\n']
     spans = {span.name: span for span in exporter.get_finished_spans()}
-    stream_span = spans["invoke_agent stream_agent"]
+    stream_span = spans["agent.run stream_agent"]
     assert stream_span.attributes["af.agent.outcome"] == "error"
     assert stream_span.attributes["af.fault_domain"] == "runtime"
     assert stream_span.attributes["error.type"] == "RuntimeError"
     assert stream_span.status.description == "RuntimeError('private stream failure')"
     _exception_event(stream_span, message="private stream failure")
     [usage_event] = [
-        event for event in stream_span.events if event.name == "af.copilot.model.usage"
+        event for event in stream_span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 4
 
@@ -711,7 +716,7 @@ async def test_delegate_leaf_cancellation_closes_run_span_without_error_status(
 
     async def cancel_with_usage(*_args, **_kwargs):
         observability.current_span().add_event(
-            "af.copilot.model.usage",
+            "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 6},
         )
         raise asyncio.CancelledError("private cancellation detail")
@@ -730,7 +735,7 @@ async def test_delegate_leaf_cancellation_closes_run_span_without_error_status(
         )
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
-    leaf_span = spans["invoke_agent analyst"]
+    leaf_span = spans["agent.run analyst"]
     assert leaf_span.parent.span_id == spans["agent.run coordinator"].context.span_id
     assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
     assert leaf_span.attributes["af.agent.outcome"] == "cancelled"
@@ -738,7 +743,7 @@ async def test_delegate_leaf_cancellation_closes_run_span_without_error_status(
     assert "af.fault_domain" not in leaf_span.attributes
     assert all(event.name != "exception" for event in leaf_span.events)
     [usage_event] = [
-        event for event in leaf_span.events if event.name == "af.copilot.model.usage"
+        event for event in leaf_span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 6
 
@@ -978,4 +983,4 @@ async def test_leaf_resume_is_rejected_without_creating_storage(preview, native)
             preview, replace(_request(new_session=False), execution_role="delegate"),
         )
     native.start.assert_not_awaited()
-    assert not preview.storage_root.exists()
+    assert not copilot_state(preview).storage_root.exists()

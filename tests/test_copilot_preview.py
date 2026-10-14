@@ -50,6 +50,7 @@ from azure_functions_agents.harness.copilot_sdk import (
 from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 from azure_functions_agents.registration._handlers import make_http_agent_handler
 from azure_functions_agents.registration.capabilities import build_capabilities
+from tests._harness_helpers import copilot_state
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
@@ -100,15 +101,15 @@ def test_app_context_freezes_storage_without_initializing_either_provider(previe
     monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri")
     monkeypatch.setenv(_harness.FLAG, "false")
     assert first is not second
-    assert first.session_storage.mode is StorageMode.BLOB
-    assert first.session_storage.blob.connection_string == "fixture-connection"
-    assert first.session_storage.blob.container_name == "first-container"
-    assert second.session_storage.blob.blob_service_url == "https://fixture.invalid"
-    assert second.session_storage.blob.client_id == "storage-identity"
-    assert second.session_storage.blob.container_name == "second-container"
-    assert _harness.get_harness(preview, new_app=True).session_storage is None
-    assert not first.storage_root.exists()
-    assert not second.storage_root.exists()
+    assert copilot_state(first).session_storage.mode is StorageMode.BLOB
+    assert copilot_state(first).session_storage.blob.connection_string == "fixture-connection"
+    assert copilot_state(first).session_storage.blob.container_name == "first-container"
+    assert copilot_state(second).session_storage.blob.blob_service_url == "https://fixture.invalid"
+    assert copilot_state(second).session_storage.blob.client_id == "storage-identity"
+    assert copilot_state(second).session_storage.blob.container_name == "second-container"
+    assert _harness.get_harness(preview, new_app=True).default_model is None
+    assert not copilot_state(first).storage_root.exists()
+    assert not copilot_state(second).storage_root.exists()
 
 
 def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview, monkeypatch):
@@ -197,7 +198,7 @@ def test_preview_config_scenario_indexes_without_native_process(preview):
     root = Path(__file__).parent / "fixtures" / "config_scenarios" / "18_copilot_preview"
     app = create_function_app(root)
     assert app.get_functions()
-    assert not _harness.get_harness(root).storage_root.exists()
+    assert not copilot_state(_harness.get_harness(root)).storage_root.exists()
 
 
 def test_foundry_configuration_is_frozen_without_authentication(preview, monkeypatch):
@@ -205,11 +206,11 @@ def test_foundry_configuration_is_frozen_without_authentication(preview, monkeyp
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://fixture.services.ai.azure.com/api/projects/test")
     monkeypatch.setenv("FOUNDRY_MODEL", "deployed-model")
     selected = _harness.get_harness()
-    assert selected.provider is not None
-    assert selected.provider.kind == "foundry"
+    assert copilot_state(selected).provider is not None
+    assert copilot_state(selected).provider.kind == "foundry"
     assert selected.default_model == "deployed-model"
     assert "fixture.services.ai.azure.com" not in repr(selected)
-    assert not selected.storage_root.exists()
+    assert not copilot_state(selected).storage_root.exists()
 
 
 def test_registered_mcp_and_skill_descriptors_are_supported(preview):

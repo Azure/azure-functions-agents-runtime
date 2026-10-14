@@ -1276,6 +1276,36 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
     assert span.attributes["af.agent.display_name"] == "Billing Specialist"
 
 
+def test_run_agent_stream_reports_bound_maf_harness_on_span(monkeypatch: Any) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_build_agent_session(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), "test-session", None, InferenceTarget()
+
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt", agent_name="billing", display_name="Billing Specialist"
+            )
+        ]
+
+    asyncio.run(collect())
+
+    [span] = spans
+    assert span.attributes["af.agent.name"] == "billing"
+    assert span.attributes["af.agent.display_name"] == "Billing Specialist"
+    assert span.attributes["af.agent.trigger_type"] == "stream"
+    assert span.attributes["af.agent.session_id"] == "test-session"
+    assert span.attributes["af.harness"] == "maf"
+
+
 def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "medium")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", "detailed")

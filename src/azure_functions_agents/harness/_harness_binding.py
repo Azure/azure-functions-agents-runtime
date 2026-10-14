@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict
 
 from .._logger import logger
 from .._observability import (
@@ -35,9 +35,6 @@ if TYPE_CHECKING:
     from ..config.schema import ResolvedAgent
     from ..registration.capabilities import AgentCapabilities
     from ._agent_runner import AgentRunner
-    from .copilot_sdk._copilot_providers import CopilotProvider
-    from .copilot_sdk._copilot_runtime import CopilotRuntime
-    from .copilot_sdk._copilot_session_identity import StorageRoute
 
 FLAG = EnvVar.ENABLE_COPILOT
 
@@ -70,24 +67,96 @@ class UnsupportedCapabilityError(ValueError):
     """The preview cannot preserve a requested capability's semantics."""
 
 
+class SessionHistoryUnavailableError(ValueError):
+    """The selected harness cannot project a transcript for this session."""
+
+    def __init__(self, message: str, *, status_code: int = 501) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class HarnessAdapter(Protocol):
+    @property
+    def default_model(self) -> str | None:
+        """Return the selected harness default model, if one is known."""
+
+    @property
+    def auto_record_exceptions(self) -> bool:
+        """Return whether span context managers should record exceptions automatically."""
+
+    @property
+    def include_raw_tool_calls_in_sensitive_logs(self) -> bool:
+        """Return whether sensitive run logs may include full tool-call records."""
+
+    @property
+    def session_history_unavailable_message(self) -> str | None:
+        """Return the neutral transcript-replay rejection, if unsupported."""
+
+    def create_runner(self, harness: AppHarness) -> AgentRunner:
+        """Create the selected harness runner."""
+
+    def validate_agent(
+        self, harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
+    ) -> None:
+        """Validate one resolved agent before registration side effects."""
+
+    def new_binding(self) -> HarnessAdapter:
+        """Return adapter state for a distinct app binding."""
+
+
+class MafHarnessAdapter:
+    @property
+    def default_model(self) -> str | None:
+        return None
+
+    @property
+    def auto_record_exceptions(self) -> bool:
+        return True
+
+    @property
+    def include_raw_tool_calls_in_sensitive_logs(self) -> bool:
+        return True
+
+    @property
+    def session_history_unavailable_message(self) -> str | None:
+        return None
+
+    def create_runner(self, harness: AppHarness) -> AgentRunner:
+        from .agent_framework._maf_runner import create_runner
+
+        return create_runner(harness)
+
+    def validate_agent(
+        self, harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
+    ) -> None:
+        del harness, resolved, capabilities
+
+    def new_binding(self) -> HarnessAdapter:
+        return MafHarnessAdapter()
+
+
 @dataclass
 class _HarnessResources:
     guard: threading.Lock = field(default_factory=threading.Lock)
     runner: AgentRunner | None = None
-    runtime: CopilotRuntime | None = None
 
 
 @dataclass(frozen=True, eq=False)
 class AppHarness:
     name: HarnessKind
     app_root: Path
-    storage_root: Path | None = None
-    default_model: str | None = None
-    provider: CopilotProvider | None = None
-    session_storage: StorageRoute | None = field(default=None, repr=False)
+    adapter: HarnessAdapter = field(default_factory=MafHarnessAdapter, repr=False, compare=False)
     _resources: _HarnessResources = field(
         default_factory=_HarnessResources, init=False, repr=False, compare=False
     )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "adapter", self.adapter.new_binding())
+
+    @property
+    def default_model(self) -> str | None:
+        """Return the selected harness default model, if one is known."""
+        return self.adapter.default_model
 
 
 @dataclass(frozen=True)
@@ -113,10 +182,7 @@ class HarnessRequest:
 
 def agent_run_span_name_for_harness(harness: AppHarness, *, agent_name: str | None) -> str:
     """Return the runtime-owned invocation span name for the selected harness."""
-    if harness.name is HarnessKind.COPILOT:
-        from .copilot_sdk import _copilot_observability as copilot_observability
-
-        return copilot_observability.agent_run_span_name(agent_name=agent_name)
+    del harness
     return common_agent_run_span_name(agent_name=agent_name)
 
 
@@ -130,23 +196,13 @@ def agent_run_attributes_for_harness(
     model: str | None,
 ) -> dict[str, TelemetryAttributeValue]:
     """Return runtime-owned invocation attributes for the selected harness."""
-    if harness.name is HarnessKind.COPILOT:
-        from .copilot_sdk import _copilot_observability as copilot_observability
-
-        return copilot_observability.agent_run_attributes(
-            agent_name=agent_name,
-            display_name=display_name,
-            trigger_type=trigger_type,
-            session_id=session_id,
-            model=model,
-            provider_kind=harness.provider.kind if harness.provider else None,
-        )
     return common_agent_run_attributes(
         agent_name=agent_name,
         display_name=display_name,
         trigger_type=trigger_type,
         session_id=session_id,
         model=model,
+        harness=harness.name.value,
     )
 
 
@@ -157,17 +213,18 @@ def set_agent_session_attribute_for_harness(
     session_id: str | None,
 ) -> None:
     """Set the runtime-owned session/conversation attribute for one invocation span."""
-    if harness.name is HarnessKind.COPILOT:
-        from .copilot_sdk import _copilot_observability as copilot_observability
-
-        copilot_observability.set_agent_session_attribute(span, session_id=session_id)
-        return
+    del harness
     common_set_agent_session_attribute(span, session_id=session_id)
 
 
 def auto_record_exceptions_for_harness(harness: AppHarness) -> bool:
     """Return whether `start_span()` should rely on automatic exception capture."""
-    return harness.name is not HarnessKind.COPILOT
+    return harness.adapter.auto_record_exceptions
+
+
+def include_raw_tool_calls_in_sensitive_logs(harness: AppHarness) -> bool:
+    """Return whether run logs may include full tool calls when content capture is enabled."""
+    return harness.adapter.include_raw_tool_calls_in_sensitive_logs
 
 
 _HARNESSES: dict[Path, AppHarness] = {}
@@ -193,7 +250,7 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
         if existing is not None and not new_app:
             return existing
         if not _flag_enabled(raw_env_value(FLAG)):
-            selected = AppHarness(HarnessKind.MAF, root)
+            selected = AppHarness(HarnessKind.MAF, root, MafHarnessAdapter())
         else:
             from .copilot_sdk._copilot_preview import select_copilot_harness
 
@@ -208,11 +265,7 @@ def validate_agent(
     harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> None:
     """Fail before FunctionApp mutation, native startup, or provider/tool execution."""
-    if harness.name is HarnessKind.MAF:
-        return
-    from .copilot_sdk._copilot_preview import validate_copilot_agent
-
-    validate_copilot_agent(harness, resolved, capabilities)
+    harness.adapter.validate_agent(harness, resolved, capabilities)
 
 
 def bind_harness(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> AppHarness:

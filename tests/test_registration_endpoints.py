@@ -40,6 +40,7 @@ from azure_functions_agents.workflows.context import (
     new_workflow_instance_id,
     session_instance_prefix,
 )
+from tests._harness_helpers import make_copilot_harness
 
 
 class FakeFunctionApp:
@@ -225,7 +226,13 @@ class _CapturedSpan:
     def set_error(self, message: str, *, fault_domain: str) -> None:
         self.errors.append((message, fault_domain))
 
-    def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
+    def record_exception(
+        self,
+        exc: BaseException,
+        *,
+        fault_domain: str | None = None,
+        infer_error_type: bool = False,
+    ) -> None:
         self.exceptions.append(exc)
         self.errors.append((str(exc), fault_domain or "unknown"))
 
@@ -776,7 +783,7 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
     async def fake_run_builtin_agent(*_args: Any, **kwargs: Any) -> AgentResult:
         assert kwargs["_session_state"].caller_supplied is True
         observability.current_span().add_event(
-            "af.copilot.model.usage",
+            "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 3},
         )
         return AgentResult(
@@ -792,7 +799,7 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
     register_builtin_endpoints(
         app,
         resolved,
-        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
     )
     chat_route = next(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
@@ -805,13 +812,12 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
 
     assert response.status_code == 200
     [span] = exporter.get_finished_spans()
-    assert span.name == f"invoke_agent {resolved.slug}"
-    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
-    assert span.attributes["gen_ai.agent.name"] == resolved.slug
-    assert span.attributes["gen_ai.conversation.id"] == "continued"
-    assert "af.agent.session_id" not in span.attributes
+    assert span.name == f"agent.run {resolved.slug}"
+    assert span.attributes["af.harness"] == "copilot"
+    assert "gen_ai.operation.name" not in span.attributes
+    assert span.attributes["af.agent.session_id"] == "continued"
     [usage_event] = [
-        event for event in span.events if event.name == "af.copilot.model.usage"
+        event for event in span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 3
 
@@ -863,7 +869,7 @@ def test_copilot_builtin_ingress_records_exception_once(
     register_builtin_endpoints(
         app,
         resolved,
-        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
     )
 
     if surface == "chat":
@@ -877,7 +883,7 @@ def test_copilot_builtin_ingress_records_exception_once(
         assert json.loads(result)["error"] == "private builtin failure"
 
     [span] = exporter.get_finished_spans()
-    assert span.name == f"invoke_agent {resolved.slug}"
+    assert span.name == f"agent.run {resolved.slug}"
     assert span.attributes["af.agent.outcome"] == "error"
     assert span.attributes["af.fault_domain"] == "unknown"
     assert span.attributes["error.type"] == "RuntimeError"
@@ -885,6 +891,52 @@ def test_copilot_builtin_ingress_records_exception_once(
     [event] = [item for item in span.events if item.name == "exception"]
     assert event.attributes["exception.message"] == "private builtin failure"
     assert "RuntimeError: private builtin failure" in event.attributes["exception.stacktrace"]
+
+
+@pytest.mark.parametrize("surface", ["chat", "mcp"])
+def test_copilot_builtin_ingress_marks_cancellation_without_error(
+    monkeypatch: Any, surface: str, tmp_path: Path
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        builtin_endpoints=(
+            BuiltinEndpointsConfig(debug_chat_ui=True)
+            if surface == "chat"
+            else BuiltinEndpointsConfig(mcp=True)
+        ),
+        source_file=source_file,
+    )
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def cancel_run_builtin_agent(*_args: Any, **_kwargs: Any) -> AgentResult:
+        raise asyncio.CancelledError("turn cancelled")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        cancel_run_builtin_agent,
+    )
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
+    )
+
+    if surface == "chat":
+        route = next(route for route in app.routes if route["route"] == "agents/secondary_agent/chat")
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(route["handler"](DummyRequest({"prompt": "hello"})))
+    else:
+        route = next(route for route in app.routes if route.get("mcp_tool_trigger"))
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(route["handler"](json.dumps({"arguments": {"prompt": "hello"}})))
+
+    [span] = spans
+    assert span.attributes["af.agent.outcome"] == "cancelled"
+    assert span.errors == []
 
 
 def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
@@ -967,7 +1019,7 @@ def test_handle_mcp_agent_chat_uses_canonical_conversation_id_when_caller_suppli
     register_builtin_endpoints(
         app,
         resolved,
-        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
         workflows_enabled=False,
     )
     mcp_handler = next(route for route in app.routes if route.get("mcp_tool_trigger"))["handler"]
@@ -978,8 +1030,7 @@ def test_handle_mcp_agent_chat_uses_canonical_conversation_id_when_caller_suppli
 
     assert json.loads(result)["session_id"] == "caller-id"
     [span] = spans
-    assert span.attributes["gen_ai.conversation.id"] == "caller-id"
-    assert "af.agent.session_id" not in span.attributes
+    assert span.attributes["af.agent.session_id"] == "caller-id"
 
 
 def test_handle_mcp_agent_chat_refreshes_canonical_conversation_id_when_caller_omits_it(
@@ -1017,7 +1068,7 @@ def test_handle_mcp_agent_chat_refreshes_canonical_conversation_id_when_caller_o
     register_builtin_endpoints(
         app,
         resolved,
-        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
         workflows_enabled=False,
     )
     mcp_routes = [route for route in app.routes if route.get("mcp_tool_trigger")]
@@ -1030,8 +1081,7 @@ def test_handle_mcp_agent_chat_refreshes_canonical_conversation_id_when_caller_o
     response_session_id = json.loads(result)["session_id"]
     assert response_session_id
     [span] = spans
-    assert span.attributes["gen_ai.conversation.id"] == response_session_id
-    assert "af.agent.session_id" not in span.attributes
+    assert span.attributes["af.agent.session_id"] == response_session_id
 
 
 def test_extract_mcp_session_id_passes_through_safe_ids() -> None:
@@ -1854,6 +1904,28 @@ def test_entra_chat_without_identity_is_unauthorized(
 
     assert response.status_code == 401
     assert response.headers.get("x-ms-session-id") is None
+    assert spans == []
+
+
+def test_entra_chat_unauthorized_echoes_only_caller_session_id(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+    spans = _install_start_span_capture(monkeypatch)
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+
+    response = asyncio.run(
+        chat_route["handler"](
+            DummyRequest({"prompt": "hello"}, headers={"x-ms-session-id": "caller-id"})
+        )
+    )
+
+    assert response.status_code == 401
+    assert response.headers["x-ms-session-id"] == "caller-id"
     assert spans == []
 
 

@@ -38,6 +38,8 @@ _SUPPORTED_TOOL_KWARGS = ("name", "description", "schema", "approval_mode")
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
     if is_harness_object(target):
         return None
+    if not isinstance(target, ToolDescriptor) and not inspect.isroutine(target):
+        return None
     if isinstance(target, ToolDescriptor):
         return target.workflow_metadata
     metadata = getattr(target, _WORKFLOW_TOOL_METADATA_ATTR, None)
@@ -154,7 +156,7 @@ def tool(
         if is_harness_object(inner):
             warn_unsupported_tool()
             return inner
-        if not callable(inner):
+        if not inspect.isroutine(inner):
             warn_unsupported_tool()
             return inner
         wrapped: Callable[..., Any] = inner
@@ -235,8 +237,9 @@ def workflow_tool[DecoratedT](
             return inner
         if isinstance(inner, ToolDescriptor):
             return cast("DecoratedT", replace(inner, workflow_metadata=metadata))
-        if not callable(inner):
-            raise TypeError("@workflow_tool can only decorate a callable or runtime @tool")
+        if not inspect.isroutine(inner):
+            warn_unsupported_tool()
+            return inner
         setattr(inner, _WORKFLOW_TOOL_METADATA_ATTR, metadata)
         return inner
 

@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Final, Literal
 from ..._credential import build_async_credential
 from ..._logger import logger
 from .. import _harness_lifecycle
-from .._harness_binding import AppHarness, HarnessKind
-from ._copilot_preview import CopilotPreviewError
+from .._harness_binding import AppHarness
+from ._copilot_preview import CopilotPreviewError, copilot_adapter
 from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
 
 if TYPE_CHECKING:
@@ -26,10 +26,9 @@ class CopilotRuntime:
     """One SDK-managed stdio client owned by one identity-distinct app binding."""
 
     def __init__(self, harness: AppHarness) -> None:
-        if harness.storage_root is None:
-            raise CopilotPreviewError("Copilot was not selected for this app.")
         self._harness = harness
-        self.native_root = harness.storage_root / "native"
+        self._adapter = copilot_adapter(harness)
+        self.native_root = self._adapter.storage_root / "native"
         self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
         self._start_lock = asyncio.Lock()
@@ -89,8 +88,8 @@ class CopilotRuntime:
 
     def _release_runtime(self) -> None:
         with self._harness._resources.guard:
-            if self._harness._resources.runtime is self:
-                self._harness._resources.runtime = None
+            if self._adapter.runtime is self:
+                self._adapter.runtime = None
         _harness_lifecycle._unregister_shutdown(self._close_callback)
 
     async def close(self) -> None:
@@ -145,11 +144,10 @@ class CopilotRuntime:
 
 def get_runtime(harness: AppHarness) -> CopilotRuntime:
     """Construct one resource-free owner under the app binding's synchronous guard."""
-    if harness.name is not HarnessKind.COPILOT or harness.storage_root is None:
-        raise CopilotPreviewError("Copilot was not selected for this app.")
+    adapter = copilot_adapter(harness)
     with harness._resources.guard:
-        owner = harness._resources.runtime
+        owner = adapter.runtime
         if owner is None:
             owner = CopilotRuntime(harness)
-            harness._resources.runtime = owner
+            adapter.runtime = owner
         return owner

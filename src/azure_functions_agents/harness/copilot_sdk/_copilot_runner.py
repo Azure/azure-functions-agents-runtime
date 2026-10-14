@@ -34,6 +34,7 @@ from .._harness_binding import (
     HarnessRequest,
     HarnessSessionState,
     SessionHistory,
+    SessionHistoryUnavailableError,
     UnsupportedCapabilityError,
     agent_run_attributes_for_harness,
     agent_run_span_name_for_harness,
@@ -309,7 +310,11 @@ class _CopilotHarnessRunner:
                     raise
                 except Exception as exc:
                     span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                    span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
+                    span.record_exception(
+                        exc,
+                        fault_domain=FaultDomain.RUNTIME,
+                        infer_error_type=True,
+                    )
                     if session_state.resumable and not emitted_session:
                         yield f"data: {json.dumps(SessionEvent(type='session', session_id=resolved_id))}\n\n"
                     yield f"data: {json.dumps(ContentEvent(type='error', content=str(exc)))}\n\n"
@@ -383,15 +388,19 @@ class _CopilotHarnessRunner:
                 raise
             except Exception as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.RUNTIME,
+                    infer_error_type=True,
+                )
                 raise
             span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
         return result.content
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
         del agent_slug, session_id
-        _copilot_preview.reject_unsupported(transcript_replay=True)
-        raise AssertionError("Copilot transcript replay should have been rejected.")
+        message = self._harness.adapter.session_history_unavailable_message
+        raise SessionHistoryUnavailableError(message or "Session history is unavailable.")
 
 
 def _validate_session_id(session_id: str | None) -> str | None:

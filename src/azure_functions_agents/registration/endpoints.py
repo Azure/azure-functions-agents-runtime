@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -28,8 +29,8 @@ from ..config import EndpointAuthConfig, ResolvedAgent
 from ..harness._agent_runner import get_agent_runner
 from ..harness._harness_binding import (
     AppHarness,
-    HarnessKind,
     HarnessSessionState,
+    SessionHistoryUnavailableError,
     agent_run_attributes_for_harness,
     agent_run_span_name_for_harness,
     auto_record_exceptions_for_harness,
@@ -342,10 +343,18 @@ def _register_http_chat(
     harness = bind_harness(resolved, capabilities)
 
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
+        supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
-            return _json_error(auth_error.message, status_code=auth_error.status_code)
-        supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
+            return _json_error(
+                auth_error.message,
+                status_code=auth_error.status_code,
+                headers=(
+                    {_SESSION_ID_HEADER: supplied_session_id}
+                    if supplied_session_id is not None
+                    else None
+                ),
+            )
         resolved_session_id = _resolve_builtin_endpoints_session_id(
             supplied_session_id
         )
@@ -410,7 +419,14 @@ def _register_http_chat(
                 )
             except SessionStorageError as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                if auto_record_exceptions_for_harness(harness):
+                    span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
+                else:
+                    span.record_exception(
+                        exc,
+                        fault_domain=FaultDomain.UNKNOWN,
+                        infer_error_type=True,
+                    )
                 return _json_error(
                     str(exc),
                     status_code=exc.status_code,
@@ -432,9 +448,17 @@ def _register_http_chat(
                         state=session_state,
                     ),
                 )
+            except asyncio.CancelledError:
+                if not auto_record_exceptions_for_harness(harness):
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
+                raise
             except Exception as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.UNKNOWN,
+                    infer_error_type=not auto_record_exceptions_for_harness(harness),
+                )
                 error_msg = _format_exception_message(exc)
                 logger.error(
                     "Built-in chat API error: source_file=%s error=%s",
@@ -654,9 +678,17 @@ def _register_mcp_endpoint(
                         "tool_calls": result.tool_calls,
                     }
                 )
+            except asyncio.CancelledError:
+                if not auto_record_exceptions_for_harness(harness):
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
+                raise
             except Exception as exc:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.UNKNOWN,
+                    infer_error_type=not auto_record_exceptions_for_harness(harness),
+                )
                 error_msg = _format_exception_message(exc)
                 logger.error(
                     "Built-in MCP error: source_file=%s error=%s",
@@ -813,12 +845,8 @@ def _register_history_endpoint(
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
-        if selected_harness.name is HarnessKind.COPILOT:
-            return _json_error(
-                "Copilot preview does not support transcript replay. Native state is separate "
-                "from MAF history.",
-                status_code=501,
-            )
+        if message := selected_harness.adapter.session_history_unavailable_message:
+            return _json_error(message, status_code=501)
         session_id = _request_header_value(req, _SESSION_ID_HEADER) or ""
         if not session_id:
             return Response(
@@ -837,6 +865,8 @@ def _register_history_endpoint(
             history = await get_agent_runner(selected_harness).get_session_history(
                 slug, session_id
             )
+        except SessionHistoryUnavailableError as exc:
+            return _json_error(str(exc), status_code=exc.status_code)
         except Exception:
             logger.exception("history endpoint failed")
             return Response(

@@ -34,6 +34,7 @@ from azure_functions_agents.registration._handlers import (
     make_http_agent_handler,
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
+from tests._harness_helpers import make_copilot_harness
 
 
 class DummyRequest:
@@ -54,9 +55,10 @@ class RecordingSpan:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any] | None]] = []
         self.content: dict[str, str] = {}
+        self.attributes: dict[str, Any] = {}
 
     def set_attribute(self, key: str, value: Any) -> None:
-        return None
+        self.attributes[key] = value
 
     def set_content(self, key: str, value: str) -> None:
         self.content[key] = value
@@ -64,7 +66,13 @@ class RecordingSpan:
     def set_error(self, message: str, *, fault_domain: str) -> None:
         return None
 
-    def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
+    def record_exception(
+        self,
+        exc: BaseException,
+        *,
+        fault_domain: str | None = None,
+        infer_error_type: bool = False,
+    ) -> None:
         return None
 
     def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
@@ -201,7 +209,7 @@ def test_copilot_http_handler_keeps_host_owned_structured_output_validation(
                 "required": ["message"],
             }
         ),
-        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
     )
 
     valid = asyncio.run(handler(DummyRequest({"prompt": "valid"})))
@@ -262,7 +270,7 @@ def test_http_validation_returns_only_caller_supplied_session_ids(
         },
     )
     copilot = make_http_agent_handler(
-        resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
+        resolved, AgentCapabilities(_harness=make_copilot_harness(tmp_path))
     )
     maf = make_http_agent_handler(
         resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.MAF, tmp_path))
@@ -316,7 +324,7 @@ def test_http_failure_returns_generated_id_only_after_adapter_checkpoint(
     monkeypatch.setattr("azure_functions_agents.registration._handlers._run_agent", fake_run_agent)
     resolved = _resolved_agent(response_schema=None)
     copilot = make_http_agent_handler(
-        resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
+        resolved, AgentCapabilities(_harness=make_copilot_harness(tmp_path))
     )
     maf = make_http_agent_handler(
         resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.MAF, tmp_path))
@@ -363,7 +371,7 @@ def test_http_handler_maps_sanitized_storage_errors_without_host_lifecycle_statu
     monkeypatch.setattr("azure_functions_agents.registration._handlers._run_agent", fake_run_agent)
     copilot = make_http_agent_handler(
         _resolved_agent(response_schema=None),
-        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
     )
 
     unavailable = asyncio.run(
@@ -865,7 +873,7 @@ def test_sensitive_run_capture_keeps_prompts_and_responses_but_not_tool_records(
     assert json.loads(span.content["af.agent.input"])["prompt"] == "private prompt"
     assert span.content["af.agent.response"] == "private model response"
     log_payload = _run_log_payload(
-        _resolved_agent(response_schema=None),
+        make_copilot_harness(Path.cwd()),
         SimpleNamespace(
             content="private model response",
             session_id="session-123",
@@ -906,7 +914,9 @@ def test_sensitive_http_log_payload_restores_maf_tool_calls_only(
     ]
 
     log_payload = _run_log_payload(
-        AppHarness(harness_kind, tmp_path),
+        make_copilot_harness(tmp_path)
+        if harness_kind is HarnessKind.COPILOT
+        else AppHarness(HarnessKind.MAF, tmp_path),
         SimpleNamespace(
             content="private model response",
             session_id="session-123",
@@ -957,7 +967,7 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
 
     async def fake_run_agent(*_args: Any, **kwargs: Any) -> Any:
         observability.current_span().add_event(
-            "af.copilot.model.usage",
+            "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 2},
         )
         return SimpleNamespace(
@@ -980,7 +990,7 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
         fake_run_agent,
     )
     resolved = _resolved_agent(response_schema=None)
-    capabilities = AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
+    capabilities = AgentCapabilities(_harness=make_copilot_harness(tmp_path))
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         if entrypoint == "http":
             handler = make_http_agent_handler(resolved, capabilities)
@@ -991,13 +1001,12 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
             asyncio.run(handler({"past_due": False}))
 
     [span] = exporter.get_finished_spans()
-    assert span.name == "invoke_agent resolved-agent-slug"
-    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
-    assert span.attributes["gen_ai.agent.name"] == "resolved-agent-slug"
-    assert span.attributes["gen_ai.conversation.id"]
-    assert "af.agent.session_id" not in span.attributes
+    assert span.name == "agent.run resolved-agent-slug"
+    assert span.attributes["af.harness"] == "copilot"
+    assert "gen_ai.operation.name" not in span.attributes
+    assert span.attributes["af.agent.session_id"]
     [usage_event] = [
-        event for event in span.events if event.name == "af.copilot.model.usage"
+        event for event in span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 2
     assert "private" not in caplog.text
@@ -1037,7 +1046,7 @@ def test_copilot_agent_ingress_records_exception_once_without_changing_content_g
         fail_run_agent,
     )
     resolved = _resolved_agent(response_schema=None)
-    capabilities = AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
+    capabilities = AgentCapabilities(_harness=make_copilot_harness(tmp_path))
 
     if entrypoint == "http":
         handler = make_http_agent_handler(resolved, capabilities)
@@ -1050,7 +1059,7 @@ def test_copilot_agent_ingress_records_exception_once_without_changing_content_g
             asyncio.run(handler({"private": "trigger payload"}))
 
     [span] = exporter.get_finished_spans()
-    assert span.name == "invoke_agent resolved-agent-slug"
+    assert span.name == "agent.run resolved-agent-slug"
     assert span.attributes["af.agent.outcome"] == "error"
     assert span.attributes["af.fault_domain"] == "unknown"
     assert span.attributes["error.type"] == "RuntimeError"
@@ -1061,22 +1070,57 @@ def test_copilot_agent_ingress_records_exception_once_without_changing_content_g
     assert ("af.agent.input" in span.attributes) is capture_sensitive_data
 
 
+@pytest.mark.parametrize("entrypoint", ["http", "timer"])
+def test_copilot_agent_ingress_marks_cancellation_without_error(
+    monkeypatch: Any, entrypoint: str, tmp_path: Path
+) -> None:
+    span = _install_recording_span(monkeypatch)
+
+    async def cancel_run_agent(*_args: Any, **_kwargs: Any) -> Any:
+        raise asyncio.CancelledError("turn cancelled")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        cancel_run_agent,
+    )
+    resolved = _resolved_agent(response_schema=None)
+    capabilities = AgentCapabilities(_harness=make_copilot_harness(tmp_path))
+
+    if entrypoint == "http":
+        handler = make_http_agent_handler(resolved, capabilities)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(handler(DummyRequest({"prompt": "hello"})))
+    else:
+        handler = make_agent_handler(resolved, "timer_trigger", capabilities)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(handler({"payload": "value"}))
+
+    assert span.attributes["af.agent.outcome"] == "cancelled"
+
+
 @pytest.mark.parametrize(
-    ("harness_kind", "expects_tool_calls"),
+    ("harness_kind", "capture_sensitive_data", "expects_tool_calls"),
     [
-        (HarnessKind.MAF, True),
-        (HarnessKind.COPILOT, False),
+        (HarnessKind.MAF, False, False),
+        (HarnessKind.MAF, True, True),
+        (HarnessKind.COPILOT, False, False),
+        (HarnessKind.COPILOT, True, False),
     ],
 )
-def test_non_http_handler_logs_tool_calls_for_maf_only(
+def test_non_http_handler_uses_sensitive_capture_switch_for_logs(
     monkeypatch: Any,
     caplog: Any,
     tmp_path: Path,
     harness_kind: HarnessKind,
+    capture_sensitive_data: bool,
     expects_tool_calls: bool,
 ) -> None:
     import logging
 
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.capture_sensitive_data",
+        lambda: capture_sensitive_data,
+    )
     tool_calls = [
         {
             "type": "tool_start",
@@ -1103,16 +1147,69 @@ def test_non_http_handler_logs_tool_calls_for_maf_only(
     handler = make_agent_handler(
         _resolved_agent(response_schema=None),
         "timer_trigger",
-        AgentCapabilities(_harness=AppHarness(harness_kind, tmp_path)),
+        AgentCapabilities(
+            _harness=make_copilot_harness(tmp_path)
+            if harness_kind is HarnessKind.COPILOT
+            else AppHarness(HarnessKind.MAF, tmp_path)
+        ),
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         asyncio.run(handler({"message": "hello"}))
 
+    assert '"session_id":' in caplog.text
+    assert '"response_bytes": 22' in caplog.text
+    assert '"tool_call_count": 1' in caplog.text
+    assert ('"response": "private model response"' in caplog.text) is capture_sensitive_data
     if expects_tool_calls:
         assert '"tool_calls": [{"type": "tool_start"' in caplog.text
     else:
         assert '"tool_calls"' not in caplog.text
+
+
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+def test_non_http_handler_respects_logger_disabled(
+    monkeypatch: Any,
+    caplog: Any,
+    capture_sensitive_data: bool,
+) -> None:
+    import logging
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.capture_sensitive_data",
+        lambda: capture_sensitive_data,
+    )
+
+    async def fake_run_agent(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content="private model response",
+            session_id=kwargs["session_id"],
+            tool_calls=[
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "call-1",
+                    "tool_name": "lookup",
+                    "arguments": {"query": "private tool arguments"},
+                    "result": "private tool response",
+                }
+            ],
+            delegate_error_count=0,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    resolved = _resolved_agent(response_schema=None)
+    resolved.metadata["logger"] = False
+    handler = make_agent_handler(resolved, "timer_trigger", AgentCapabilities())
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        asyncio.run(handler({"message": "hello"}))
+
+    assert "Agent response:" not in caplog.text
+    assert "private model response" not in caplog.text
+    assert "private tool response" not in caplog.text
 
 
 def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(

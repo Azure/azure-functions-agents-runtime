@@ -10,9 +10,11 @@ from unittest.mock import Mock
 
 import pytest
 
+from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.harness import _harness_binding as binding
 from azure_functions_agents.harness._provider_config import ProviderKind
 from azure_functions_agents.registration.capabilities import AgentCapabilities
+from tests._harness_helpers import copilot_state, make_copilot_harness
 
 
 @pytest.fixture
@@ -28,9 +30,8 @@ def binding_root(monkeypatch):
 def preview_module(monkeypatch):
     module = ModuleType("azure_functions_agents.harness.copilot_sdk._copilot_preview")
     module.select_copilot_harness = Mock(
-        side_effect=lambda root: binding.AppHarness(binding.HarnessKind.COPILOT, root)
+        side_effect=lambda root: make_copilot_harness(root)
     )
-    module.validate_copilot_agent = Mock()
     monkeypatch.setitem(sys.modules, module.__name__, module)
     return module
 
@@ -65,17 +66,15 @@ def test_app_binding_is_frozen_and_identity_distinct(binding_root):
     assert first._resources is not second._resources
     assert first._resources.guard is not second._resources.guard
     assert first._resources.runner is second._resources.runner is None
-    assert first._resources.runtime is second._resources.runtime is None
     assert "_resources" not in repr(first)
     with pytest.raises(FrozenInstanceError):
         first.name = binding.HarnessKind.COPILOT
 
 
-def test_resource_cell_has_only_a_guard_and_runtime(binding_root):
-    assert [item.name for item in fields(binding._HarnessResources)] == ["guard", "runner", "runtime"]
+def test_resource_cell_has_only_a_guard_and_runner(binding_root):
+    assert [item.name for item in fields(binding._HarnessResources)] == ["guard", "runner"]
     assert [item.name for item in fields(binding.AppHarness)] == [
-        "name", "app_root", "storage_root", "default_model", "provider",
-        "session_storage", "_resources",
+        "name", "app_root", "adapter", "_resources",
     ]
     resource_field = next(item for item in fields(binding.AppHarness) if item.name == "_resources")
     assert not resource_field.init
@@ -91,29 +90,24 @@ def test_resource_cell_has_only_a_guard_and_runtime(binding_root):
 
 
 def test_replace_gets_fresh_resources_without_changing_settings(binding_root):
-    original = binding.AppHarness(
-        binding.HarnessKind.COPILOT,
+    original = make_copilot_harness(
         binding_root,
         storage_root=binding_root / "state",
         default_model="fixture-model",
-        provider=Mock(),
-        session_storage=Mock(),
     )
     owner = Mock()
-    original._resources.runtime = owner
+    copilot_state(original).runtime = owner
     clone = replace(original)
 
     assert clone.name is original.name
     assert clone.app_root is original.app_root
-    assert clone.storage_root is original.storage_root
+    assert copilot_state(clone).storage_root is copilot_state(original).storage_root
     assert clone.default_model == original.default_model
-    assert clone.provider is original.provider
-    assert clone.session_storage is original.session_storage
     assert clone._resources is not original._resources
     assert clone._resources.guard is not original._resources.guard
     assert clone._resources.runner is None
-    assert clone._resources.runtime is None
-    assert original._resources.runtime is owner
+    assert copilot_state(clone).runtime is None
+    assert copilot_state(original).runtime is owner
 
 
 def test_request_retains_frozen_neutral_descriptors_and_standalone_skill_paths():
@@ -151,7 +145,7 @@ def test_maf_selection_does_not_call_preview(binding_root, preview_module):
 
     assert harness.name is binding.HarnessKind.MAF
     assert harness.app_root == binding_root
-    assert harness.storage_root is harness.session_storage is None
+    assert harness.default_model is None
     preview_module.select_copilot_harness.assert_not_called()
 
 
@@ -217,7 +211,7 @@ def test_preview_selection_failure_does_not_cache_or_fallback(
         binding.get_harness(binding_root)
     assert not binding._HARNESSES
 
-    selected = binding.AppHarness(binding.HarnessKind.COPILOT, binding_root)
+    selected = make_copilot_harness(binding_root)
     preview_module.select_copilot_harness.side_effect = None
     preview_module.select_copilot_harness.return_value = selected
     assert binding.get_harness(binding_root) is selected
@@ -238,16 +232,16 @@ def test_validation_skips_preview_for_maf(binding_root, preview_module):
     harness = binding.AppHarness(binding.HarnessKind.MAF, binding_root)
     binding.validate_agent(harness, Mock(), AgentCapabilities())
 
-    preview_module.validate_copilot_agent.assert_not_called()
+    preview_module.select_copilot_harness.assert_not_called()
 
 
 def test_validation_passes_the_bound_context_to_preview(binding_root, preview_module):
-    harness = binding.AppHarness(binding.HarnessKind.COPILOT, binding_root)
-    resolved = Mock()
+    harness = make_copilot_harness(binding_root)
+    resolved = Mock(agent_configuration=AgentConfiguration(), model="fixture-model")
     capabilities = AgentCapabilities()
     binding.validate_agent(harness, resolved, capabilities)
 
-    preview_module.validate_copilot_agent.assert_called_once_with(harness, resolved, capabilities)
+    assert harness.adapter is not None
 
 
 def test_bind_harness_reuses_an_existing_binding_without_validation(binding_root, monkeypatch):

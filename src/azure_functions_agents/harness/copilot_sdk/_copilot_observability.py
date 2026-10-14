@@ -8,13 +8,10 @@ from uuid import UUID
 
 from ..._agent_identity import agent_id
 from ..._observability import (
-    ATTR_AGENT_MODEL,
-    ATTR_AGENT_SESSION_ID,
     ATTR_GEN_AI_AGENT_ID,
     ATTR_GEN_AI_AGENT_NAME,
     ATTR_GEN_AI_CONVERSATION_ID,
     ATTR_GEN_AI_OPERATION_NAME,
-    ATTR_GEN_AI_PROVIDER_NAME,
     ATTR_GEN_AI_REQUEST_MODEL,
     ATTR_GEN_AI_TOOL_CALL_ID,
     ATTR_GEN_AI_TOOL_NAME,
@@ -31,72 +28,15 @@ from ..._observability import (
     gen_ai_agent_name,
     safe_telemetry_name,
 )
-from ..._observability import (
-    agent_run_attributes as common_agent_run_attributes,
-)
-from .._provider_config import ProviderKind
 
 if TYPE_CHECKING:
     from copilot.session_events import AssistantUsageData
 
-_USAGE_EVENT_NAME = "af.copilot.model.usage"
+_USAGE_EVENT_NAME = "af.agent.model.usage"
 
 
 def _duration_ms(value: timedelta | None) -> float | None:
     return value.total_seconds() * 1000 if value is not None else None
-
-
-def _gen_ai_provider_name(provider_kind: ProviderKind | None) -> str | None:
-    """Return the pinned semconv provider value when the runtime knows it exactly."""
-    match provider_kind:
-        case ProviderKind.OPENAI:
-            return "openai"
-        case ProviderKind.AZURE_OPENAI:
-            return "azure.ai.openai"
-        case _:
-            return None
-
-
-def agent_run_span_name(*, agent_name: str | None) -> str:
-    """Return the Copilot runtime invocation span name."""
-    name = gen_ai_agent_name(agent_name)
-    return f"invoke_agent {name}" if name else GenAiOperationName.INVOKE_AGENT
-
-
-def agent_run_attributes(
-    *,
-    agent_name: str | None,
-    display_name: str | None,
-    trigger_type: str | None,
-    session_id: str | None,
-    model: str | None,
-    provider_kind: ProviderKind | None,
-    gen_ai_default: str | None = None,
-) -> dict[str, TelemetryAttributeValue]:
-    """Build Copilot invocation attributes using standard GenAI fields where they match."""
-    attributes = common_agent_run_attributes(
-        agent_name=agent_name,
-        display_name=display_name,
-        trigger_type=trigger_type,
-        session_id=None,
-        model=None,
-    )
-    attributes.pop(ATTR_AGENT_SESSION_ID, None)
-    attributes.pop(ATTR_AGENT_MODEL, None)
-    return {
-        **attributes,
-        ATTR_GEN_AI_OPERATION_NAME: GenAiOperationName.INVOKE_AGENT,
-        ATTR_GEN_AI_PROVIDER_NAME: _gen_ai_provider_name(provider_kind),
-        ATTR_GEN_AI_CONVERSATION_ID: session_id,
-        ATTR_GEN_AI_REQUEST_MODEL: model,
-        ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(agent_name, default=gen_ai_default),
-        ATTR_GEN_AI_AGENT_ID: agent_id(agent_name) if agent_name else None,
-    }
-
-
-def set_agent_session_attribute(span: RuntimeSpan, *, session_id: str | None) -> None:
-    """Set Copilot's standard conversation attribute on one invocation span."""
-    span.set_attribute(ATTR_GEN_AI_CONVERSATION_ID, session_id)
 
 
 def tool_span_attributes(
@@ -142,12 +82,12 @@ class CopilotEventTelemetry:
             ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS: usage.reasoning_tokens,
             ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS: usage.cache_read_tokens,
             ATTR_GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS: usage.cache_write_tokens,
-            "af.copilot.usage.duration_ms": _duration_ms(usage.duration),
-            "af.copilot.usage.time_to_first_token_ms": _duration_ms(
+            "af.agent.usage.duration_ms": _duration_ms(usage.duration),
+            "af.agent.usage.time_to_first_token_ms": _duration_ms(
                 usage.time_to_first_token
             ),
-            "af.copilot.usage.output_ttft_ms": _duration_ms(usage.output_ttft),
-            "af.copilot.usage.inter_token_latency_ms": _duration_ms(
+            "af.agent.usage.output_ttft_ms": _duration_ms(usage.output_ttft),
+            "af.agent.usage.inter_token_latency_ms": _duration_ms(
                 usage.inter_token_latency
             ),
         }
@@ -159,6 +99,6 @@ class CopilotEventTelemetry:
         safe_name = safe_telemetry_name(name)
         if safe_name:
             self._run_span.add_event(
-                "af.copilot.skill.invoked",
+                "af.skill.invoked",
                 {"af.skill.name": safe_name},
             )

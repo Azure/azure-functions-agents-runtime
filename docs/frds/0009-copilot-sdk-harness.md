@@ -341,35 +341,36 @@ requests always return caller-supplied session IDs, and return generated IDs
 only after resumability is confirmed, consistently across response surfaces.
 `shutdown_runtime()` is the public async cleanup entry point.
 
-### 4.9 Copilot telemetry addendum
+### 4.9 Telemetry addendum
 
-This addendum extends the Copilot execution contract; it does not change MAF.
+This addendum extends the runtime telemetry contract for the Copilot execution
+path. The shared run-log sensitive-data gate applies to both harnesses.
 
 - Reuse the active turn's existing session-event subscription and custom-tool
   wrapper with the existing OpenTelemetry provider and Application Insights
   destination. Do not add a subscription, settings, sampling, caps, exporters,
   flush/shutdown calls, or create/resume telemetry; keep
   `continue_pending_work=False`.
-- The new Copilot telemetry follows the selected GenAI
-  semantic-conventions snapshot where the runtime has exact matching values,
-  without claiming blanket compliance for every runtime path or downstream
-  Azure surface. Copilot uses one canonical `invoke_agent {name}` span per
-  actual invocation and one canonical `execute_tool {name}` span per actual
-  tool call; MAF keeps its existing instrumentation and the runtime does not
-  add duplicate canonical wrappers on that path.
-- Keep `ASSISTANT_USAGE` as a custom `af.copilot.model.usage` event on the
-  owning Copilot invocation span. Reuse standard `gen_ai.usage.*` fields only
-  where the reported SDK semantics match exactly, keep the existing once-only
+- Runtime-owned invocation telemetry is harness-neutral: both MAF and Copilot
+  use `agent.run {slug}` spans and the shared `af.agent.*` attributes, with
+  `af.harness=maf|copilot` identifying the selected app-level harness. The
+  runtime does not create a synthetic harness span and does not add
+  Copilot-only GenAI invocation fields when the shared fields carry the same
+  stable facts.
+- Keep `ASSISTANT_USAGE` as a custom `af.agent.model.usage` event on the owning
+  Copilot invocation span. Reuse standard `gen_ai.usage.*` fields only where
+  the reported SDK semantics match exactly, keep the existing once-only
   eight-field usage recorder and counters unchanged, and defer inference spans
   and standard GenAI metrics until the runtime has reliable evidence for exact
   model boundaries and attribution.
 - Export only allowlisted telemetry. Standard identity, conversation, and tool
-  fields come only from stable runtime state, exact provider mapping is emitted
-  only when the runtime already knows it, and `ENABLE_SENSITIVE_DATA` remains
+  fields come only from stable runtime state, and `ENABLE_SENSITIVE_DATA` remains
   the only content opt-in for prompt/request/response and tool content.
-  Copilot run-log payloads still exclude full `tool_calls` records; MAF run
-  logging remains unchanged. Credentials, authorization headers, raw
-  envelopes, reasoning text, and skill content/paths are never exported.
+  Non-HTTP and HTTP run-log payloads share the same metadata-by-default shape:
+  response content is logged only when sensitive-data capture is enabled, while
+  raw tool-call records follow the selected harness policy (MAF permitted,
+  Copilot excluded). Credentials, authorization headers, raw envelopes,
+  reasoning text, and skill content/paths are never exported.
   **Carve-out:** per Decision 24, runtime-owned Copilot ingress, delegate,
   leaf, and custom-tool spans still record caught Python exception messages and
   stack traces regardless of `ENABLE_SENSITIVE_DATA`, so arbitrary exception
@@ -420,6 +421,8 @@ previously approved harness decisions above.
 | 22 | Canonical invocation and tool boundaries | keep custom `agent.run` naming / adopt Copilot canonical GenAI names | Use `invoke_agent {name}` for Copilot invocation spans and `execute_tool {name}` for Copilot tool spans, preserving the existing session-event subscription, explicit host context, wrapper ownership, and matched native-timing rules. | Human (larohra) | 2026-10-13 |
 | 23 | Stable fields, usage, and privacy | infer missing provider/model semantics / emit only proven fields | Emit standard identity, conversation, provider, and tool fields only from stable runtime state; keep usage as the existing custom event plus exact-match `gen_ai.usage.*` fields; defer inference spans and standard metrics; keep allowlisted telemetry and never include full `tool_calls` records in Copilot run logs. | Human (larohra) | 2026-10-13 |
 | 24 | Copilot exception diagnostics | keep Copilot exception details suppressed/content-free / match installed MAF exception capture at runtime-owned boundaries | Disable automatic OTel exception/status recording on Copilot runtime-owned ingress, delegate, leaf, and custom-tool spans, then explicitly capture actual caught Python failures once per span with OpenTelemetry exception events, `error.type`, `ERROR` status, and `af.fault_domain` regardless of `ENABLE_SENSITIVE_DATA`; keep prompt/request/response gating unchanged, preserve cancellation as nonfailure, and keep native-only SDK tool failures as structured statuses without fabricated exception events. | Human (larohra) | 2026-10-14 |
+| 25 | Harness-neutral runtime telemetry surface | divergent Copilot `invoke_agent` invocation naming / shared runtime invocation contract | Supersede the divergent invocation naming from the earlier telemetry addendum: runtime-owned invocation spans use `agent.run {slug}` and shared `af.agent.*` fields for both harnesses, with `af.harness=maf\|copilot` as a span attribute. Keep adapter-owned tool and usage projection truthful without fabricating unavailable model spans, timing, provider, or native SDK hierarchy. | Human (larohra) | 2026-10-14 |
+| 26 | Non-HTTP run-log content gating | keep non-HTTP raw response/tool logging unchanged / share the HTTP run-log privacy switch | Use the shared run-log payload builder for non-HTTP and HTTP entrypoints: metadata is logged by default, response content is logged only when `ENABLE_SENSITIVE_DATA=true`, raw tool-call records remain allowed for MAF when enabled, and Copilot run logs continue to exclude raw tool-call records. | Human (larohra) | 2026-10-14 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -463,7 +466,13 @@ previously approved harness decisions above.
   simplifications through 2026-10-06.
 - **Telemetry addendum sign-off:** larohra approved the revised Copilot
   telemetry addendum on 2026-10-13. The addendum decisions above govern
-  Copilot telemetry only and do not alter the prior harness decisions.
+  Copilot telemetry except where a later row explicitly names shared runtime
+  behavior. On
+  2026-10-14 larohra approved the harness-neutral runtime invocation and
+  `af.harness` attribute contract, which supersedes the earlier divergent
+  Copilot invocation naming while preserving truthful tool and usage telemetry.
+  The same day, larohra approved applying the shared sensitive-data run-log
+  payload contract to non-HTTP entrypoints for both harnesses.
 - **Scope note:** This FRD records the durable feature contract only. It does
   not preserve superseded iteration history, review churn, or qualification
   narratives that no longer change the product boundary.

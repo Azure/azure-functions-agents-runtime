@@ -205,8 +205,8 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     Used by :func:`validate_subagent_tool_names` for fail-fast collision
     checks. Skill tools are excluded (not exposed as top-level tools by
     name). Covers each MCP server's configured name but not its individual
-    remote functions (unknown at composition time) — MAF's ``Agent.run()``
-    independently rejects those collisions once expanded.
+    remote functions, which are unknown at composition time and remain the
+    selected adapter's responsibility once expanded.
     """
     names = {tool.name for tool in capabilities.filtered_user_tools or ()}
     names.update(tool.name for tool in capabilities.filtered_mcp_tools or ())

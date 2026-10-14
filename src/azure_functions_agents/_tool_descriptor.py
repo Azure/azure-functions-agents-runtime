@@ -19,6 +19,7 @@ from ._logger import logger
 type ApprovalMode = Literal["always_require", "never_require"]
 type ToolCallable = Callable[..., Any]
 type ToolInput = object
+type ToolObjectPredicate = Callable[[object], bool]
 
 _JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
     "string": str,
@@ -29,6 +30,13 @@ _JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
     "object": dict,
     "null": type(None),
 }
+_HARNESS_OBJECT_PREDICATES: list[ToolObjectPredicate] = []
+
+
+def register_harness_object_predicate(predicate: ToolObjectPredicate) -> None:
+    """Register an adapter-owned SDK object recognizer."""
+    if predicate not in _HARNESS_OBJECT_PREDICATES:
+        _HARNESS_OBJECT_PREDICATES.append(predicate)
 
 
 def _parameter_type_matches(value: Any, kind: str) -> bool:
@@ -43,7 +51,7 @@ def _parameter_type_matches(value: Any, kind: str) -> bool:
 def _validate_json_arguments(
     name: str, values: dict[str, Any], schema: dict[str, Any]
 ) -> None:
-    """Preserve MAF's top-level checks without enforcing extra JSON Schema keywords."""
+    """Preserve top-level schema checks without enforcing extra JSON Schema keywords."""
     missing = {
         key for key in schema.get("required", ()) if isinstance(key, str)
     } - values.keys()
@@ -119,6 +127,8 @@ def _function_hints(func: ToolCallable) -> dict[str, Any]:
             parameter.name: parameter.annotation
             for parameter in inspect.signature(func).parameters.values()
         }
+
+
 def _input_model(name: str, func: ToolCallable) -> type[BaseModel]:
     signature = inspect.signature(func)
     hints = _function_hints(func)
@@ -213,11 +223,8 @@ class ToolDescriptor:
 
 
 def is_harness_object(candidate: object) -> bool:
-    """Recognize SDK-owned values without inspecting their attributes."""
-    return any(
-        base.__module__.split(".", 1)[0] in {"agent_framework", "copilot"}
-        for base in type(candidate).__mro__
-    )
+    """Recognize adapter-owned values without inspecting their attributes."""
+    return any(predicate(candidate) for predicate in _HARNESS_OBJECT_PREDICATES)
 
 
 def warn_unsupported_tool() -> None:

@@ -9,6 +9,9 @@ from typing import Any
 from agent_framework import FunctionTool
 
 from ..._tool_descriptor import ToolCallable, ToolDescriptor
+from ._maf_tool_validation import register_maf_tool_predicate
+
+register_maf_tool_predicate()
 
 
 def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
