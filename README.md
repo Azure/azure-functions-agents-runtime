@@ -636,8 +636,10 @@ transcript remains independent.
 
 > **Single-process scope:** Turns for the same agent/session pair are serialized
 > within one Python process, with bounded waiting. Independent sessions remain
-> concurrent. Cross-worker overlap is unsupported and caller-owned; Blob
-> storage does not provide distributed turn coordination.
+> concurrent. Across workers or instances there is no distributed lock.
+> Sequential resume depends on a shared accessible backend namespace, and
+> overlapping same-session requests can observe stale state and commit in
+> nondeterministic order.
 
 ## Samples
 

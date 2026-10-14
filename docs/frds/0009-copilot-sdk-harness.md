@@ -229,10 +229,10 @@ Store Copilot files under:
 not invent a second identity layer. Session ID validation and path containment
 rules stay shared.
 
-The Copilot preview remains local-only and requires a single Functions worker.
-Azure Functions hosting, structured-response parity, full system-tool parity,
-and cross-worker session overlap are unsupported in this preview unless
-separately qualified. Local HTTP SSE, declared delegates, Workflow Sub Agents,
+The Copilot preview supports local and Azure Functions execution using the
+existing registration surfaces and storage selection. Structured-response
+parity and full system-tool parity remain outside this preview contract. Local
+HTTP SSE, declared delegates, Workflow Sub Agents,
 Dynamic Workflow management, configured MCP servers, and approved project
 skills use the existing host contracts. Workflow-enabled direct roles receive
 the packaged `data-driven-workflows` skill through the same approved native
@@ -311,8 +311,9 @@ Copilot remains a bounded preview. Unsupported behavior fails explicitly.
 Current supported direction:
 
 - same authoring/config surfaces as MAF;
-- once-per-app local preview selection;
-- direct-role execution with runtime tool/MCP/skill descriptors and user-supplied tools;
+- once-per-app preview selection;
+- direct-role execution with neutral runtime tool/MCP/skill descriptors and
+  user-supplied tools;
 - SDK-owned session files behind SessionFs; and
 - no silent weakening of policy or validation.
 
@@ -323,8 +324,6 @@ Still outside this FRD's supported preview contract:
 - silent compatibility shims for unsupported tool callables or tool options;
 - silent provider/client-manager fallback; and
 - claims that unqualified native advertising/loading behavior is production-ready.
-- Azure-hosted deployment and any trigger or Debug UI behavior not yet qualified
-  on a real Functions host.
 
 The approved harness-boundary cleanup removes public custom chat-client
 injection. Shared configuration retains portable model/provider settings, while
@@ -432,6 +431,12 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | 28 | Bound-runner responsibilities | separate adapter strategy and forwarding facade / one app-bound runner contract | Use one concrete runner per immutable app binding for execution, pre-registration qualification, defaults, history support, and observability policy. Runner creation is resource-free; SDK imports and acquired resources stay lazy. Same-root apps and binding clones retain independent runners and native owners, and shutdown preserves existing error/cancellation precedence. | Human (larohra) | 2026-10-14 |
 | 29 | Harness discriminator namespace | `af.harness` / shared `af.agent.*` namespace | Refine the harness-neutral telemetry decision to use `af.agent.harness=maf\|copilot`; invocation names, other attributes, exception policy, privacy, and truthful tool/usage evidence stay unchanged. | Human (larohra) | 2026-10-14 |
 
+### Approved hosted/worker amendment
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 30 | Hosted worker/storage contract amendment | keep local-only/single-worker FRD guard / mirror the existing MAF storage and process-local concurrency contract | Remove the local-only and single-worker FRD restriction. Keep MAF as the default harness, preserve the existing storage-selection and no-fallback-on-configured-error contract, keep the existing registered surfaces enabled, and describe same-session overlap across workers/instances as the same process-local coordination limit already present on the MAF path rather than as a Copilot-only carve-out. | Human (larohra) | 2026-10-14 |
+
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |
@@ -481,6 +486,8 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
   Copilot invocation naming while preserving truthful tool and usage telemetry.
   The same day, larohra approved applying the shared sensitive-data run-log
   payload contract to non-HTTP entrypoints for both harnesses.
+- **Hosted/worker amendment sign-off:** larohra approved this amendment to the
+  existing finalized FRD on 2026-10-14 without creating a new FRD.
 - **Scope note:** This FRD records the durable feature contract only. It does
   not preserve superseded iteration history, review churn, or qualification
   narratives that no longer change the product boundary.

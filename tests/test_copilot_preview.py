@@ -126,9 +126,6 @@ def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview,
 @pytest.mark.parametrize(
     ("name", "value", "diagnostic"),
     [
-        ("WEBSITE_INSTANCE_ID", "cloud-instance", "Azure hosting is not qualified"),
-        ("FUNCTIONS_WORKER_PROCESS_COUNT", "2", "FUNCTIONS_WORKER_PROCESS_COUNT=1"),
-        ("FUNCTIONS_WORKER_PROCESS_COUNT", " ", "FUNCTIONS_WORKER_PROCESS_COUNT=1"),
         ("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high", "REASONING_EFFORT"),
     ],
 )
@@ -138,8 +135,19 @@ def test_unsupported_app_settings(preview, monkeypatch, name, value, diagnostic)
         _harness.get_harness()
 
 
-def test_single_worker_hosting_is_accepted(preview, monkeypatch):
-    monkeypatch.setenv("FUNCTIONS_WORKER_PROCESS_COUNT", " 1 ")
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", ""),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", "   "),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", " 1 "),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", "2"),
+        ("WEBSITE_INSTANCE_ID", "   "),
+        ("WEBSITE_INSTANCE_ID", "cloud-instance"),
+    ],
+)
+def test_host_owned_worker_and_hosting_settings_are_accepted(preview, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
     assert _harness.get_harness().name is HarnessKind.COPILOT
 
 
@@ -151,13 +159,14 @@ def test_single_worker_hosting_is_accepted(preview, monkeypatch):
         (EnvVar.ENABLE_COPILOT, "   ", False, "must be true"),
         (EnvVar.ENABLE_COPILOT, "true", True, ""),
         (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, None, True, ""),
-        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "", False, "one|=1"),
-        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "   ", False, "one|=1"),
+        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "", True, ""),
+        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "   ", True, ""),
         (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "1", True, ""),
+        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "2", True, ""),
         (EnvVar.WEBSITE_INSTANCE_ID, None, True, ""),
         (EnvVar.WEBSITE_INSTANCE_ID, "", True, ""),
-        (EnvVar.WEBSITE_INSTANCE_ID, "   ", False, "local execution"),
-        (EnvVar.WEBSITE_INSTANCE_ID, "cloud-instance", False, "local execution"),
+        (EnvVar.WEBSITE_INSTANCE_ID, "   ", True, ""),
+        (EnvVar.WEBSITE_INSTANCE_ID, "cloud-instance", True, ""),
         (EnvVar.REASONING_EFFORT, None, True, ""),
         (EnvVar.REASONING_EFFORT, "", True, ""),
         (EnvVar.REASONING_EFFORT, "   ", False, "REASONING_EFFORT"),
@@ -199,6 +208,24 @@ def test_preview_config_scenario_indexes_without_native_process(preview):
     app = create_function_app(root)
     assert app.get_functions()
     assert not copilot_state(_harness.get_harness(root)).storage_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("WEBSITE_INSTANCE_ID", "cloud-instance"),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", "8"),
+    ],
+)
+def test_preview_config_scenario_indexes_with_host_owned_environment_settings(
+    preview, monkeypatch, setting, value
+):
+    root = Path(__file__).parent / "fixtures" / "config_scenarios" / "18_copilot_preview"
+    monkeypatch.setenv(setting, value)
+    app = create_function_app(root)
+    assert app.get_functions()
+    assert _harness.get_harness(root).name is HarnessKind.COPILOT
+    assert not _harness.get_harness(root).storage_root.exists()
 
 
 def test_foundry_configuration_is_frozen_without_authentication(preview, monkeypatch):

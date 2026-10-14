@@ -2,14 +2,14 @@
 
 The app-level Copilot opt-in supports the same five management tools,
 per-agent policy authorization, Workflow Sub Agent Activities, configured MCP
-servers, and approved authored skills in the single-worker local preview. Each
+servers, and approved authored skills in this preview. Each
 leaf gets a fresh native session that is deleted after use. Workflow-enabled
 direct roles receive the packaged `data-driven-workflows` skill through the
 same native skill-directory path as approved authored skills; the host keeps a
 separate concise workflow addendum and does not read `SKILL.md` into the
 prompt. Delegated leaves and Workflow Sub Agent leaves do not inherit that
-runtime-only skill. This does not qualify Azure hosting or multi-worker native
-persistence.
+runtime-only skill. Hosted startup, auth, storage, restart, and overlap
+behavior still require live qualification.
 
 > [!NOTE]
 > **Status: public experimental v1.** The API is intentionally small and
