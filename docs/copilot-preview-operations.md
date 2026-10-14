@@ -16,7 +16,9 @@ Offline filesystem checks establish adapter behavior, not real-service
 authentication, SDK continuation or Functions hosting. Earlier Blob
 continuation and compaction runs exercised a different persistence
 implementation and do **not** qualify this thin filesystem adapter.
-Deployed-host and multi-worker behavior remain unqualified.
+Functions-host packaging, startup, provider auth, storage selection and
+restart behavior, and overlapping same-session behavior across workers or
+instances remain unqualified.
 
 Actual Linux native skill-helper execution and SDK managed-settings/approval
 scenarios remain unqualified. Earlier Windows mechanics checks are not Linux or
@@ -34,7 +36,7 @@ default per resolved app root.
 | Value | Result |
 | --- | --- |
 | Unset, `false`, `0` | MAF (default). No Copilot SDK import, native process, download, auth or telemetry. |
-| `true`, `1` | Internal Copilot preview for local qualification of every role served by that app. |
+| `true`, `1` | Internal Copilot preview for qualification of every role served by that app. |
 | Present but empty, whitespace-only, or any other text | Explicit configuration error; the app does not start. |
 
 Values are trimmed and case-insensitive. Changing the variable does **not**
@@ -62,9 +64,9 @@ filters, authentication, and input schemas still apply.
 ## MCP and scoped skills
 
 These are outbound capabilities of the existing direct, non-streaming HTTP
-preview, not new triggers or endpoint support. Keep the local, single-worker
-hosting limit and the same `SessionFs`, lock, and create/resume/disconnect
-lifecycle. The checked-in sample does not require MCP credentials or skills.
+preview, not new triggers or endpoint support. Keep the same `SessionFs`,
+lock, and create/resume/disconnect lifecycle. The checked-in sample does not
+require MCP credentials or skills.
 
 ### MCP configuration and auth
 
@@ -218,9 +220,20 @@ These file operations are not a whole-session transaction.
 Turns for the same `(agent, session)` are serialized within one Python
 process, with bounded waiting. Independent sessions remain concurrent.
 Supported Azure Functions invocations in that process share the worker event
-loop while reusing the same app-owned runtime and native client. Cross-worker
-overlap is unsupported and caller-owned, as on the MAF path; Blob storage
-alone does not coordinate turns across workers.
+loop while reusing the same app-owned runtime and native client. There is no
+distributed lock across workers or scaled-out instances. Sequential requests
+can resume on another worker only when both see the same persisted namespace:
+Blob when configured, or a genuinely shared local filesystem if one exists.
+Configured Blob failures still error rather than falling back to local files.
+If overlapping same-session requests land on different workers, each can read
+prior state before the other writes. On the MAF path, append-blob transcript
+entries may arrive in either order. On the Copilot path, opaque multi-file
+SessionFs updates can lose updates or leave a mixed-file combination because
+the adapter performs overwrite, read-modify-write append, and copy/delete
+rename operations. The runtime does not guarantee corruption on every race,
+but it also does not provide exactly-once coordination or magical host-side
+recovery for these overlaps. Native SDK/provider formats, compaction, and
+recovery remain native responsibilities.
 
 ## Runtime lifetime and shutdown
 
@@ -360,16 +373,6 @@ Use isolated local settings or offline fixtures, not a customer's storage:
 
 ## Known limits
 
-- The preview requires a local host and a single Functions worker. An app
-  with the flag on fails to start when
-  `FUNCTIONS_WORKER_PROCESS_COUNT` is set to anything other than `1`, or when
-  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. Rejecting those
-  pre-existing Azure Functions platform settings is this runtime's bounded
-  preview qualification policy, not a Copilot SDK or Functions platform limit.
-  Both rejections are
-  `UnsupportedCapabilityError`s raised before any native process, download or
-  provider call. They stay until deployed-host and multi-worker qualification
-  lands (issues #1357 and #1337).
 - History projection remains unsupported on the Copilot path. Native session
   files are never projected into MAF history.
 - The inbound built-in MCP tool (`builtin_endpoints.mcp: true`) is enabled
@@ -399,8 +402,12 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   extension that prevents host indexing is a setup/integration failure,
   not something the runtime must recover from.
 - HTTP streaming, declared delegates, Workflow Sub Agents, and workflow management
-  are supported by the local adapter. Leaf state is isolated locally and deleted;
-  it does not use the primary persistent storage route. These adapter tests do
+  are supported by the adapter. Leaf state is isolated locally and deleted; it
+  does not use the primary persistent storage route. These adapter tests do
   not qualify hosted execution or real-provider/service parity.
-- Same-session serialization is process-local only. Callers must avoid
-  cross-worker overlap; SDK recovery does not provide exactly-once tool effects.
+- Same-session serialization is process-local only. Sequential cross-worker
+  resume depends on a consistent accessible backend namespace and never on
+  request affinity. Overlap across workers or instances can observe stale
+  state, commit in nondeterministic order, lose Copilot file updates, or leave
+  mixed SessionFs state; the runtime does not promise exactly-once tool
+  effects or host-managed recovery for those races.

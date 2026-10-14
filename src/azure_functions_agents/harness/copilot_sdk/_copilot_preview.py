@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 FLAG = EnvVar.ENABLE_COPILOT
 SDK_DISTRIBUTION = "github-copilot-sdk"
 PROVIDER_ENV = EnvVar.PROVIDER
-WORKER_COUNT_ENV = EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT
 
 
 class CopilotPreviewError(RuntimeError):
@@ -55,13 +54,6 @@ def select_copilot_harness(root: Path) -> AppHarness:
             "with the existing explicit-or-autodetected provider settings."
         ) from None
     copilot_provider = _PROVIDERS[provider].from_environment()
-    worker_count = raw_env_value(EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT)
-    if (worker_count if worker_count is not None else "1").strip() != "1":
-        raise UnsupportedCapabilityError(f"Copilot local preview requires {WORKER_COUNT_ENV}=1.")
-    if raw_env_value(EnvVar.WEBSITE_INSTANCE_ID):
-        raise UnsupportedCapabilityError(
-            "Copilot preview supports local execution only; Azure hosting is not qualified."
-        )
     for name in (EnvVar.REASONING_EFFORT, EnvVar.REASONING_SUMMARY):
         if raw_env_value(name):
             raise UnsupportedCapabilityError(f"Copilot preview does not support {name}.")

@@ -40,8 +40,8 @@ flowchart LR
     R -.->|"MafRunner"| MR["harness/agent_framework/_maf_runner.py"]
     MR -.->|"neutral HarnessRequest"| L
     L -.->|"MAF-owned history"| T["harness/agent_framework/<br/>_maf_blob_history.py / _maf_file_history.py<br/>JSONL transcripts"]
-    R -.->|"CopilotRunner"| CR["harness/copilot_sdk/_copilot_runner.py"]
-    CR -.->|"neutral HarnessRequest: explicit local preview"| P["harness/copilot_sdk/<br/>_copilot_execution.py + _copilot_runtime.py<br/>Copilot SDK + native stdio"]
+    R -.->|"Copilot backend runner"| CR["harness/copilot_sdk/_copilot_runner.py"]
+    CR -.->|"neutral HarnessRequest: explicit preview"| P["harness/copilot_sdk/<br/>_copilot_execution.py + _copilot_runtime.py<br/>Copilot SDK + native stdio"]
     P -.->|"SDK SessionFs callbacks"| S["harness/copilot_sdk/_copilot_session_fs.py<br/>opaque SDK files<br/>local files or one Blob per file"]
 ```
 
@@ -249,7 +249,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 ### Where the registration stage hands off to execution
 
-Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit local Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
+Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
 
 `config/merge.py` recursively combines global and per-agent portable
 `agent_configuration` fields, using authored `null` values to clear inherited
@@ -347,11 +347,10 @@ cleanup errors. Shared code normalizes only the public `AgentResult` and
 tool-call accounting contracts; MAF usage decoding remains local to MAF, and
 Copilot result/event conversion remains local to Copilot.
 
-The current preview stays intentionally narrow. It is local-only, requires a
-single Functions worker, and fails unsupported behavior explicitly rather than
-degrading quietly.
+The current preview stays intentionally narrow and fails unsupported behavior
+explicitly rather than degrading quietly.
 
-The supported local execution subset includes primary HTTP chat and SSE,
+The supported execution subset includes primary HTTP chat and SSE,
 chat-time delegates, Workflow Sub Agent Activities, Dynamic Workflow
 management, configured MCP servers, and approved project skills. Primary
 SDK-owned sessions are backed by local files or Blob storage. The direct tool
@@ -420,6 +419,18 @@ not live-qualified. Offline adapter tests, Core Tools/local-host evidence,
 and deployed-host evidence are distinct; only offline tests were collected
 for these entrypoint changes. Missing extensions causing host indexing
 failures are setup/integration failures, not runtime capability rejection.
+Same-session turn serialization remains process-local on both harnesses.
+Sequential requests can resume on another worker or instance only when both
+see the same persisted namespace; Blob provides that namespace when
+configured, while local fallback does not create cross-instance continuity on
+its own. Overlapping same-session requests on different workers can observe
+stale prior state and commit in nondeterministic order. On the MAF path that
+means append-blob transcript entries can arrive in either order; on the
+Copilot path opaque multi-file SessionFs updates can lose updates or leave a
+mixed-file combination because writes include overwrite, read-modify-write,
+and copy/delete patterns. The runtime does not promise corruption-free overlap
+or host-managed recovery; the native SDK or provider owns its own format,
+compaction, and recovery behavior.
 The SDK owns compaction and its artifacts; the host adds no
 summarizer or recovery controller. Operational setup, supported script forms,
 inspection, and cleanup details live in
