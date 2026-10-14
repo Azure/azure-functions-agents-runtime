@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import azure_functions_agents.config.loader as loader
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.registration._naming import allocate_unique_function_name
@@ -791,6 +792,32 @@ def test_load_agent_specs_flexible_naming_variants_coexist(tmp_path: Path) -> No
     assert Path(specs_by_name["Default Agent"].source_file).name == "Agent.md"
     assert Path(specs_by_name["Report Agent"].source_file).name == "Report.Claude.md"
     assert Path(specs_by_name["Data Agent"].source_file).name == "data.Agent.MD"
+
+
+def test_load_agent_specs_records_normalized_suffix_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    suffixes: list[str] = []
+    monkeypatch.setattr(
+        loader,
+        "record_agent_file_discovery",
+        lambda *, suffix: suffixes.append(suffix),
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "Agent.md",
+        name="Main Agent",
+        description="Bare agent alias",
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "review.ClAuDe.Md",
+        name="Review Agent",
+        description="Claude suffix alias",
+    )
+
+    load_agent_specs(tmp_path)
+
+    assert sorted(suffixes) == [".agent.md", ".claude.md"]
 
 
 def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> None:

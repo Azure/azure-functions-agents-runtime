@@ -13,6 +13,7 @@ import azure.functions as func
 import pytest
 from azure.durable_functions import DurableFunctionsClient
 
+from azure_functions_agents._agent_run_diagnostics import AgentExecutionSurface
 from azure_functions_agents._agent_validation import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
@@ -432,6 +433,10 @@ def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_t
     assert calls["run_agent_stream"]["agent_name"] == resolved.slug
     assert calls["run_agent_stream"]["workflow_agent_slug"] == resolved.slug
     assert calls["run_agent_stream"]["agent_name"] != resolved.name
+    assert (
+        calls["run_agent_stream"]["_execution_surface"]
+        is AgentExecutionSurface.BUILTIN_ENDPOINT
+    )
 
 
 def test_builtin_execution_paths_forward_filtered_and_discovered_inventory(

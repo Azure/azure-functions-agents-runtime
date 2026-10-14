@@ -10,7 +10,9 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger
+from azure_functions_agents._observability import record_agent_file_discovery
 from azure_functions_agents._slug import (
+    _agent_file_suffix,
     _is_single_agent_file,
     _prefixed_agent_file_suffix,
 )
@@ -47,9 +49,11 @@ def _collect_agent_files(directory: Path) -> list[Path]:
             continue
         if md_file.name.startswith("."):
             continue  # skip hidden/dotfiles (iterdir() unlike glob doesn't exclude them)
-        lower_name = md_file.name.lower()
-        if _is_single_agent_file(md_file.name) or _prefixed_agent_file_suffix(lower_name):
-            agent_files.append(md_file)
+        suffix = _agent_file_suffix(md_file.name)
+        if suffix is None:
+            continue
+        record_agent_file_discovery(suffix=suffix.value)
+        agent_files.append(md_file)
     return agent_files
 
 

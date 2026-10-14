@@ -14,7 +14,11 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
-from .._agent_run_diagnostics import _set_run_result_attributes, start_agent_run_span
+from .._agent_run_diagnostics import (
+    AgentExecutionSurface,
+    _set_run_result_attributes,
+    start_agent_run_span,
+)
 from .._agent_validation import SESSION_ID_PATTERN, validate_prompt, validate_session_id
 from .._logger import logger
 from .._observability import FaultDomain
@@ -257,6 +261,7 @@ def _run_builtin_agent_stream(
         _harness=harness,
         _session_is_new=session_id is None,
         _session_state=_session_state,
+        _execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
     )
 
 
@@ -352,6 +357,7 @@ def _register_http_chat(
             display_name=resolved.name,
             model=resolved.model,
             trigger_type="builtin_chat",
+            execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
             session_id=resolved_session_id,
         ) as span:
             try:
@@ -575,6 +581,7 @@ def _register_mcp_endpoint(
             display_name=resolved.name,
             model=resolved.model,
             trigger_type="builtin_mcp",
+            execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
         ) as span:
             session_id: str | None = None
             resolved_session_id: str | None = None

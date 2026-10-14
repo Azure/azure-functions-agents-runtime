@@ -162,6 +162,13 @@ async def summarize(req: Request, skill: HostedSkill) -> Response:
   return Response(result.content, media_type="text/plain")
 ```
 
+In this pattern, the outer application decorator (such as `@app.route`) defines
+the Azure Functions trigger, while `@app.hosted_skill` injects the selected
+agent. A front-matter `trigger` instead asks the runtime to register a separate
+agent Function; `builtin_endpoints` likewise registers separate built-in
+surfaces. An agent may combine these surfaces or omit both front-matter fields
+when it is used only through HostedSkill.
+
 The injected parameter is runtime-managed and hidden from Azure Functions
 binding discovery. Each Function invocation receives a fresh lightweight
 facade; model clients, agents, MCP resources, sandbox closures, and sessions
@@ -188,12 +195,13 @@ module from indexing, including unrelated deterministic Functions, even if no
 request would invoke the skill. The app's selected execution mode owns any
 additional catalog validation.
 
-HostedSkill direct execution reuses `instructions`, `model`, `timeout`,
+HostedSkill binding invocation reuses `instructions`, `model`, `timeout`,
 `agent_configuration`, `response_schema`, `response_example`, tools, skills,
-MCP servers, sandbox, and `web_request` settings. `trigger`,
-`builtin_endpoints`, `logger`, and `metadata` configure other surfaces and do
-not change the call. `input_schema` is not applied because v1 accepts a string
-prompt.
+MCP servers, sandbox, and `web_request` settings. `trigger` and
+`builtin_endpoints` independently register front-matter-configured surfaces;
+they neither configure nor prevent binding invocation. `logger` and `metadata`
+also do not change the call. `input_schema` is not applied because v1 accepts a
+string prompt.
 
 HostedSkill uses the execution mode selected for the app. Decorator application
 rejects agents that declare chat-time `subagents` or enable Dynamic Workflows.
@@ -231,8 +239,8 @@ Fields are organized into categories based on how they can be used:
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
-- `trigger` — Optional automatically registered invocation method
-- `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
+- `trigger` — Optional automatically registered invocation method; not required for internal-only agents
+- `builtin_endpoints` — Optional built-in chat UI, chat API, and MCP tool endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
 - `logger`, `substitute_variables` — Agent runtime behavior switches
 - `input_schema`, `response_schema`, `response_example` — HTTP validation

@@ -293,6 +293,21 @@ def test_record_sandbox_execution_is_safe() -> None:
     obs.record_sandbox_execution(error=True)
 
 
+def test_record_agent_file_discovery_tags_normalized_suffix(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(obs, "_enabled", True)
+    monkeypatch.setattr(
+        obs,
+        "_agent_file_discovery_counter",
+        types.SimpleNamespace(add=lambda value, attributes: calls.append((value, attributes))),
+    )
+
+    obs.record_agent_file_discovery(suffix=".claude.md")
+
+    assert calls == [(1, {"af.agent.file_suffix": ".claude.md"})]
+
+
 # --- delegation (FRD 0007) observability --------------------------------------------------------
 
 

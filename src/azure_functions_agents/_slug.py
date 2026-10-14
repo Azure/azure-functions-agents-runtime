@@ -8,23 +8,42 @@ package (which imports ``config`` and would otherwise create a cycle).
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 from pathlib import Path
 
 from ._logger import logger
 
+
+class AgentFileSuffix(StrEnum):
+    """Recognized agent-markdown suffixes."""
+
+    AGENT = ".agent.md"
+    CLAUDE = ".claude.md"
+
+
 _PREFIXED_AGENT_FILE_SUFFIXES = (
-    ".agent.md",
-    ".claude.md",
+    AgentFileSuffix.AGENT,
+    AgentFileSuffix.CLAUDE,
 )
 
 
-def _prefixed_agent_file_suffix(filename: str) -> str | None:
+def _prefixed_agent_file_suffix(filename: str) -> AgentFileSuffix | None:
     """Return the recognized case-insensitive suffix for a prefixed agent file."""
     lower_name = filename.lower()
     return next(
         (suffix for suffix in _PREFIXED_AGENT_FILE_SUFFIXES if lower_name.endswith(suffix)),
         None,
     )
+
+
+def _agent_file_suffix(filename: str) -> AgentFileSuffix | None:
+    """Classify bare and prefixed agent-markdown filenames by suffix family."""
+    lower_name = filename.lower()
+    if lower_name == "agent.md":
+        return AgentFileSuffix.AGENT
+    if lower_name == "claude.md":
+        return AgentFileSuffix.CLAUDE
+    return _prefixed_agent_file_suffix(lower_name)
 
 
 def _safe_function_name(raw_name: str) -> str:

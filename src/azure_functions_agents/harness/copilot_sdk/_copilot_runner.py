@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
-from ..._agent_run_diagnostics import _set_run_result_attributes
+from ..._agent_run_diagnostics import AgentExecutionSurface, _set_run_result_attributes
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput
 from ...config import ResolvedAgent, SubagentRef
@@ -216,7 +216,7 @@ class _CopilotHarnessRunner:
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
         session_state: HarnessSessionState | None = None,
-        execution_surface: str | None = None,
+        execution_surface: AgentExecutionSurface,
     ) -> AsyncGenerator[str]:
         execution: asyncio.Task[AgentResult] | None = None
         try:
@@ -267,9 +267,8 @@ class _CopilotHarnessRunner:
                 "af.agent.trigger_type": "stream",
                 "af.agent.session_id": resolved_id,
                 "af.agent.model": model,
+                "af.agent.execution_surface": execution_surface,
             }
-            if execution_surface is not None:
-                attributes["af.agent.execution_surface"] = execution_surface
             with start_span(
                 f"agent.run {agent_name or 'agent'}",
                 lifecycle_stage=LifecycleStage.AGENT_RUN,

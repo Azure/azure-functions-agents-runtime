@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 from azure_functions_agents import runner as _runner
 
 from ..._agent_identity import agent_id
-from ..._agent_run_diagnostics import _looks_like_tool_error
+from ..._agent_run_diagnostics import AgentExecutionSurface, _looks_like_tool_error
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
@@ -737,9 +737,9 @@ async def run_stream(
     catalog: AgentCatalog | None,
     workflow_policy: WorkflowPlanPolicy | None,
     session_state: HarnessSessionState | None = None,
-    execution_surface: str | None = None,
+    execution_surface: AgentExecutionSurface,
 ) -> AsyncGenerator[str]:
-    """Yield the existing SSE vocabulary for a selected MAF invocation."""
+    """Yield SSE events and identify the caller-owned surface on every run span."""
     loop = asyncio.get_running_loop()
     deadline = request.deadline
 
@@ -776,9 +776,8 @@ async def run_stream(
             "af.agent.display_name": display_name,
             "af.agent.trigger_type": "stream",
             "af.agent.model": model,
+            "af.agent.execution_surface": execution_surface,
         }
-        if execution_surface is not None:
-            attributes["af.agent.execution_surface"] = execution_surface
         with start_span(
             f"agent.run {agent_name or 'agent'}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
@@ -798,9 +797,8 @@ async def run_stream(
         "af.agent.trigger_type": "stream",
         "af.agent.session_id": resolved_id,
         "af.agent.model": model,
+        "af.agent.execution_surface": execution_surface,
     }
-    if execution_surface is not None:
-        attributes["af.agent.execution_surface"] = execution_surface
     with start_span(
         f"agent.run {agent_name or 'agent'}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,

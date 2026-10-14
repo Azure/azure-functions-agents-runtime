@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import json
 from contextlib import AbstractContextManager
+from enum import StrEnum
 from typing import Any
 
 from ._observability import LifecycleStage, RuntimeSpan, start_span
+
+
+class AgentExecutionSurface(StrEnum):
+    """Runtime-owned surfaces that invoke an agent outside front-matter triggers."""
+
+    RUNNER_API = "runner_api"
+    BUILTIN_ENDPOINT = "builtin_endpoint"
+    HOSTED_SKILL_BINDING = "hosted_skill_binding"
 
 
 def start_agent_run_span(
@@ -15,7 +24,7 @@ def start_agent_run_span(
     display_name: str,
     model: str | None,
     trigger_type: str | None = None,
-    execution_surface: str | None = None,
+    execution_surface: AgentExecutionSurface | None = None,
     session_id: str | None = None,
 ) -> AbstractContextManager[RuntimeSpan]:
     """Start a run-level span with the shared agent identity attributes."""

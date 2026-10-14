@@ -287,7 +287,8 @@ neither the runner nor an SDK can mutate the catalog. HostedSkill uses the same
 process-wide ACA credential and HTTP connection pools as existing agent surfaces;
 the sandbox module continues to own those shared resources while each method call
 owns only its bound tool closure and stream lifecycle. The outer HostedSkill span
-owns the one-shot `display_name` and `execution_surface="hosted_skill"` telemetry.
+owns the one-shot `display_name` and
+`execution_surface="hosted_skill_binding"` telemetry.
 
 If `response_example` or `response_schema` is configured, HostedSkill prepends
 the same response-format instructions used by HTTP handlers and validates the
@@ -320,7 +321,7 @@ The optional capability accepts the same neutral inventories and execution
 metadata as existing SSE execution, including approved `skills`, the full
 `skill_catalog`, `display_name`, `execution_surface`, and whether the session is
 new. For streaming, HostedSkill passes the selected entry's name as `display_name`,
-`execution_surface="hosted_skill"`, the omitted-versus-explicit session result,
+`execution_surface="hosted_skill_binding"`, the omitted-versus-explicit session result,
 and the descriptor inventories directly; no path re-discovers or reconstructs
 those values.
 
@@ -427,7 +428,8 @@ live model, MCP, sandbox, or session resource exists merely because a facade was
 injected, so a handler that never invokes it requires no special cleanup.
 
 HostedSkill execution uses the existing agent run and token-usage telemetry and
-adds a non-sensitive execution-surface attribute identifying `hosted_skill`.
+adds a non-sensitive execution-surface attribute identifying
+`hosted_skill_binding`.
 Content remains governed by the existing sensitive-data setting. Logs and spans
 must not include provider secrets, endpoint credentials, raw connection values,
 or content unless existing policy explicitly permits it.

@@ -6,7 +6,11 @@ import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
-from ._agent_run_diagnostics import _set_run_result_attributes, start_agent_run_span
+from ._agent_run_diagnostics import (
+    AgentExecutionSurface,
+    _set_run_result_attributes,
+    start_agent_run_span,
+)
 from ._agent_validation import validate_prompt, validate_session_id
 from ._observability import FaultDomain, current_span
 from .harness._harness_binding import AppHarness
@@ -53,7 +57,7 @@ class HostedSkill:
             resolved.slug,
             display_name=resolved.name,
             model=resolved.model,
-            execution_surface="hosted_skill",
+            execution_surface=AgentExecutionSurface.HOSTED_SKILL_BINDING,
             session_id=resolved_session_id,
         ) as span:
             try:
@@ -127,7 +131,7 @@ class HostedSkill:
             display_name=resolved.name,
             _harness=self._harness,
             _session_is_new=is_new_session,
-            _execution_surface="hosted_skill",
+            _execution_surface=AgentExecutionSurface.HOSTED_SKILL_BINDING,
         )
         response_parts: list[str] = []
         try:

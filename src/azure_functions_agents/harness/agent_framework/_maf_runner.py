@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
+from ..._agent_run_diagnostics import AgentExecutionSurface
 from ..._tool_descriptor import ToolInput
 from ...config import ResolvedAgent, SubagentRef
 from ...config.schema import AgentConfiguration
@@ -129,7 +130,7 @@ class _MAFHarnessRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_state: HarnessSessionState | None = None,
-        execution_surface: str | None = None,
+        execution_surface: AgentExecutionSurface,
     ) -> AsyncGenerator[str]:
         from . import _maf_execution
         request = _runner._request(

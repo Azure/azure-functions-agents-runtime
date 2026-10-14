@@ -162,8 +162,9 @@ If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint
 ### Hosted skill bindings
 
 Use `@app.hosted_skill` when application code owns the Azure Functions trigger
-and needs an agent internally. The selected `.agent.md` may omit both
-`trigger` and `builtin_endpoints`; its identity slug comes from the filename.
+and needs an agent internally. The selected `.agent.md` may omit `trigger` and
+`builtin_endpoints`, or define either to expose additional, independently
+registered surfaces. Its identity slug comes from the filename.
 
 ```python
 from azurefunctions.extensions.http.fastapi import Request, Response

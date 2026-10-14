@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
+from ._agent_run_diagnostics import AgentExecutionSurface
 from ._agent_validation import SESSION_ID_PATTERN, validate_session_id
 from ._function_tool import tool
 from ._logger import logger
@@ -424,7 +425,7 @@ async def run_agent_events(
     skill_catalog: Sequence[SkillDescriptor] | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
-    _execution_surface: str | None = None,
+    _execution_surface: AgentExecutionSurface = AgentExecutionSurface.RUNNER_API,
 ) -> AsyncGenerator[AgentStreamEvent]:
     """Adapt the runtime SSE stream into harness-neutral structured events."""
     stream = run_agent_stream(
@@ -487,7 +488,7 @@ async def run_agent_stream(
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
     _session_state: HarnessSessionState | None = None,
-    _execution_surface: str | None = None,
+    _execution_surface: AgentExecutionSurface = AgentExecutionSurface.RUNNER_API,
 ) -> AsyncGenerator[str]:
     """Yield the existing SSE vocabulary under the selected app context."""
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT

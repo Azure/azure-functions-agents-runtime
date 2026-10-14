@@ -22,6 +22,7 @@ from agent_framework import (
 )
 
 from azure_functions_agents import runner
+from azure_functions_agents._agent_run_diagnostics import AgentExecutionSurface
 from azure_functions_agents.config import paths
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 from azure_functions_agents.harness import _harness_execution as shared
@@ -1274,6 +1275,7 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
     [span] = spans
     assert span.attributes["af.agent.name"] == "billing"
     assert span.attributes["af.agent.display_name"] == "Billing Specialist"
+    assert span.attributes["af.agent.execution_surface"] == "runner_api"
 
 
 def test_run_agent_events_reports_execution_surface_on_span(monkeypatch: Any) -> None:
@@ -1294,14 +1296,14 @@ def test_run_agent_events_reports_execution_surface_on_span(monkeypatch: Any) ->
             async for event in runner.run_agent_events(
                 "prompt",
                 agent_name="billing",
-                _execution_surface="hosted_skill",
+                _execution_surface=AgentExecutionSurface.HOSTED_SKILL_BINDING,
             )
         ]
 
     asyncio.run(collect())
 
     [span] = spans
-    assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.execution_surface"] == "hosted_skill_binding"
     assert span.attributes["af.agent.session_id"] == "test-session"
 
 
@@ -1320,7 +1322,7 @@ def test_run_agent_events_records_session_build_failure_on_span(monkeypatch: Any
             async for event in runner.run_agent_events(
                 "prompt",
                 agent_name="billing",
-                _execution_surface="hosted_skill",
+                _execution_surface=AgentExecutionSurface.HOSTED_SKILL_BINDING,
             )
         ]
 
@@ -1328,7 +1330,7 @@ def test_run_agent_events_records_session_build_failure_on_span(monkeypatch: Any
 
     assert [event.kind for event in events] == [HostedSkillEventKind.ERROR]
     [span] = spans
-    assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.execution_surface"] == "hosted_skill_binding"
     assert span.attributes["af.agent.outcome"] == "error"
     assert span.exceptions == [failure]
 

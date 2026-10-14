@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from .._agent_run_diagnostics import AgentExecutionSurface
 from .._tool_descriptor import ToolInput
 from ..config import ResolvedAgent, SubagentRef
 from ..config.schema import AgentConfiguration
@@ -88,7 +89,7 @@ class _HarnessRunner(Protocol):
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
         session_state: HarnessSessionState | None = None,
-        execution_surface: str | None = None,
+        execution_surface: AgentExecutionSurface,
     ) -> AsyncGenerator[str]: ...
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory: ...
@@ -196,7 +197,7 @@ class AgentRunner:
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
         session_state: HarnessSessionState | None = None,
-        execution_surface: str | None = None,
+        execution_surface: AgentExecutionSurface = AgentExecutionSurface.RUNNER_API,
     ) -> AsyncGenerator[str]:
         effective_deadline = deadline
         if effective_deadline is None:

@@ -186,7 +186,7 @@ async def test_run_records_hosted_skill_span_and_result_attributes(
 
     [span] = spans
     assert span.attributes["af.agent.name"] == "internal"
-    assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.execution_surface"] == "hosted_skill_binding"
     assert span.attributes["af.agent.session_id"] == "session-one"
     assert span.attributes["af.agent.tool_call_count"] == 1
     assert span.attributes["af.agent.response_bytes"] == len("complete")
@@ -525,7 +525,7 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     output = [event async for event in skill.stream("Prepare order", session_id=session_id)]
 
     assert captured["sandbox"] == captured["runner"] == output[0].session_id
-    assert captured["execution_surface"] == "hosted_skill"
+    assert captured["execution_surface"] == "hosted_skill_binding"
     assert captured["session_is_new"] is (session_id is None)
     assert captured["display_name"] == "Internal"
     assert captured["harness"].name is harness_kind
