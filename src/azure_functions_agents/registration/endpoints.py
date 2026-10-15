@@ -15,6 +15,11 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from .._agent_run_diagnostics import (
+    AgentExecutionSurface,
+    _set_run_result_attributes,
+)
+from .._agent_validation import SESSION_ID_PATTERN, validate_prompt, validate_session_id
 from .._logger import logger
 from .._observability import (
     ATTR_AGENT_OUTCOME,
@@ -25,7 +30,6 @@ from .._observability import (
     set_agent_session_attribute,
     start_span,
 )
-from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ..harness._agent_runner import get_agent_runner
@@ -40,13 +44,12 @@ from ..harness._harness_binding import (
 )
 from ..harness._history_identity import validate_agent_slug
 from ..harness._session_storage import SessionStorageError
+from ..system_tools.sandbox import build_sandbox_tools_for_session
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import (
     _SESSION_ID_HEADER,
     _request_header_value,
     _session_id_response_headers,
-    _set_run_result_attributes,
-    build_sandbox_tools_for_session,
 )
 from ._naming import _safe_function_name
 from .capabilities import AgentCapabilities
@@ -102,8 +105,10 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     value = value.strip()
-    if _SAFE_SESSION_ID_PATTERN.match(value):
-        return value
+    try:
+        return validate_session_id(value)
+    except ValueError:
+        pass
     # The MCP extension mints its own transport session id (e.g. the
     # streamable-HTTP ``Mcp-Session-Id``), whose format we do not control and
     # which may contain characters the runner rejects or exceed its length
@@ -266,14 +271,13 @@ def _run_builtin_agent_stream(
         _harness=harness,
         _session_is_new=session_id is None,
         _session_state=_session_state,
+        _execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
     )
 
 
 def _extract_prompt_from_body(body: Any) -> str:
     prompt = body.get("prompt") if isinstance(body, dict) else None
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("Missing 'prompt'")
-    return prompt.strip()
+    return validate_prompt(prompt, error_message="Missing 'prompt'").strip()
 
 
 def _json_error(
@@ -377,6 +381,7 @@ def _register_http_chat(
                 trigger_type="builtin_chat",
                 session_id=resolved_session_id,
                 model=resolved.model,
+                execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
             ),
         ) as span:
             try:
@@ -614,6 +619,7 @@ def _register_mcp_endpoint(
                 trigger_type="builtin_mcp",
                 session_id=None,
                 model=resolved.model,
+                execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
             ),
         ) as span:
             session_id: str | None = None
@@ -633,6 +639,7 @@ def _register_mcp_endpoint(
                     return json.dumps(
                         {"error": "Missing 'prompt'", "session_id": session_id}
                     )
+                prompt = prompt.strip()
 
                 set_agent_session_attribute(
                     span,
@@ -640,7 +647,7 @@ def _register_mcp_endpoint(
                 )
                 resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
                 result = await _run_builtin_agent(
-                    prompt.strip(),
+                    prompt,
                     resolved=resolved,
                     capabilities=capabilities,
                     session_id=resolved_session_id,
@@ -852,7 +859,9 @@ def _register_history_endpoint(
                 media_type="application/json",
             )
         # session_id becomes part of the blob path; reject anything unsafe.
-        if not _SAFE_SESSION_ID_PATTERN.match(session_id):
+        try:
+            validate_session_id(session_id)
+        except ValueError:
             return Response(
                 json.dumps({"error": "invalid session id"}),
                 status_code=400,
