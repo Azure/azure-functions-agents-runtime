@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from .._function_tool import normalize_tool
+from .._function_tool import normalize_optional_tools
 from .._tool_descriptor import ToolInput
 from ..config import ResolvedAgent, SubagentRef
 from ..config.schema import AgentConfiguration
@@ -150,20 +150,18 @@ class AgentRunner:
             instructions=instructions,
             timeout=timeout,
             deadline=effective_deadline,
-            tools=None if tools is None else tuple(map(normalize_tool, tools)),
+            tools=normalize_optional_tools(tools),
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             model=model,
             session_id=session_id,
-            sandbox_tools=None if sandbox_tools is None else tuple(map(normalize_tool, sandbox_tools)),
+            sandbox_tools=normalize_optional_tools(sandbox_tools),
             system_addendum=system_addendum,
             workflow_enabled=workflow_enabled,
             workflow_durable_client=workflow_durable_client,
             workflow_agent_slug=workflow_agent_slug,
             agent_name=agent_name,
-            web_request_tools=(
-                None if web_request_tools is None else tuple(map(normalize_tool, web_request_tools))
-            ),
+            web_request_tools=normalize_optional_tools(web_request_tools),
             agent_configuration=agent_configuration,
             subagents=subagents,
             catalog=catalog,
@@ -211,21 +209,19 @@ class AgentRunner:
             instructions=instructions,
             timeout=timeout,
             deadline=effective_deadline,
-            tools=None if tools is None else tuple(map(normalize_tool, tools)),
+            tools=normalize_optional_tools(tools),
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             model=model,
             session_id=session_id,
-            sandbox_tools=None if sandbox_tools is None else tuple(map(normalize_tool, sandbox_tools)),
+            sandbox_tools=normalize_optional_tools(sandbox_tools),
             system_addendum=system_addendum,
             workflow_enabled=workflow_enabled,
             workflow_durable_client=workflow_durable_client,
             workflow_agent_slug=workflow_agent_slug,
             agent_name=agent_name,
             display_name=display_name,
-            web_request_tools=(
-                None if web_request_tools is None else tuple(map(normalize_tool, web_request_tools))
-            ),
+            web_request_tools=normalize_optional_tools(web_request_tools),
             agent_configuration=agent_configuration,
             subagents=subagents,
             catalog=catalog,
@@ -256,10 +252,7 @@ class AgentRunner:
             resolved,
             replace(
                 capabilities,
-                filtered_user_tools=(
-                    None if capabilities.filtered_user_tools is None
-                    else tuple(map(normalize_tool, capabilities.filtered_user_tools))
-                ),
+                filtered_user_tools=normalize_optional_tools(capabilities.filtered_user_tools),
             ),
             task,
             timeout=timeout,

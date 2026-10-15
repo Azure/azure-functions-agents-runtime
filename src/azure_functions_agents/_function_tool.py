@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from functools import wraps
 from typing import Any, cast, overload
@@ -11,7 +11,6 @@ from pydantic import BaseModel
 import azure_functions_agents as _package
 
 from ._tool_descriptor import (
-    NEVER_REQUIRE,
     ApprovalMode,
     ToolDescriptor,
     ToolInput,
@@ -85,7 +84,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     schema: None = None,
-    approval_mode: ApprovalMode | None = None,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> ToolDescriptor: ...
 
 
@@ -96,7 +95,7 @@ def tool[SchemaT: BaseModel](
     name: str | None = None,
     description: str | None = None,
     schema: type[SchemaT],
-    approval_mode: ApprovalMode | None = None,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> ToolDescriptor: ...
 
 
@@ -106,7 +105,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     schema: None = None,
-    approval_mode: ApprovalMode | None = None,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> Callable[[Callable[..., Any]], ToolDescriptor]: ...
 
 
@@ -116,7 +115,7 @@ def tool[SchemaT: BaseModel](
     name: str | None = None,
     description: str | None = None,
     schema: type[SchemaT],
-    approval_mode: ApprovalMode | None = None,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> Callable[[Callable[[SchemaT], Any]], ToolDescriptor]: ...
 
 
@@ -126,7 +125,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     schema: type[BaseModel] | None = None,
-    approval_mode: ApprovalMode | None = None,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> ToolDescriptor | Callable[[Callable[..., Any]], ToolDescriptor]:
     """Record a Python tool without constructing a harness SDK wrapper."""
 
@@ -142,7 +141,9 @@ def tool(
             func=wrapped,
             input_model=input_model,
             policy=ToolPolicy(
-                approval_mode=approval_mode or NEVER_REQUIRE,
+                approval_mode=(
+                    ApprovalMode.NEVER_REQUIRE if approval_mode is None else ApprovalMode(approval_mode)
+                ),
             ),
             workflow_metadata=get_workflow_tool_metadata(inner),
         )
@@ -160,6 +161,13 @@ def normalize_tool(candidate: ToolInput) -> ToolDescriptor:
     if not callable(candidate):
         raise TypeError(f"Tool '{tool_name(candidate)}' must be callable.")
     return tool(candidate)
+
+
+def normalize_optional_tools(
+    candidates: Sequence[ToolInput] | None,
+) -> tuple[ToolDescriptor, ...] | None:
+    """Preserve discovery's None sentinel while normalizing explicit inputs."""
+    return None if candidates is None else tuple(map(normalize_tool, candidates))
 
 
 @overload

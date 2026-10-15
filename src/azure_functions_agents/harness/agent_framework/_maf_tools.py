@@ -38,7 +38,7 @@ def build_maf_tools(candidates: Sequence[ToolDescriptor]) -> list[FunctionTool]:
             description=candidate.description,
             func=_maf_callable(candidate),
             input_model=candidate.input_model or candidate.parameters(),
-            approval_mode=candidate.policy.approval_mode,
+            approval_mode=candidate.policy.approval_mode.value,
         )
         for candidate in candidates
     ]

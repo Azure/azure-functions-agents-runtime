@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError
 from datetime import date
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, get_args
+from typing import Annotated
 from uuid import UUID
 
 import pytest
@@ -13,8 +13,6 @@ from pydantic import BaseModel, Field, create_model
 
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import (
-    ALWAYS_REQUIRE,
-    NEVER_REQUIRE,
     ApprovalMode,
     ToolDescriptor,
     ToolPolicy,
@@ -22,15 +20,19 @@ from azure_functions_agents._tool_descriptor import (
 from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 
 
-def test_approval_constants_preserve_the_literal_string_contract():
-    assert {ALWAYS_REQUIRE, NEVER_REQUIRE} == set(get_args(ApprovalMode.__value__))
-    assert ALWAYS_REQUIRE == "always_require"
-    assert NEVER_REQUIRE == "never_require"
-    assert ToolPolicy().approval_mode == NEVER_REQUIRE
-    for mode in (ALWAYS_REQUIRE, NEVER_REQUIRE):
-        descriptor = tool(lambda: "ok", approval_mode=mode)
-        assert descriptor.policy.approval_mode == mode
-        assert build_maf_tools([descriptor])[0].approval_mode == mode
+@pytest.mark.parametrize("mode", list(ApprovalMode))
+@pytest.mark.parametrize("as_string", [False, True])
+def test_approval_enum_preserves_string_authoring_and_sdk_values(mode, as_string):
+    descriptor = tool(lambda: "ok", approval_mode=mode.value if as_string else mode)
+    assert descriptor.policy.approval_mode is mode
+    assert build_maf_tools([descriptor])[0].approval_mode == mode.value
+    assert ToolPolicy().approval_mode is ApprovalMode.NEVER_REQUIRE
+
+
+@pytest.mark.parametrize("mode", ["invalid", ""])
+def test_invalid_approval_mode_fails_at_authoring(mode):
+    with pytest.raises(ValueError, match="ApprovalMode"):
+        tool(lambda: "ok", approval_mode=mode)
 
 
 def test_programmatic_authored_tools_are_normalized_without_invocation():

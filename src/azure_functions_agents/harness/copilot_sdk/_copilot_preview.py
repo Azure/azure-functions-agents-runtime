@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..._function_tool import normalize_tool
-from ..._tool_descriptor import NEVER_REQUIRE, ToolDescriptor, ToolInput, tool_name
+from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput, tool_name
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...workflows.tools import build_workflow_tools
@@ -98,10 +98,10 @@ def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     prepared = tuple(map(normalize_tool, tools))
     names: set[str] = set()
     for function in prepared:
-        if function.policy.approval_mode != NEVER_REQUIRE:
+        if function.policy.approval_mode != ApprovalMode.NEVER_REQUIRE:
             raise UnsupportedCapabilityError(
                 "Copilot preview supports ordinary runtime @tool declarations only when "
-                f'approval_mode="{NEVER_REQUIRE}".'
+                f'approval_mode="{ApprovalMode.NEVER_REQUIRE.value}".'
             )
         name = tool_name(function)
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", name):

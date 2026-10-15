@@ -686,6 +686,9 @@ accepts only `name`, `description`, `schema`, and `approval_mode`; unexpected
 keyword arguments raise the normal Python `TypeError`. Authored functions and
 callable instances become runtime tool descriptors before either harness adapts
 them. Both use the same tool names, descriptions, and input schemas.
+The decorator accepts `"never_require"` and `"always_require"` approval strings
+and normalizes them to the runtime's `ApprovalMode` enum; other values raise
+`ValueError` during authoring.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. This does not enable workflow roles

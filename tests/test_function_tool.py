@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator
 from azure_functions_agents._function_tool import (
     get_workflow_tool_handler,
     get_workflow_tool_metadata,
+    normalize_optional_tools,
     normalize_tool,
     tool,
     workflow_tool,
@@ -26,6 +27,18 @@ from azure_functions_agents.harness._harness_binding import (
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution, _maf_tools
 from azure_functions_agents.harness.copilot_sdk._copilot_preview import prepare_tools
+
+
+def test_optional_tool_normalization_preserves_discovery_and_empty_sentinels():
+    assert normalize_optional_tools(None) is None
+    assert normalize_optional_tools([]) == ()
+    assert normalize_optional_tools(()) == ()
+    def lookup(value: int) -> int:
+        raise AssertionError("Normalization must not execute authored code")
+
+    [descriptor] = normalize_optional_tools([lookup])
+    assert descriptor.func is lookup
+    assert normalize_optional_tools([descriptor]) == (descriptor,)
 
 
 def test_ordinary_authoring_never_constructs_maf_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
