@@ -1,4 +1,4 @@
-"""Private Copilot-backed implementation of the bound execution facade."""
+"""App-bound Copilot execution, policy, and lazy native ownership."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from ..._observability import (
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
+    agent_run_span_name,
     start_span,
 )
 from ..._tool_descriptor import ToolDescriptor, ToolInput
@@ -28,7 +29,7 @@ from ...discovery.mcp import MCPServerDescriptor
 from ...discovery.skills import SkillDescriptor
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
-from .._agent_runner import AgentFunctionTool, AgentRunner
+from .._agent_runner import AgentFunctionTool
 from .._harness_binding import (
     AppHarness,
     HarnessRequest,
@@ -37,7 +38,6 @@ from .._harness_binding import (
     SessionHistoryUnavailableError,
     UnsupportedCapabilityError,
     agent_run_attributes_for_harness,
-    agent_run_span_name_for_harness,
 )
 from .._stream_events import (
     ContentEvent,
@@ -46,13 +46,16 @@ from .._stream_events import (
     StreamEvent,
     StreamTruncatedEvent,
 )
-from . import _copilot_execution, _copilot_preview
+from . import _copilot_preview
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
 
     from ...runner import AgentResult
     from ...workflows.schema import WorkflowPlanPolicy
+    from ._copilot_providers import CopilotProvider
+    from ._copilot_runtime import CopilotRuntime
+    from ._copilot_session_identity import StorageRoute
 
 
 _STREAM_EVENT_QUEUE_CAPACITY = 128
@@ -92,9 +95,32 @@ class _StreamEventQueue:
             await self._available.wait()
 
 
-class _CopilotHarnessRunner:
-    def __init__(self, harness: AppHarness) -> None:
+class CopilotRunner:
+    auto_record_exceptions = False
+    include_raw_tool_calls_in_sensitive_logs = False
+    session_history_unavailable_message = (
+        "Copilot preview does not support transcript replay. Native state is separate "
+        "from MAF history."
+    )
+
+    def __init__(
+        self,
+        harness: AppHarness,
+        *,
+        storage_root: Path,
+        default_model: str,
+        provider: CopilotProvider,
+        session_storage: StorageRoute,
+    ) -> None:
         self._harness = harness
+        self.storage_root = storage_root
+        self.default_model = default_model
+        self.provider = provider
+        self.session_storage = session_storage
+        self.runtime: CopilotRuntime | None = None
+
+    def validate_agent(self, resolved: ResolvedAgent, capabilities: AgentCapabilities) -> None:
+        _copilot_preview.validate_copilot_agent(self._harness, resolved, capabilities)
 
     async def run_agent(
         self,
@@ -125,6 +151,8 @@ class _CopilotHarnessRunner:
         event_sink: Callable[[StreamEvent], None] | None = None,
         session_state: HarnessSessionState | None = None,
     ) -> AgentResult:
+        from . import _copilot_execution
+
         del timeout
 
         configuration = agent_configuration or AgentConfiguration()
@@ -137,7 +165,7 @@ class _CopilotHarnessRunner:
             raise UnsupportedCapabilityError(
                 "Copilot workflow policy cannot be supplied without enabling workflows."
             )
-        resolved_model = model or self._harness.default_model
+        resolved_model = model or self.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
 
@@ -269,7 +297,7 @@ class _CopilotHarnessRunner:
                     events.finish()
 
             with start_span(
-                agent_run_span_name_for_harness(self._harness, agent_name=agent_name),
+                agent_run_span_name(agent_name=agent_name),
                 lifecycle_stage=LifecycleStage.AGENT_RUN,
                 record_exception=False,
                 attributes=agent_run_attributes_for_harness(
@@ -338,13 +366,15 @@ class _CopilotHarnessRunner:
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str:
+        from . import _copilot_execution
+
         _copilot_preview.validate_configuration(resolved.agent_configuration)
-        resolved_model = resolved.model or self._harness.default_model
+        resolved_model = resolved.model or self.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
         session_id = uuid.uuid4().hex
         with start_span(
-            agent_run_span_name_for_harness(self._harness, agent_name=resolved.slug),
+            agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=False,
             attributes={
@@ -399,16 +429,10 @@ class _CopilotHarnessRunner:
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
         del agent_slug, session_id
-        message = self._harness.adapter.session_history_unavailable_message
-        raise SessionHistoryUnavailableError(message or "Session history is unavailable.")
+        raise SessionHistoryUnavailableError(self.session_history_unavailable_message)
 
 
 def _validate_session_id(session_id: str | None) -> str | None:
     from ...runner import _validate_session_id as validate_session_id
 
     return validate_session_id(session_id)
-
-
-def create_runner(harness: AppHarness) -> AgentRunner:
-    """Create the Copilot-backed bound execution facade for one app binding."""
-    return AgentRunner(_CopilotHarnessRunner(harness))

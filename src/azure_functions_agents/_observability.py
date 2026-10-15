@@ -64,7 +64,7 @@ ATTR_AGENT_DISPLAY_NAME = "af.agent.display_name"
 ATTR_AGENT_TRIGGER_TYPE = "af.agent.trigger_type"
 ATTR_AGENT_SESSION_ID = "af.agent.session_id"
 ATTR_AGENT_MODEL = "af.agent.model"
-ATTR_HARNESS = "af.harness"
+ATTR_AGENT_HARNESS = "af.agent.harness"
 ATTR_AGENT_OUTCOME = "af.agent.outcome"
 ATTR_AGENT_TOOL_CALL_COUNT = "af.agent.tool_call_count"
 ATTR_AGENT_TOOL_ERROR_COUNT = "af.agent.tool_error_count"
@@ -222,7 +222,7 @@ def agent_run_attributes(
         ATTR_AGENT_TRIGGER_TYPE: trigger_type,
         ATTR_AGENT_SESSION_ID: session_id,
         ATTR_AGENT_MODEL: model,
-        ATTR_HARNESS: harness,
+        ATTR_AGENT_HARNESS: harness,
     }
 
 

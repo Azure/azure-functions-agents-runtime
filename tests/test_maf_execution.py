@@ -18,6 +18,7 @@ from agent_framework import (
     ChatMiddlewareLayer,
     ChatResponse,
     Content,
+    FunctionInvocationLayer,
     Message,
     UsageDetails,
 )
@@ -251,6 +252,65 @@ class _RecordingChatClient(ChatMiddlewareLayer, BaseChatClient):
             return ChatResponse(messages=[Message("assistant", ["reply"])])
 
         return response()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authored_kind", ["native", "function", "callable"])
+async def test_real_maf_loop_executes_user_owned_tools(authored_kind, monkeypatch, tmp_path):
+    from agent_framework import FunctionTool
+
+    effects = []
+
+    def lookup(value: str) -> str:
+        effects.append(value)
+        return f"found:{value}"
+
+    class Lookup:
+        __name__ = name = "lookup"
+        description = "Authored callable"
+
+        def __call__(self, value: str) -> str:
+            return lookup(value)
+
+    authored = (
+        FunctionTool(name="lookup", description="Native lookup", func=lookup)
+        if authored_kind == "native"
+        else lookup if authored_kind == "function"
+        else Lookup()
+    )
+
+    class ToolCallingClient(FunctionInvocationLayer, BaseChatClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def _inner_get_response(self, *, messages, stream, options, **kwargs):
+            assert not stream
+            self.calls.append(messages)
+
+            async def response():
+                if len(self.calls) == 1:
+                    return ChatResponse(messages=[Message("assistant", [
+                        Content("function_call", call_id="call", name="lookup",
+                                arguments={"value": "ok"}),
+                    ])])
+                return ChatResponse(messages=[Message("assistant", ["done"])])
+
+            return response()
+
+    client = ToolCallingClient()
+    monkeypatch.setattr(maf, "build_chat_client", lambda model: (client, InferenceTarget()))
+    monkeypatch.setattr(maf, "_build_history_provider", lambda slug: None)
+    result = await runner.run_agent(
+        "lookup", tools=[authored], mcp_tools=[], timeout=5,
+        _harness=AppHarness(HarnessKind.MAF, tmp_path),
+    )
+
+    assert effects == ["ok"]
+    assert result.content == "done"
+    assert result.tool_calls[0]["tool_name"] == "lookup"
+    assert result.tool_calls[0]["success"] is True
+    assert "found:ok" in str(result.tool_calls[0]["result"])
 
 
 @pytest.mark.asyncio

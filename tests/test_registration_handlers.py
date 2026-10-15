@@ -934,8 +934,9 @@ def test_sensitive_http_log_payload_restores_maf_tool_calls_only(
 
 
 @pytest.mark.parametrize("entrypoint", ["http", "timer"])
+@pytest.mark.parametrize("harness_kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 def test_agent_ingress_attaches_harness_events_to_run_span(
-    monkeypatch: Any, caplog: Any, entrypoint: str, tmp_path: Path
+    monkeypatch: Any, caplog: Any, entrypoint: str, tmp_path: Path, harness_kind: HarnessKind
 ) -> None:
     import logging
 
@@ -990,7 +991,15 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
         fake_run_agent,
     )
     resolved = _resolved_agent(response_schema=None)
-    capabilities = AgentCapabilities(_harness=make_copilot_harness(tmp_path))
+    capabilities = AgentCapabilities(
+        _harness=make_copilot_harness(tmp_path)
+        if harness_kind is HarnessKind.COPILOT
+        else AppHarness(HarnessKind.MAF, tmp_path)
+    )
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT",
+        "false" if harness_kind is HarnessKind.COPILOT else "true",
+    )
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         if entrypoint == "http":
             handler = make_http_agent_handler(resolved, capabilities)
@@ -1002,16 +1011,17 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
 
     [span] = exporter.get_finished_spans()
     assert span.name == "agent.run resolved-agent-slug"
-    assert span.attributes["af.harness"] == "copilot"
+    assert span.attributes["af.agent.harness"] == harness_kind.value
+    assert "af.harness" not in span.attributes
     assert "gen_ai.operation.name" not in span.attributes
     assert span.attributes["af.agent.session_id"]
     [usage_event] = [
         event for event in span.events if event.name == "af.agent.model.usage"
     ]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 2
-    assert "private" not in caplog.text
+    assert ("private" in caplog.text) is (harness_kind is HarnessKind.MAF)
     assert '"response": "ok"' in caplog.text
-    assert '"tool_calls"' not in caplog.text
+    assert ('"tool_calls"' in caplog.text) is (harness_kind is HarnessKind.MAF)
 
 
 @pytest.mark.parametrize("entrypoint", ["http", "timer"])

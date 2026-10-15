@@ -26,8 +26,7 @@ from ..._observability import (
 )
 from .._stream_events import ToolEndEvent, ToolStartEvent
 from ._copilot_observability import tool_span_attributes
-from ._copilot_tool_validation import is_native_tool_result_object
-from ._tool_result import tool_result_text as _ordinary_tool_result_text
+from ._tool_result import tool_result_text as tool_result_text
 
 if TYPE_CHECKING:
     from copilot.session_events import ToolExecutionCompleteData, ToolExecutionStartData
@@ -55,18 +54,6 @@ def _timestamp_ns(value: datetime | None) -> int | None:
         (delta.days * _SECONDS_PER_DAY + delta.seconds) * _NS_PER_SECOND
         + delta.microseconds * _NS_PER_MICROSECOND
     )
-
-
-def _reject_harness_result(value: object) -> None:
-    if is_native_tool_result_object(value):
-        raise TypeError(
-            "Copilot custom tools must return ordinary Python values, not harness SDK objects."
-        )
-
-
-def tool_result_text(result: object) -> str:
-    """Preserve ordinary text, empty, and JSON tool-result representations."""
-    return _ordinary_tool_result_text(result, validate_result=_reject_harness_result)
 
 
 @dataclass

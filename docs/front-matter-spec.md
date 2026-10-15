@@ -676,18 +676,21 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools use the runtime's `@tool` or local public functions in
-`tools/*.py`. Discovery selects the first candidate per module, preferring
-runtime `@tool` descriptors. Raw `FunctionTool`, SDK decorators/objects, and
-undecorated programmatic functions outside discovery are ignored with a
-sanitized warning. Runtime `@tool` accepts only its portable arguments
-(`name`, `description`, `schema`, and `approval_mode`); unexpected keyword
-arguments are warned and ignored instead of being enforced or forwarded. For
-example, `max_invocations` is ignored in both harnesses.
+Normal custom tools may be runtime `@tool` descriptors, native SDK tools, or
+local public functions in `tools/*.py`. Discovery selects one tool per module:
+runtime descriptors first, then named objects with public `name`/`description`
+metadata, then the first local public function. It does not invoke authored
+functions or expose imported functions and unrelated globals.
+Programmatic tools retain supplied objects/callables. The selected SDK determines
+compatibility; the runtime does not reject SDK origins, silently drop inputs,
+or guarantee cross-harness portability. Runtime schemas and capability
+authorization remain enforced.
+The convenience `@tool` accepts `name`, `description`, `schema`, and
+`approval_mode`; unknown keywords raise ordinary Python errors. Use your SDK's
+own tool objects or decorators for native settings such as `max_invocations`.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
-tasks; either decorator order is supported. This does not enable workflow roles
-in the Copilot preview. Use `_`-prefixed helpers for functions that should be
+tasks; either decorator order is supported. Use `_`-prefixed helpers for functions that should be
 neither normal tools nor workflow tools.
 
 `workflows.exclude` filters only that agent's workflow Activity targets; it does

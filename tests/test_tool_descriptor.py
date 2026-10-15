@@ -18,32 +18,23 @@ from azure_functions_agents.harness.agent_framework._maf_tools import (
 )
 
 
-def test_unsupported_programmatic_tools_are_ignored_without_inspection(caplog):
+def test_programmatic_authored_tools_are_retained_without_inspection():
     from agent_framework import FunctionTool
 
-    from azure_functions_agents._tool_descriptor import describe_tools
     from azure_functions_agents.registration.capabilities import AgentCapabilities
 
     class Opaque:
         def __getattribute__(self, name):
-            raise AssertionError("Unsupported tool attributes must not be inspected")
+            raise AssertionError("Registration must not inspect SDK state")
 
-        def __call__(self, **kwargs):
-            raise AssertionError("Unsupported tool must not execute")
+    def authored(value: str) -> str:
+        raise AssertionError("Registration must not execute authored code")
 
-    @tool
-    def allowed() -> str:
-        return "ok"
+    native = FunctionTool(name="native", func=authored)
+    candidates = (native, authored, Opaque())
+    capabilities = AgentCapabilities.create(filtered_user_tools=candidates)
 
-    def undecorated() -> str:
-        return "ignored"
-
-    candidates = [FunctionTool(name="private-sentinel", func=undecorated), Opaque(), undecorated]
-    assert describe_tools(candidates) == ()
-    assert describe_tools([*candidates, allowed]) == (allowed,)
-    assert AgentCapabilities.create(filtered_user_tools=candidates).filtered_user_tools == ()
-    assert "Ignoring unsupported custom tool" in caplog.text
-    assert "private-sentinel" not in caplog.text
+    assert capabilities.filtered_user_tools == candidates
 
 
 class _Choice(Enum):

@@ -21,6 +21,8 @@ from .._observability import (
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
+    agent_run_span_name,
+    set_agent_session_attribute,
     start_span,
 )
 from .._session_id import SESSION_ID_PATTERN
@@ -32,11 +34,9 @@ from ..harness._harness_binding import (
     HarnessSessionState,
     SessionHistoryUnavailableError,
     agent_run_attributes_for_harness,
-    agent_run_span_name_for_harness,
     auto_record_exceptions_for_harness,
     bind_harness,
     get_harness,
-    set_agent_session_attribute_for_harness,
 )
 from ..harness._history_identity import validate_agent_slug
 from ..harness._session_storage import SessionStorageError
@@ -367,7 +367,7 @@ def _register_http_chat(
         # `af.agent.tool_error_count`, which folds in delegate errors) that
         # `make_agent_handler`/`make_http_agent_handler` already provide.
         with start_span(
-            agent_run_span_name_for_harness(harness, agent_name=resolved.slug),
+            agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=auto_record_exceptions_for_harness(harness),
             attributes=agent_run_attributes_for_harness(
@@ -604,7 +604,7 @@ def _register_mcp_endpoint(
         # runtime invocation span for it — open one here to get the same
         # run-level attributes (including B3's `af.agent.tool_error_count`).
         with start_span(
-            agent_run_span_name_for_harness(harness, agent_name=resolved.slug),
+            agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=auto_record_exceptions_for_harness(harness),
             attributes=agent_run_attributes_for_harness(
@@ -634,8 +634,7 @@ def _register_mcp_endpoint(
                         {"error": "Missing 'prompt'", "session_id": session_id}
                     )
 
-                set_agent_session_attribute_for_harness(
-                    harness,
+                set_agent_session_attribute(
                     span,
                     session_id=session_id,
                 )
@@ -659,8 +658,7 @@ def _register_mcp_endpoint(
                 # with it (N1) instead of leaving the pre-call `None` in place,
                 # which otherwise left this attribute permanently unset for
                 # every caller-omitted-session-id turn.
-                set_agent_session_attribute_for_harness(
-                    harness,
+                set_agent_session_attribute(
                     span,
                     session_id=resolved_session_id,
                 )
@@ -845,7 +843,7 @@ def _register_history_endpoint(
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
-        if message := selected_harness.adapter.session_history_unavailable_message:
+        if message := get_agent_runner(selected_harness).session_history_unavailable_message:
             return _json_error(message, status_code=501)
         session_id = _request_header_value(req, _SESSION_ID_HEADER) or ""
         if not session_id:

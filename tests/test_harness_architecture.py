@@ -63,7 +63,11 @@ def _concrete_import_violations(relative: str, source: str) -> list[str]:
 
 def _concrete_name_violations(relative: str, source: str) -> list[str]:
     allowed_names = {
-        "harness/_harness_binding.py": {"HarnessKind", "MafHarnessAdapter", "MAF", "COPILOT"},
+        "config/env.py": {"ENABLE_COPILOT"},
+        "harness/_harness_binding.py": {
+            "HarnessKind", "MafRunner", "MAF", "COPILOT", "select_copilot_harness",
+            "ENABLE_COPILOT",
+        },
     }
     tree = ast.parse(source, filename=relative)
     violations: list[str] = []
@@ -78,7 +82,11 @@ def _concrete_name_violations(relative: str, source: str) -> list[str]:
         for name, line in names:
             if name in allowed_names.get(relative, set()):
                 continue
-            if "Copilot" in name or name.startswith("Maf") or name in {"MAF", "COPILOT"}:
+            if (
+                "Copilot" in name
+                or name.startswith("Maf")
+                or {"maf", "copilot"}.intersection(name.casefold().split("_"))
+            ):
                 violations.append(f"{relative}:{line}: {name}")
     return violations
 
@@ -171,8 +179,10 @@ def test_shared_harness_binding_exposes_neutral_state_only() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.ClassDef)
     }
-    assert {"AppHarness", "HarnessAdapter", "HarnessRequest"} <= class_names
+    assert {"AppHarness", "HarnessRequest"} <= class_names
     assert {
+        "HarnessAdapter",
+        "MafHarnessAdapter",
         "CopilotProvider",
         "CopilotRuntime",
         "StorageRoute",
@@ -190,6 +200,13 @@ def test_shared_harness_binding_exposes_neutral_state_only() -> None:
         for target in [statement.target]
     ]
     assert fields == ["guard", "runner"]
+
+    runner_classes = {
+        node.name for node in ast.walk(_tree("harness/_agent_runner.py"))
+        if isinstance(node, ast.ClassDef)
+    }
+    assert runner_classes == {"AgentRunner"}
+    assert "__post_init__" not in _source("harness/_harness_binding.py")
 
 
 def test_shared_registration_has_no_harness_kind_policy_branches() -> None:
@@ -232,6 +249,15 @@ def test_neutrality_scanners_catch_review_examples() -> None:
     assert _concrete_prose_violations("runner.py", '"""MAF-specific behavior."""\n')
 
 
+def test_neutrality_scanner_catches_lowercase_concrete_identifiers() -> None:
+    for source in (
+        "def run_copilot_agent():\n    pass\n",
+        "copilot_provider = None\n",
+        "runner.run_maf_agent()\n",
+    ):
+        assert _concrete_name_violations("runner.py", source)
+
+
 def test_neutrality_scanners_allow_sanctioned_boundaries() -> None:
     assert _concrete_string_violations(
         "config/loader.py",
@@ -241,4 +267,13 @@ def test_neutrality_scanners_allow_sanctioned_boundaries() -> None:
     assert _concrete_import_violations(
         "harness/_harness_binding.py",
         "from .copilot_sdk._copilot_preview import select_copilot_harness\n",
+    ) == []
+    assert _concrete_name_violations(
+        "harness/_harness_binding.py",
+        "from .copilot_sdk._copilot_preview import select_copilot_harness\n"
+        "select_copilot_harness(root)\n"
+        "FLAG = EnvVar.ENABLE_COPILOT\n",
+    ) == []
+    assert _concrete_name_violations(
+        "config/env.py", 'ENABLE_COPILOT = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"\n',
     ) == []

@@ -24,7 +24,7 @@ from ._observability import (
 )
 from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
-from ._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ._tool_descriptor import ToolDescriptor, ToolInput
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
@@ -311,12 +311,10 @@ def _request(
     deadline: float,
     session_state: HarnessSessionState | None = None,
 ) -> HarnessRequest:
-    descriptors = describe_tools(
-        (
-            *(discover_user_tools(harness.app_root).tools if tools is None else tools),
-            *(sandbox_tools or ()),
-            *(web_request_tools or ()),
-        )
+    authored_tools = (
+        *(discover_user_tools(harness.app_root).tools if tools is None else tools),
+        *(sandbox_tools or ()),
+        *(web_request_tools or ()),
     )
     servers = (
         tuple(discover_mcp_servers(harness.app_root).servers.values())
@@ -344,7 +342,7 @@ def _request(
         session_id=validated_id or uuid.uuid4().hex,
         new_session=validated_id is None or session_is_new,
         model=model or harness.default_model or "",
-        tools=descriptors,
+        tools=authored_tools,
         mcp_servers=servers,
         skills=approved,
         skill_catalog=_merge_skill_descriptors(discovered, approved),

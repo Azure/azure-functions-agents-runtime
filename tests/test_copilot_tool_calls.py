@@ -92,8 +92,12 @@ def test_ordinary_results_preserve_text_and_json_shape(value, expected):
     assert tool_result_text(value) == expected
 
 
-def test_harness_sdk_results_are_rejected_instead_of_flattened():
+def test_sdk_results_use_the_same_python_conversion_as_other_values():
     from agent_framework import Content
+
+    from azure_functions_agents.harness.copilot_sdk._tool_result import (
+        tool_result_text as ordinary_conversion,
+    )
 
     values = [
         Content.from_text("SDK-owned content"),
@@ -102,8 +106,7 @@ def test_harness_sdk_results_are_rejected_instead_of_flattened():
         {"nested": ToolResult(text_result_for_llm="SDK-owned content")},
     ]
     for value in values:
-        with pytest.raises(TypeError, match="SDK objects"):
-            tool_result_text(value)
+        assert tool_result_text(value) == ordinary_conversion(value)
 
 
 def _start(call_id="native-1", name="skill", arguments=None, **kwargs):

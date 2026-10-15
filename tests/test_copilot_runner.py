@@ -294,7 +294,7 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
         return leaf_result
 
     monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fake_leaf_execution))
-    leaf_runner = _copilot_runner._CopilotHarnessRunner(preview)
+    leaf_runner = copilot_state(preview)
 
     async def delegate(task: str) -> str:
         return await leaf_runner.run_leaf_agent_task(
@@ -335,7 +335,8 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     assert leaf_span.parent.span_id == tool_span.context.span_id
     assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
     assert leaf_span.attributes["af.agent.outcome"] == "success"
-    assert leaf_span.attributes["af.harness"] == "copilot"
+    assert leaf_span.attributes["af.agent.harness"] == "copilot"
+    assert "af.harness" not in leaf_span.attributes
     assert "gen_ai.operation.name" not in leaf_span.attributes
     assert leaf_span.attributes["af.agent.session_id"] == leaf_request.session_id
     [usage_event] = [
@@ -373,7 +374,7 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
         )
 
     monkeypatch.setattr(_copilot_execution, "run", fake_execution)
-    harness_runner = _copilot_runner._CopilotHarnessRunner(preview)
+    harness_runner = copilot_state(preview)
     events = [
         json.loads(chunk.removeprefix("data: ").strip())
         async for chunk in harness_runner.run_agent_stream(
@@ -390,7 +391,8 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
     assert [event["type"] for event in events] == ["delta", "done"], events
     [span] = exporter.get_finished_spans()
     assert span.name == "agent.run sse_agent"
-    assert span.attributes["af.harness"] == "copilot"
+    assert span.attributes["af.agent.harness"] == "copilot"
+    assert "af.harness" not in span.attributes
     assert span.attributes["af.agent.session_id"] == "sse-session"
     assert "gen_ai.operation.name" not in span.attributes
     [usage_event] = [
@@ -611,7 +613,7 @@ async def test_workflow_leaf_failure_records_exception_once_without_changing_usa
         raise RuntimeError("private session-open detail")
 
     monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fail_with_usage))
-    leaf_runner = _copilot_runner._CopilotHarnessRunner(preview)
+    leaf_runner = copilot_state(preview)
     parent = tracer.start_span("agent.run workflow")
 
     with (
@@ -668,7 +670,7 @@ async def test_stream_failure_records_exception_once_without_changing_sse_error_
         raise RuntimeError("private stream failure")
 
     monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fail_with_usage))
-    leaf_runner = _copilot_runner._CopilotHarnessRunner(preview)
+    leaf_runner = copilot_state(preview)
 
     chunks = [
         chunk
@@ -722,7 +724,7 @@ async def test_delegate_leaf_cancellation_closes_run_span_without_error_status(
         raise asyncio.CancelledError("private cancellation detail")
 
     monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=cancel_with_usage))
-    leaf_runner = _copilot_runner._CopilotHarnessRunner(preview)
+    leaf_runner = copilot_state(preview)
     parent = tracer.start_span("agent.run coordinator")
 
     with trace.use_span(parent, end_on_exit=True), pytest.raises(asyncio.CancelledError):

@@ -50,12 +50,22 @@ shared configuration does not initialize or probe the other implementation.
 Runtime-owned telemetry keeps the same invocation surface under either
 harness. Direct, streaming, built-in chat, inbound MCP, non-HTTP, delegate, and
 leaf runtime spans use `agent.run {slug}` plus the shared `af.agent.*`
-attributes and `af.harness=maf|copilot`. The runtime does not create a
+attributes and `af.agent.harness=maf|copilot`. The runtime does not create a
 separate harness span. Copilot fills only the SDK facts it actually observes:
 tool spans use `execute_tool {name}` when a wrapper or matched native event
 exists, usage arrives as `af.agent.model.usage` events with exact
 `gen_ai.usage.*` fields, and unavailable model timing, provider hierarchy, or
 native child spans are not fabricated.
+
+## Authored Python tools
+
+Authored Python tools may use the runtime `@tool`, ordinary callables, or native
+Copilot `Tool`/`define_tool` declarations. The host preserves native metadata and
+`ToolResult` semantics, including failure status and binary results. Compatible
+tools execute; incompatible inputs and conversion errors fail without omission,
+origin-based rejection, or MAF fallback. No cross-harness compatibility is
+promised. Native permission settings remain SDK-owned; noninteractive execution
+requires appropriate authored settings, not a broad permission grant.
 
 ## MCP and scoped skills
 

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from ..._logger import logger
 from ..._mcp_auth import materialize_mcp_headers
+from ..._tool_descriptor import tool_name
 from ._copilot_preview import CopilotPreviewError
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ _SKILL_TOOLS = ("builtin:skill", "builtin:view", "builtin:bash")
 
 def available_tools(request: HarnessRequest) -> list[str]:
     """Allow only configured sources and the approved native skill helpers."""
-    selected = [f"custom:{tool.name}" for tool in request.tools]
+    selected = [f"custom:{tool_name(tool)}" for tool in request.tools]
     if request.mcp_servers:
         # The SDK selector addresses the MCP source, not a guessed server/name prefix.
         selected.append("mcp:*")

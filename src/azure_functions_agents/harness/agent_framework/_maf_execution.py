@@ -20,10 +20,11 @@ from ..._observability import (
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
+    agent_run_span_name,
     gen_ai_agent_name,
     start_span,
 )
-from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ..._tool_descriptor import ToolCallable, ToolDescriptor, ToolInput
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
 from ...config.paths import get_app_root
@@ -41,7 +42,6 @@ from .._harness_binding import (
     HarnessRequest,
     HarnessSessionState,
     agent_run_attributes_for_harness,
-    agent_run_span_name_for_harness,
 )
 from .._history_identity import validate_agent_slug
 from .._provider_config import InferenceTarget
@@ -56,13 +56,12 @@ if TYPE_CHECKING:
         AgentResponseUpdate,
         AgentSession,
         Content,
-        FunctionTool,
         HistoryProvider,
-        MCPStreamableHTTPTool,
         Message,
         ResponseStream,
         RoleLiteral,
         SupportsChatGetResponse,
+        ToolTypes,
         UsageDetails,
     )
     from azure.durable_functions import DurableFunctionsClient
@@ -71,7 +70,7 @@ if TYPE_CHECKING:
 
     from ...workflows.schema import WorkflowPlanPolicy
 type AgentFunctionTool = ToolInput
-type AgentTool = FunctionTool | MCPStreamableHTTPTool
+type AgentTool = ToolTypes | ToolCallable
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
 type _FunctionArguments = str | Mapping[str, Any] | None
 type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
@@ -287,9 +286,9 @@ def assemble_agent_inputs(
 ) -> tuple[list[AgentTool], str | None]:
     root = app_root or get_app_root()
     descriptors = [
-        *describe_tools(discover_user_tools(root).tools if tools is None else tools),
-        *describe_tools(sandbox_tools or ()),
-        *describe_tools(web_request_tools or ()),
+        *(discover_user_tools(root).tools if tools is None else tools),
+        *(sandbox_tools or ()),
+        *(web_request_tools or ()),
     ]
     if workflow_enabled:
         from ...workflows.tools import build_workflow_tools
@@ -314,7 +313,7 @@ def assemble_agent_inputs(
 
         resolved_tools.extend(build_maf_mcp_tools(servers))
     if delegate_tools:
-        resolved_tools.extend(build_maf_tools(describe_tools(delegate_tools)))
+        resolved_tools.extend(build_maf_tools(delegate_tools))
     effective = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:
         effective = (effective or "") + system_addendum
@@ -325,7 +324,7 @@ def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
     agent_instructions: str | None,
-    tools: Sequence[AgentTool | ToolDescriptor],
+    tools: Sequence[ToolInput],
     skill_paths: Sequence[Path] | None,
     agent_name: str | None,
     history_provider: HistoryProvider | None,
@@ -334,10 +333,7 @@ def _build_role_agent(
     """Build one conservatively configured MAF harness agent for any role."""
     from agent_framework import SkillsProvider, create_harness_agent
 
-    adapted_tools = [
-        build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
-        for candidate in tools
-    ]
+    adapted_tools = build_maf_tools(tools)
     skills_provider = (
         SkillsProvider.from_paths(
             list(skill_paths),
@@ -791,7 +787,7 @@ async def run_stream(
         yield _sse_frame({"type": "session", "session_id": resolved_id})
 
     with start_span(
-        agent_run_span_name_for_harness(harness, agent_name=agent_name),
+        agent_run_span_name(agent_name=agent_name),
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes=agent_run_attributes_for_harness(
             harness,

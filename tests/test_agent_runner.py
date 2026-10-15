@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -97,7 +98,7 @@ def test_get_agent_runner_caches_per_binding_resource_cell(monkeypatch: pytest.M
     module = ModuleType("azure_functions_agents.harness.agent_framework._maf_runner")
     first = object()
     create_runner = Mock(return_value=first)
-    module.create_runner = create_runner
+    module.MafRunner = create_runner
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
@@ -105,6 +106,18 @@ def test_get_agent_runner_caches_per_binding_resource_cell(monkeypatch: pytest.M
     assert _agent_runner.get_agent_runner(harness) is first
     assert _agent_runner.get_agent_runner(harness) is first
     create_runner.assert_called_once_with(harness)
+
+
+def test_concurrent_runner_construction_is_once_per_binding(tmp_path):
+    selected = object()
+    factory = Mock(return_value=selected)
+    harness = AppHarness(HarnessKind.MAF, tmp_path, factory)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        runners = list(pool.map(_agent_runner.get_agent_runner, [harness] * 32))
+
+    assert all(actual is selected for actual in runners)
+    factory.assert_called_once_with(harness)
 
 
 def test_get_agent_runner_keeps_same_root_clones_independent(
@@ -118,7 +131,7 @@ def test_get_agent_runner_keeps_same_root_clones_independent(
         created.append(runner_object)
         return runner_object
 
-    module.create_runner = create_runner
+    module.MafRunner = create_runner
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
     original = AppHarness(HarnessKind.MAF, Path.cwd())
@@ -406,10 +419,9 @@ def test_real_facades_keep_same_root_app_and_clone_ownership_independent(kind, t
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "false" if kind is HarnessKind.COPILOT else "true")
 
     assert len({id(facade) for facade in facades}) == 3
-    assert len({id(facade._backend) for facade in facades}) == 3
     for app, facade in zip((first, second, clone), facades, strict=True):
         assert _agent_runner.get_agent_runner(app) is facade
         assert app._resources.runner is facade
-        assert facade._backend._harness is app
+        assert facade._harness is app
         if app.name is HarnessKind.COPILOT:
             assert copilot_state(app).runtime is None

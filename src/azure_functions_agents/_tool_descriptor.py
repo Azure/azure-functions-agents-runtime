@@ -5,21 +5,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MethodType
-from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 import azure_functions_agents as _package
 
-from ._logger import logger
-
 type ApprovalMode = Literal["always_require", "never_require"]
 type ToolCallable = Callable[..., Any]
 type ToolInput = object
-type ToolObjectPredicate = Callable[[object], bool]
 
 _JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
     "string": str,
@@ -30,13 +27,6 @@ _JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
     "object": dict,
     "null": type(None),
 }
-_HARNESS_OBJECT_PREDICATES: list[ToolObjectPredicate] = []
-
-
-def register_harness_object_predicate(predicate: ToolObjectPredicate) -> None:
-    """Register an adapter-owned SDK object recognizer."""
-    if predicate not in _HARNESS_OBJECT_PREDICATES:
-        _HARNESS_OBJECT_PREDICATES.append(predicate)
 
 
 def _parameter_type_matches(value: Any, kind: str) -> bool:
@@ -222,23 +212,9 @@ class ToolDescriptor:
         return self
 
 
-def is_harness_object(candidate: object) -> bool:
-    """Recognize adapter-owned values without inspecting their attributes."""
-    return any(predicate(candidate) for predicate in _HARNESS_OBJECT_PREDICATES)
-
-
-def warn_unsupported_tool() -> None:
-    logger.warning(
-        "Ignoring unsupported custom tool; use the runtime @tool decorator "
-        "or a local public function in tools/."
-    )
-
-
-def describe_tools(candidates: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
-    tools: list[ToolDescriptor] = []
-    for candidate in candidates:
-        if issubclass(type(candidate), ToolDescriptor):
-            tools.append(cast(ToolDescriptor, candidate))
-        else:
-            warn_unsupported_tool()
-    return tuple(tools)
+def tool_name(candidate: ToolInput) -> str:
+    """Read public tool metadata without interpreting the implementation."""
+    name = getattr(candidate, "name", None) or getattr(candidate, "__name__", None)
+    if name is None and callable(candidate):
+        name = type(candidate).__name__
+    return str(name or "")

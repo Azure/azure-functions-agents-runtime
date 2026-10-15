@@ -6,12 +6,9 @@ import inspect
 from collections.abc import Sequence
 from typing import Any
 
-from agent_framework import FunctionTool
+from agent_framework import FunctionTool, ToolTypes
 
-from ..._tool_descriptor import ToolCallable, ToolDescriptor
-from ._maf_tool_validation import register_maf_tool_predicate
-
-register_maf_tool_predicate()
+from ..._tool_descriptor import ToolCallable, ToolDescriptor, ToolInput
 
 
 def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
@@ -33,15 +30,18 @@ def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
     return synchronous
 
 
-def build_maf_tools(descriptors: Sequence[ToolDescriptor]) -> list[FunctionTool]:
-    """Adapt neutral runtime tool descriptors into MAF FunctionTool instances."""
-    tools: list[FunctionTool] = []
-    for descriptor in descriptors:
-        tools.append(FunctionTool(
-            name=descriptor.name,
-            description=descriptor.description,
-            func=_maf_callable(descriptor),
-            input_model=descriptor.input_model or descriptor.parameters(),
-            approval_mode=descriptor.policy.approval_mode,
-        ))
+def build_maf_tools(candidates: Sequence[ToolInput]) -> list[ToolTypes | ToolCallable]:
+    """Adapt runtime descriptors and leave authored inputs to MAF."""
+    tools: list[ToolTypes | ToolCallable] = []
+    for candidate in candidates:
+        if isinstance(candidate, ToolDescriptor):
+            tools.append(FunctionTool(
+                name=candidate.name,
+                description=candidate.description,
+                func=_maf_callable(candidate),
+                input_model=candidate.input_model or candidate.parameters(),
+                approval_mode=candidate.policy.approval_mode,
+            ))
+        else:
+            tools.append(candidate)
     return tools

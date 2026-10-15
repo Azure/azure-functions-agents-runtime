@@ -62,8 +62,8 @@ def test_agent_result_preserves_existing_positional_argument_order() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
-async def test_both_bound_runners_ignore_unsupported_values_before_execution(
-    kind, monkeypatch, caplog,
+async def test_both_bound_runners_retain_authored_inputs_without_eager_invocation(
+    kind, monkeypatch,
 ):
     from agent_framework import FunctionTool
 
@@ -72,8 +72,8 @@ async def test_both_bound_runners_ignore_unsupported_values_before_execution(
     calls = []
 
     def undecorated() -> str:
-        calls.append("unsupported")
-        return "ignored"
+        calls.append("executed")
+        return "authored"
 
     @tool
     def authored() -> str:
@@ -91,10 +91,8 @@ async def test_both_bound_runners_ignore_unsupported_values_before_execution(
     )
     assert result.content == "captured"
     request = invoke.call_args.args[1]
-    assert request.tools == (authored,)
+    assert request.tools == (raw, undecorated, authored, raw, undecorated, raw, undecorated)
     assert calls == []
-    assert "Ignoring unsupported custom tool" in caplog.text
-    assert "private-raw-name" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -222,7 +220,6 @@ def test_public_maf_runner_bootstraps_shared_sensitive_data_policy_without_app_s
     maf_obs = importlib.import_module(
         "azure_functions_agents.harness.agent_framework._maf_observability"
     )
-    maf_runner = importlib.import_module("azure_functions_agents.harness.agent_framework._maf_runner")
     if env_value is None:
         monkeypatch.delenv("ENABLE_SENSITIVE_DATA", raising=False)
     else:
@@ -240,11 +237,6 @@ def test_public_maf_runner_bootstraps_shared_sensitive_data_policy_without_app_s
         maf_obs,
         "enable_instrumentation",
         lambda *, enable_sensitive_data: calls.append(enable_sensitive_data),
-    )
-    monkeypatch.setattr(
-        maf_runner,
-        "configure_maf_instrumentation",
-        maf_obs.configure_maf_instrumentation,
     )
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
 

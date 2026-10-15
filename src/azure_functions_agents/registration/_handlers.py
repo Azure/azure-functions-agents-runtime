@@ -25,21 +25,21 @@ from .._observability import (
     FaultDomain,
     LifecycleStage,
     SpanOutcome,
+    agent_run_span_name,
     capture_sensitive_data,
+    set_agent_session_attribute,
     start_span,
 )
 from .._source_marker import source_marker
-from .._tool_descriptor import ToolDescriptor, describe_tools
+from .._tool_descriptor import ToolDescriptor
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ..harness._harness_binding import (
     AppHarness,
     HarnessSessionState,
     agent_run_attributes_for_harness,
-    agent_run_span_name_for_harness,
     auto_record_exceptions_for_harness,
     bind_harness,
     include_raw_tool_calls_in_sensitive_logs,
-    set_agent_session_attribute_for_harness,
 )
 from ..harness._session_storage import SessionStorageError
 from ._auth import authorize_entra_request
@@ -86,11 +86,11 @@ def build_sandbox_tools_for_session(
     fallback = session_id or uuid.uuid4().hex
     sandbox_module = import_module("azure_functions_agents.system_tools.sandbox")
     create_sandbox_tools = sandbox_module.create_sandbox_tools
-    return list(describe_tools(
+    return list(
         create_sandbox_tools(
             resolved.sandbox_config.model_dump(), fallback_session_id=fallback
         )
-    ))
+    )
 
 
 def validate_request_body(body: Any, input_schema: dict[str, Any] | None) -> Response | None:
@@ -287,7 +287,7 @@ def make_agent_handler(
 
         session_id = _new_session_id()
         with start_span(
-            agent_run_span_name_for_harness(harness, agent_name=resolved.slug),
+            agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=auto_record_exceptions_for_harness(harness),
             attributes=agent_run_attributes_for_harness(
@@ -417,7 +417,7 @@ def make_http_agent_handler(
         )
 
         with start_span(
-            agent_run_span_name_for_harness(harness, agent_name=resolved.slug),
+            agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=auto_record_exceptions_for_harness(harness),
             attributes=agent_run_attributes_for_harness(
@@ -434,8 +434,7 @@ def make_http_agent_handler(
                 session_state = HarnessSessionState(
                     caller_supplied=supplied_session_id is not None
                 )
-                set_agent_session_attribute_for_harness(
-                    harness,
+                set_agent_session_attribute(
                     span,
                     session_id=session_id,
                 )

@@ -77,7 +77,7 @@ This distinction:
 - keeps custom runtime attributes separate from standard names,
 - lets queries use standard names for reported model, token-usage, agent, and tool metadata.
 
-Four sub-namespaces group the detail, plus three cross-cutting attributes:
+Four sub-namespaces group the detail, plus two cross-cutting attributes:
 
 | Namespace | Used for |
 | --- | --- |
@@ -85,7 +85,7 @@ Four sub-namespaces group the detail, plus three cross-cutting attributes:
 | `af.dynamic_session.*` | attributes on the `dynamic_session.execute` (code sandbox) span |
 | `af.web_request.*` | attributes on the `web_request` (outbound HTTP tool) span |
 | `af.delegate.*` | attributes on the `execute_tool delegate_<slug>` span (chat-time sub-agent delegation) |
-| `af.fault_domain`, `af.lifecycle_stage`, `af.harness` | cross-cutting; may appear on runtime-owned spans |
+| `af.fault_domain`, `af.lifecycle_stage` | cross-cutting; may appear on runtime-owned spans |
 
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
 name — for example `server.address` for the session-pool host. Standard GenAI attributes are emitted
@@ -115,7 +115,7 @@ harnesses. It is the parent for runtime tool spans and harness-reported child sp
 | `af.agent.trigger_type` | `timer`, `connectorTrigger`, `http`, … |
 | `af.agent.model` | Model/deployment used for the run, when emitted on the runtime invocation surface. |
 | `af.agent.session_id` | Conversation/session id, when emitted on the runtime invocation surface. |
-| `af.harness` | Selected app-level harness for this runtime-owned span: `maf` or `copilot`. This is an attribute, not a synthetic span. |
+| `af.agent.harness` | Selected app-level harness for this runtime-owned invocation span: `maf` or `copilot`. This is an attribute, not a synthetic span. |
 | `af.agent.outcome` | `success` or `error`. |
 | `af.agent.tool_call_count` | Number of tool calls in the run. |
 | `af.agent.tool_error_count` | Tool calls that failed — includes a "successful" call whose result carried an error or non-empty stderr, **plus** any `delegate_<slug>` call the coordinator recovered from (a specialist failure or timeout — see [Span `execute_tool delegate_<slug>`](#span-execute_tool-delegate_slug-chat-time-sub-agent-delegation)). |

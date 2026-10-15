@@ -14,7 +14,7 @@ from azure_functions_agents._function_tool import (
     tool,
     workflow_tool,
 )
-from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tools
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import (
@@ -112,22 +112,10 @@ async def test_maf_adapter_does_not_add_an_extra_pydantic_validation_pass() -> N
     assert effects == ["ok"]
 
 
-def test_raw_maf_input_models_never_enter_neutral_inventory() -> None:
+def test_raw_maf_tools_retain_their_sdk_model_and_identity() -> None:
     raw = _maf_tools.FunctionTool(name="raw", func=lambda value: value)
-    assert describe_tools((raw,)) == ()
-
-
-def test_runtime_decorators_never_wrap_or_inspect_raw_sdk_tools(caplog) -> None:
-    class OpaqueSDKTool(_maf_tools.FunctionTool):
-        def __getattribute__(self, name):
-            raise AssertionError("No SDK attribute introspection")
-
-    raw = object.__new__(OpaqueSDKTool)
-    assert tool(raw) is raw
-    assert workflow_tool(raw) is raw
-    assert get_workflow_tool_metadata(raw) is None
-    assert describe_tools((raw,)) == ()
-    assert "Ignoring unsupported custom tool" in caplog.text
+    assert _maf_tools.build_maf_tools((raw,)) == [raw]
+    assert prepare_tools((raw,)) == (raw,)
 
 
 @pytest.mark.asyncio
@@ -138,40 +126,47 @@ def test_runtime_decorators_never_wrap_or_inspect_raw_sdk_tools(caplog) -> None:
         ({"result_parser": lambda value: value, "secret_option": "top-secret"}, "result_parser"),
     ],
 )
-async def test_tool_warns_and_ignores_unexpected_keyword_arguments_at_authoring(
+async def test_runtime_helper_does_not_silently_strip_unknown_keywords(
     args: dict[str, object], expected: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    decorator = tool(**args)
-    direct = tool(lambda value: value, **args)
-    decorated = decorator(lambda value: value)
-
-    assert isinstance(direct, ToolDescriptor)
-    assert isinstance(decorated, ToolDescriptor)
-    assert await direct.invoke(arguments={"value": "ok"}) == "ok"
-    assert await decorated.invoke(arguments={"value": "ok"}) == "ok"
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if "Ignoring unsupported @tool keyword argument(s):" in record.getMessage()
-    ]
-    assert len(warnings) == 2
-    assert all(expected in message for message in warnings)
-    assert all(
-        "Supported @tool keyword arguments are: name, description, schema, approval_mode."
-        in message
-        for message in warnings
-    )
-    assert "top-secret" not in caplog.text
+    with pytest.raises(TypeError, match=expected):
+        tool(**args)
+    with pytest.raises(TypeError, match=expected):
+        tool(lambda value: value, **args)
+    assert not caplog.records
 
 
-def test_raw_maf_subclass_is_ignored_by_both_adapters() -> None:
+@pytest.mark.asyncio
+async def test_raw_maf_subclass_preserves_native_invocation_limits() -> None:
     class CustomTool(_maf_tools.FunctionTool):
         pass
 
-    raw = CustomTool(name="custom", func=lambda value: value)
-    assert describe_tools((raw,)) == ()
-    assert _maf_tools.build_maf_tools(describe_tools((raw,))) == []
-    assert prepare_tools((raw,)) == ()
+    from agent_framework.exceptions import ToolException
+
+    raw = CustomTool(name="custom", func=lambda value: value, max_invocations=1)
+    [selected] = _maf_tools.build_maf_tools((raw,))
+    assert selected is raw
+    assert await selected.invoke(arguments={"value": "ok"}, skip_parsing=True) == "ok"
+    with pytest.raises(ToolException, match="maximum invocation"):
+        await selected.invoke(arguments={"value": "again"}, skip_parsing=True)
+
+
+@pytest.mark.asyncio
+async def test_runtime_decorators_accept_authored_callable_objects() -> None:
+    class Lookup:
+        name = "lookup"
+
+        def __call__(self, value: str) -> str:
+            return f"found:{value}"
+
+    authored = Lookup()
+    marked = workflow_tool(name="activity")(authored)
+    descriptor = tool(marked)
+
+    assert get_workflow_tool_metadata(marked).name == "activity"
+    assert descriptor.workflow_metadata.name == "activity"
+    assert descriptor.name == "lookup"
+    assert await descriptor.invoke(arguments={"value": "item"}) == "found:item"
 
 
 def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> None:
@@ -189,7 +184,7 @@ def test_workflow_tool_rejects_unexpected_keyword_arguments_at_authoring() -> No
 
 
 @pytest.mark.asyncio
-async def test_portable_tool_copies_preserve_schema_policy_and_workflow_metadata() -> None:
+async def test_runtime_tool_copies_preserve_schema_policy_and_workflow_metadata() -> None:
     class Arguments(BaseModel):
         value: str
 
@@ -204,7 +199,6 @@ async def test_portable_tool_copies_preserve_schema_policy_and_workflow_metadata
         name="echo",
         schema=Arguments,
         approval_mode="always_require",
-        max_invocations=1,
     )
     copied = replace(descriptor)
     workflow_copy = workflow_tool(name="activity")(descriptor)
@@ -246,26 +240,18 @@ async def test_authored_options_materialize_the_live_bound_descriptor(asynchrono
 
 
 @pytest.mark.asyncio
-async def test_removed_maf_passthrough_keywords_are_ignored_by_both_harnesses(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    descriptor = tool(
-        lambda value: value,
-        name="portable",
-        max_invocation_exceptions=2,
-        kind="custom",
-        additional_properties={"authored": True},
+async def test_native_sdk_options_are_not_stripped_or_snapshotted() -> None:
+    native = _maf_tools.FunctionTool(
+        name="native", func=lambda value: value, max_invocations=2,
+        max_invocation_exceptions=1, additional_properties={"authored": True},
     )
 
-    assert isinstance(descriptor, ToolDescriptor)
-    [maf_tool] = _maf_tools.build_maf_tools((descriptor,))
-    [copilot_tool] = prepare_tools((descriptor,))
-    assert await descriptor.invoke(arguments={"value": "ok"}) == "ok"
-    assert await maf_tool.invoke(arguments={"value": "ok"}, skip_parsing=True) == "ok"
-    assert copilot_tool is descriptor
-    assert "max_invocation_exceptions" in caplog.text
-    assert "additional_properties" in caplog.text
-    assert "{'authored': True}" not in caplog.text
+    [selected] = _maf_tools.build_maf_tools((native,))
+    assert selected is native
+    assert prepare_tools((native,)) == (native,)
+    assert selected.max_invocations == 2
+    assert selected.max_invocation_exceptions == 1
+    assert selected.additional_properties == {"authored": True}
 
 
 @pytest.mark.asyncio

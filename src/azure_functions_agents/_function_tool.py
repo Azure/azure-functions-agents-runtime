@@ -10,15 +10,13 @@ from pydantic import BaseModel
 
 import azure_functions_agents as _package
 
-from ._logger import logger
 from ._tool_descriptor import (
     ApprovalMode,
     ToolDescriptor,
     ToolPolicy,
     WorkflowTool,
     WorkflowToolMetadata,
-    is_harness_object,
-    warn_unsupported_tool,
+    tool_name,
 )
 
 __all__ = [
@@ -32,14 +30,9 @@ __all__ = [
 
 _WORKFLOW_TOOL_METADATA_ATTR = "__azure_functions_agents_workflow_tool__"
 _WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
-_SUPPORTED_TOOL_KWARGS = ("name", "description", "schema", "approval_mode")
 
 
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
-    if is_harness_object(target):
-        return None
-    if not isinstance(target, ToolDescriptor) and not inspect.isroutine(target):
-        return None
     if isinstance(target, ToolDescriptor):
         return target.workflow_metadata
     metadata = getattr(target, _WORKFLOW_TOOL_METADATA_ATTR, None)
@@ -82,18 +75,6 @@ def _wrap_with_schema[SchemaT: BaseModel](
     return wrapper
 
 
-def _warn_ignored_tool_kwargs(kwargs: dict[str, Any]) -> None:
-    if not kwargs:
-        return
-    names = ", ".join(sorted(kwargs))
-    logger.warning(
-        "Ignoring unsupported @tool keyword argument(s): %s. Supported @tool keyword "
-        "arguments are: %s. Extra keyword arguments are ignored in every harness.",
-        names,
-        ", ".join(_SUPPORTED_TOOL_KWARGS),
-    )
-
-
 @overload
 def tool(
     func: Callable[..., Any],
@@ -102,7 +83,6 @@ def tool(
     description: str | None = None,
     schema: None = None,
     approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
 ) -> ToolDescriptor: ...
 
 
@@ -114,7 +94,6 @@ def tool[SchemaT: BaseModel](
     description: str | None = None,
     schema: type[SchemaT],
     approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
 ) -> ToolDescriptor: ...
 
 
@@ -125,7 +104,6 @@ def tool(
     description: str | None = None,
     schema: None = None,
     approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
 ) -> Callable[[Callable[..., Any]], ToolDescriptor]: ...
 
 
@@ -136,36 +114,27 @@ def tool[SchemaT: BaseModel](
     description: str | None = None,
     schema: type[SchemaT],
     approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
 ) -> Callable[[Callable[[SchemaT], Any]], ToolDescriptor]: ...
 
 
 def tool(
-    func: object | None = None,
+    func: Callable[..., Any] | None = None,
     *,
     name: str | None = None,
     description: str | None = None,
     schema: type[BaseModel] | None = None,
     approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
-) -> object:
+) -> ToolDescriptor | Callable[[Callable[..., Any]], ToolDescriptor]:
     """Record a Python tool without constructing a harness SDK wrapper."""
-    _warn_ignored_tool_kwargs(kwargs)
 
-    def decorator(inner: object) -> object:
-        if is_harness_object(inner):
-            warn_unsupported_tool()
-            return inner
-        if not inspect.isroutine(inner):
-            warn_unsupported_tool()
-            return inner
+    def decorator(inner: Callable[..., Any]) -> ToolDescriptor:
         wrapped: Callable[..., Any] = inner
         input_model: type[BaseModel] | None = None
         if schema is not None:
             wrapped = _wrap_with_schema(inner, schema)
             input_model = schema
         descriptor = ToolDescriptor.create(
-            name=name or wrapped.__name__,
+            name=name or tool_name(inner),
             description=(description or inner.__doc__ or "").strip(),
             func=wrapped,
             input_model=input_model,
@@ -232,14 +201,10 @@ def workflow_tool[DecoratedT](
     )
 
     def decorator(inner: DecoratedT) -> DecoratedT:
-        if is_harness_object(inner):
-            warn_unsupported_tool()
-            return inner
         if isinstance(inner, ToolDescriptor):
             return cast("DecoratedT", replace(inner, workflow_metadata=metadata))
-        if not inspect.isroutine(inner):
-            warn_unsupported_tool()
-            return inner
+        if not callable(inner):
+            raise TypeError("workflow_tool requires a callable")
         setattr(inner, _WORKFLOW_TOOL_METADATA_ATTR, metadata)
         return inner
 

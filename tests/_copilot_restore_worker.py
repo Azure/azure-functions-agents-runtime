@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from functools import partial
 from pathlib import Path
 
 
@@ -18,8 +19,8 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
     from azure_functions_agents.harness.copilot_sdk import (
         _copilot_session_fs as fs,
     )
-    from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotHarnessAdapter
     from azure_functions_agents.harness.copilot_sdk._copilot_providers import OpenAIProvider
+    from azure_functions_agents.harness.copilot_sdk._copilot_runner import CopilotRunner
     from azure_functions_agents.harness.copilot_sdk._copilot_runtime import get_runtime
     from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import resolve_route
 
@@ -43,7 +44,8 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
     harness = AppHarness(
         HarnessKind.COPILOT,
         app_root,
-        CopilotHarnessAdapter(
+        partial(
+            CopilotRunner,
             storage_root=storage_root,
             default_model="offline-model",
             provider=OpenAIProvider("offline"),

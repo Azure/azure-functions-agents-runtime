@@ -74,7 +74,7 @@ def test_app_binding_is_frozen_and_identity_distinct(binding_root):
 def test_resource_cell_has_only_a_guard_and_runner(binding_root):
     assert [item.name for item in fields(binding._HarnessResources)] == ["guard", "runner"]
     assert [item.name for item in fields(binding.AppHarness)] == [
-        "name", "app_root", "adapter", "_resources",
+        "name", "app_root", "_create_runner", "_resources",
     ]
     resource_field = next(item for item in fields(binding.AppHarness) if item.name == "_resources")
     assert not resource_field.init
@@ -101,11 +101,12 @@ def test_replace_gets_fresh_resources_without_changing_settings(binding_root):
 
     assert clone.name is original.name
     assert clone.app_root is original.app_root
-    assert copilot_state(clone).storage_root is copilot_state(original).storage_root
-    assert clone.default_model == original.default_model
+    assert clone._create_runner is original._create_runner
     assert clone._resources is not original._resources
     assert clone._resources.guard is not original._resources.guard
     assert clone._resources.runner is None
+    assert copilot_state(clone).storage_root is copilot_state(original).storage_root
+    assert clone.default_model == original.default_model
     assert copilot_state(clone).runtime is None
     assert copilot_state(original).runtime is owner
 
@@ -241,7 +242,7 @@ def test_validation_passes_the_bound_context_to_preview(binding_root, preview_mo
     capabilities = AgentCapabilities()
     binding.validate_agent(harness, resolved, capabilities)
 
-    assert harness.adapter is not None
+    assert copilot_state(harness)._harness is harness
 
 
 def test_bind_harness_reuses_an_existing_binding_without_validation(binding_root, monkeypatch):
@@ -275,33 +276,50 @@ def test_bind_harness_returns_validated_context_without_mutating_capabilities(bi
     validate.assert_called_with(harness, resolved, capabilities)
 
 
-def test_common_import_selection_validation_and_cleanup_do_not_import_backends():
+@pytest.mark.parametrize("preview", [False, True])
+def test_selection_runner_validation_and_cleanup_do_not_import_sdks(preview):
     script = """
 import asyncio
+import os
 import sys
 
-blocked = (
-    "azure_functions_agents.harness.agent_framework",
-    "azure_functions_agents.harness.copilot_sdk",
-    "copilot",
-)
+blocked = ("agent_framework", "copilot")
 for name in blocked:
     sys.modules[name] = None
+for name in (
+    "WEBSITE_INSTANCE_ID", "FUNCTIONS_WORKER_PROCESS_COUNT",
+    "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY",
+    "AzureWebJobsStorage", "AzureWebJobsStorage__blobServiceUri",
+):
+    os.environ.pop(name, None)
+os.environ["AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"] = sys.argv[1]
+os.environ["AZURE_FUNCTIONS_AGENTS_PROVIDER"] = "openai"
+os.environ["OPENAI_API_KEY"] = "fixture-only"
+os.environ["AZURE_FUNCTIONS_AGENTS_MODEL"] = "fixture-model"
 
 import azure_functions_agents
 import azure_functions_agents.harness
 from azure_functions_agents.harness import _harness_binding as binding
 from azure_functions_agents.harness import _harness_lifecycle as lifecycle
+from azure_functions_agents.harness._agent_runner import get_agent_runner
+from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.registration.capabilities import AgentCapabilities
+from types import SimpleNamespace
 
-binding.raw_env_value = lambda _name: None
 harness = binding.get_harness(new_app=True)
-assert harness.name is binding.HarnessKind.MAF
-binding.validate_agent(harness, None, AgentCapabilities())
+runner = get_agent_runner(harness)
+assert get_agent_runner(harness) is runner
+binding.validate_agent(
+    harness, SimpleNamespace(agent_configuration=AgentConfiguration(), model=None, workflows=None,
+                             sandbox_config=None, tools_disabled=False),
+    AgentCapabilities(),
+)
+assert not lifecycle._SHUTDOWN_CALLBACKS
 asyncio.run(lifecycle._shutdown_harnesses())
 assert all(sys.modules[name] is None for name in blocked)
 """
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=30
+        [sys.executable, "-c", script, str(preview).lower()],
+        capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stdout + result.stderr

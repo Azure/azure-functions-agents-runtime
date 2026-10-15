@@ -26,8 +26,23 @@ def test_agent_run_attributes_preserve_extensible_trigger_values(monkeypatch) ->
         obs.ATTR_AGENT_TRIGGER_TYPE: "future_connector_trigger",
         obs.ATTR_AGENT_SESSION_ID: "session-123",
         obs.ATTR_AGENT_MODEL: "model-name",
-        obs.ATTR_HARNESS: None,
+        "af.agent.harness": None,
     }
+
+
+@pytest.mark.parametrize("harness", ["maf", "copilot"])
+def test_agent_run_attributes_use_agent_harness_namespace(harness: str) -> None:
+    attributes = obs.agent_run_attributes(
+        agent_name="billing",
+        display_name=None,
+        trigger_type="http",
+        session_id=None,
+        model=None,
+        harness=harness,
+    )
+
+    assert attributes["af.agent.harness"] == harness
+    assert "af.harness" not in attributes
 
 
 def test_agent_run_span_name_uses_legacy_runtime_name() -> None:

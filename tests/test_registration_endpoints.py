@@ -746,8 +746,9 @@ def test_handle_chat_reports_delegate_error_count_on_span(
     assert span.attributes["af.agent.name"] != resolved.name
 
 
+@pytest.mark.parametrize("harness_kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
-    monkeypatch: Any, tmp_path: Path
+    monkeypatch: Any, tmp_path: Path, harness_kind: HarnessKind
 ) -> None:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -799,7 +800,15 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
     register_builtin_endpoints(
         app,
         resolved,
-        AgentCapabilities(_harness=make_copilot_harness(tmp_path)),
+        AgentCapabilities(
+            _harness=make_copilot_harness(tmp_path)
+            if harness_kind is HarnessKind.COPILOT
+            else AppHarness(HarnessKind.MAF, tmp_path)
+        ),
+    )
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT",
+        "false" if harness_kind is HarnessKind.COPILOT else "true",
     )
     chat_route = next(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
@@ -813,7 +822,8 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
     assert response.status_code == 200
     [span] = exporter.get_finished_spans()
     assert span.name == f"agent.run {resolved.slug}"
-    assert span.attributes["af.harness"] == "copilot"
+    assert span.attributes["af.agent.harness"] == harness_kind.value
+    assert "af.harness" not in span.attributes
     assert "gen_ai.operation.name" not in span.attributes
     assert span.attributes["af.agent.session_id"] == "continued"
     [usage_event] = [

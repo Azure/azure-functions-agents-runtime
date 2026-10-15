@@ -441,12 +441,21 @@ def reverse_string(text: str) -> str:
 The runtime's ordinary `@tool` produces an SDK-free descriptor. Functions can be
 sync or async; signature types and Pydantic schemas supply input validation, and
 the selected harness adapts the descriptor to its SDK. Tools return ordinary
-Python values. Custom tools must use this runtime's `@tool`, or be local public
-functions in `tools/` (the first candidate per module is selected, preferring
-decorated tools). Raw `agent_framework.FunctionTool`, SDK decorators/objects,
-and undecorated functions passed programmatically are ignored with a warning.
-MAF-specific `@tool` keyword arguments pass to MAF for SDK-owned validation;
-unsupported authored options fail explicitly on the Copilot preview.
+Python values or values accepted by the selected SDK. You may also author native
+SDK tools or pass callables directly to the runner. Discovery selects one tool
+per module: a runtime descriptor first, then a named tool object with public
+`name`/`description` metadata, then the first local public function. Imported
+functions and unrelated globals are not automatically exposed.
+
+Authored tools are your code: the runtime does not reject tool or result objects
+by SDK origin and does not guarantee compatibility with a particular harness.
+Compatible tools run; incompatible inputs produce ordinary Python/SDK failures,
+not silent omission or fallback. Capability filters, authentication, runtime
+input schemas, and scoped helper permissions still apply.
+The convenience `@tool` accepts `name`, `description`, `schema`, and
+`approval_mode`. For native options, use your SDK's own tools/decorators; their
+settings remain intact. Unknown convenience-decorator keywords raise `TypeError`
+instead of being ignored.
 
 Dynamic Workflow tools live in the same `tools/` directory but must opt in
 explicitly with `@workflow_tool` so they can run safely as Durable
