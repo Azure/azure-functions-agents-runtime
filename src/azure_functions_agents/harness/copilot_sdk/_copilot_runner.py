@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
+from ..._agent_run_diagnostics import AgentExecutionSurface, _set_run_result_attributes
 from ..._observability import (
     ATTR_AGENT_OUTCOME,
     FaultDomain,
@@ -102,6 +103,7 @@ class CopilotRunner:
         "Copilot preview does not support transcript replay. Native state is separate "
         "from MAF history."
     )
+    validate_hosted_skill: Callable[[ResolvedAgent], None] | None = None
 
     def __init__(
         self,
@@ -252,6 +254,7 @@ class CopilotRunner:
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
         session_state: HarnessSessionState | None = None,
+        execution_surface: AgentExecutionSurface = AgentExecutionSurface.RUNNER_API,
     ) -> AsyncGenerator[str]:
         execution: asyncio.Task[AgentResult] | None = None
         try:
@@ -307,6 +310,7 @@ class CopilotRunner:
                     trigger_type="stream",
                     session_id=resolved_id,
                     model=model,
+                    execution_surface=execution_surface,
                 ),
             ) as span:
                 execution = asyncio.create_task(execute())
@@ -320,8 +324,6 @@ class CopilotRunner:
                             emitted_text = True
                         yield f"data: {json.dumps(event, default=str)}\n\n"
                     result = await execution
-                    from ...registration._handlers import _set_run_result_attributes
-
                     _set_run_result_attributes(span, result)
                     if events.dropped_events:
                         span.set_attribute(

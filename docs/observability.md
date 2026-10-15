@@ -326,6 +326,21 @@ Sensitive-data capture is controlled by the single `ENABLE_SENSITIVE_DATA` envir
 Best-effort diagnostics and telemetry cleanup are intentionally non-throwing:
 they must not change request results, cancellations, or SSE termination.
 
+### HostedSkill usage logs
+
+The `azure.functions.AgentRuntime` logger emits two content-free `INFO` records for HostedSkill
+usage, independently of OpenTelemetry span export:
+
+- `HostedSkill binding defined` is emitted when `@app.hosted_skill` successfully decorates a
+  handler during app indexing. It includes `execution_surface=hosted_skill_binding`, `agent_name`,
+  `handler`, and `arg_name`.
+- `HostedSkill binding executed` is emitted when validated `run()` or consumed `stream()` execution
+  begins. It includes `execution_surface=hosted_skill_binding`, `agent_name`, and `mode` (`run` or
+  `stream`). Failed backend attempts still retain this execution record.
+
+These records never include prompts, responses, session IDs, model configuration, or tool data,
+regardless of `ENABLE_SENSITIVE_DATA`.
+
 ## Noise & cost control
 
 Most Application Insights volume from a function app is **not** the runtime's spans — on a real app,

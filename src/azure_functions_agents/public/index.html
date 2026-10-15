@@ -899,7 +899,7 @@
 		let historyReplayInFlight = false;
 
 		// Mirror the server-side rule enforced by _validate_session_id in
-		// runner.py (SESSION_ID_PATTERN in _session_id.py) so the UI never
+		// runner.py (SESSION_ID_PATTERN in _agent_validation.py) so the UI never
 		// sends an id the server would reject with a 400.
 		const SESSION_ID_MAX_LENGTH = 128;
 		const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;

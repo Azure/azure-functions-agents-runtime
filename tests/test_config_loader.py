@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import azure_functions_agents.config.loader as loader
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.registration._naming import allocate_unique_function_name
@@ -793,6 +794,32 @@ def test_load_agent_specs_flexible_naming_variants_coexist(tmp_path: Path) -> No
     assert Path(specs_by_name["Data Agent"].source_file).name == "data.Agent.MD"
 
 
+def test_load_agent_specs_records_normalized_suffix_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    suffixes: list[str] = []
+    monkeypatch.setattr(
+        loader,
+        "record_agent_file_discovery",
+        lambda *, suffix: suffixes.append(suffix),
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "Agent.md",
+        name="Main Agent",
+        description="Bare agent alias",
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "review.ClAuDe.Md",
+        name="Review Agent",
+        description="Claude suffix alias",
+    )
+
+    load_agent_specs(tmp_path)
+
+    assert sorted(suffixes) == [".agent.md", ".claude.md"]
+
+
 def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> None:
     """agent.md and main.agent.md are aliases: both normalise to main.agent.md (slug 'main').
 
@@ -820,3 +847,22 @@ def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> Non
     assert {spec.name for spec in specs if spec.is_main} == {"Default Agent", "Main Agent"}
     assert Path(next(spec for spec in specs if spec.name == "Default Agent").source_file).name == "agent.md"
     assert Path(next(spec for spec in specs if spec.name == "Main Agent").source_file).name == "main.agent.md"
+
+
+def test_load_agent_specs_ignores_hostedskill_filenames(
+    tmp_path: Path,
+) -> None:
+    for filename in (
+        "hostedskill.md",
+        "summary.hostedskill.md",
+        "main.HOSTEDSKILL.MD",
+        "summary.hosted_skill.md",
+        "summary.hostedskillmd",
+    ):
+        _write_valid_agent_markdown(
+            tmp_path / filename,
+            name=filename,
+            description="Unsupported filename shape",
+        )
+
+    assert load_agent_specs(tmp_path, strict=True) == []

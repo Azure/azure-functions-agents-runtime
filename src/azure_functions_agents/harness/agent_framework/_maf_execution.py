@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 from azure_functions_agents import runner as _runner
 
 from ..._agent_identity import agent_id
+from ..._agent_run_diagnostics import AgentExecutionSurface, _looks_like_tool_error
 from ..._logger import logger
 from ..._observability import (
     ATTR_AGENT_OUTCOME,
@@ -32,7 +33,6 @@ from ...config.paths import resolve_config_dir as resolve_config_dir
 from ...config.schema import AgentConfiguration
 from ...discovery.mcp import MCPServerDescriptor, discover_mcp_servers
 from ...discovery.tools import discover_user_tools
-from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .. import _harness_execution
@@ -750,8 +750,9 @@ async def run_stream(
     catalog: AgentCatalog | None,
     workflow_policy: WorkflowPlanPolicy | None,
     session_state: HarnessSessionState | None = None,
+    execution_surface: AgentExecutionSurface,
 ) -> AsyncGenerator[str]:
-    """Yield the existing SSE vocabulary for a selected MAF invocation."""
+    """Yield SSE events and identify the caller-owned surface on every run span."""
     loop = asyncio.get_running_loop()
     deadline = request.deadline
 
@@ -783,7 +784,22 @@ async def run_stream(
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        yield _sse_frame({"type": "error", "content": str(exc)})
+        with start_span(
+            agent_run_span_name(agent_name=agent_name),
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes=agent_run_attributes_for_harness(
+                harness,
+                agent_name=agent_name,
+                display_name=display_name,
+                trigger_type="stream",
+                session_id=None,
+                model=model,
+                execution_surface=execution_surface,
+            ),
+        ) as span:
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
+            span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+            yield _sse_frame({"type": "error", "content": str(exc)})
         return
 
     if not request.session_state.caller_supplied:
@@ -799,6 +815,7 @@ async def run_stream(
             trigger_type="stream",
             session_id=resolved_id,
             model=model,
+            execution_surface=execution_surface,
         ),
     ) as span:
         ordinary_tool_error_count = 0
@@ -843,7 +860,9 @@ async def run_stream(
                     emitted_tool_calls.add(call_id)
                     yield _sse_frame(event)
 
-                async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+                async def emit_tool_start_before_result(
+                    call_id: str | None,
+                ) -> AsyncIterator[str]:
                     if call_id is None or call_id in emitted_tool_calls:
                         return
                     event = pending_tool_calls.get(call_id)
@@ -893,7 +912,9 @@ async def run_stream(
                             elif ctype == "text_reasoning":
                                 text = _content_text(item)
                                 if text:
-                                    yield _sse_frame({"type": "intermediate", "content": text})
+                                    yield _sse_frame(
+                                        {"type": "intermediate", "content": text}
+                                    )
                             elif ctype == "function_call":
                                 call_id, event = buffer_function_call(item)
                                 if call_id is None:
@@ -936,7 +957,9 @@ async def run_stream(
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
-                    yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
+                    yield _sse_frame(
+                        {"type": "error", "content": f"Timeout after {timeout}s"}
+                    )
                 except asyncio.CancelledError:
                     if usage_recorder is not None:
                         _emit_usage(usage_recorder)

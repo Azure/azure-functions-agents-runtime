@@ -37,7 +37,8 @@ from .._observability import (
     record_sandbox_execution,
     start_span,
 )
-from .._tool_descriptor import ToolDescriptor
+from .._tool_descriptor import ToolDescriptor, describe_tools
+from ..config import ResolvedAgent
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
 
 if TYPE_CHECKING:
@@ -473,3 +474,21 @@ def create_sandbox_tools(
 
     logger.info("dynamic_sessions_code_interpreter: execute_python tool created")
     return [execute_python]
+
+
+def build_sandbox_tools_for_session(
+    resolved: ResolvedAgent,
+    session_id: str | None,
+) -> list[ToolDescriptor] | None:
+    """Build per-request sandbox tools using the resolved session id."""
+    if resolved.tools_disabled or resolved.sandbox_config is None:
+        return None
+    fallback_session_id = session_id or uuid.uuid4().hex
+    return list(
+        describe_tools(
+            create_sandbox_tools(
+                resolved.sandbox_config.model_dump(),
+                fallback_session_id=fallback_session_id,
+            )
+        )
+    )

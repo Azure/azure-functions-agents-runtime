@@ -706,6 +706,7 @@ _web_request_counter: Any = None
 _web_request_error_counter: Any = None
 _delegate_call_counter: Any = None
 _delegate_error_counter: Any = None
+_agent_file_discovery_counter: Any = None
 _metrics_ready = False
 
 
@@ -713,6 +714,7 @@ def _ensure_metrics() -> None:
     global _meter, _sandbox_execution_counter, _sandbox_error_counter
     global _web_request_counter, _web_request_error_counter, _metrics_ready
     global _delegate_call_counter, _delegate_error_counter
+    global _agent_file_discovery_counter
     if _metrics_ready:
         return
     _metrics_ready = True
@@ -749,6 +751,10 @@ def _ensure_metrics() -> None:
             "azure_functions_agents.delegate.errors",
             description="delegate_<slug> invocations that failed or timed out (specialist-side; sanitized before reaching the model).",
         )
+        _agent_file_discovery_counter = _meter.create_counter(
+            "azure_functions_agents.discovery.agent_files",
+            description="Discovered agent markdown files by recognized suffix.",
+        )
     except Exception:  # pragma: no cover - defensive
         _sandbox_execution_counter = None
         _sandbox_error_counter = None
@@ -756,6 +762,19 @@ def _ensure_metrics() -> None:
         _web_request_error_counter = None
         _delegate_call_counter = None
         _delegate_error_counter = None
+        _agent_file_discovery_counter = None
+
+
+def record_agent_file_discovery(*, suffix: str) -> None:
+    """Record one discovered agent markdown file by normalized suffix."""
+    if not _enabled:
+        return
+    _ensure_metrics()
+    try:
+        if _agent_file_discovery_counter is not None:
+            _agent_file_discovery_counter.add(1, {"af.agent.file_suffix": suffix})
+    except Exception:  # pragma: no cover - defensive
+        pass
 
 
 def record_sandbox_execution(*, error: bool) -> None:

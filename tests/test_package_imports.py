@@ -32,6 +32,15 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "DEFAULT_MODEL",
         "DEFAULT_TIMEOUT",
         "AgentResult",
+        "AgentStreamEvent",
+        "AgentStreamEventKind",
+        "HostedSkill",
+        "HostedSkillApp",
+        "HostedSkillDFApp",
+        "HostedSkillEvent",
+        "HostedSkillEventKind",
+        "HostedSkillFunctionApp",
+        "HostedSkillResponseError",
         "WorkflowRetryBackoff",
         "WorkflowRetryPolicy",
         "WorkflowRetryableError",
@@ -48,6 +57,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "set_app_root",
         "shutdown_runtime",
         "tool",
+        "validate_session_id",
         "workflow_tool",
     ]
     assert not hasattr(azure_functions_agents, "run_copilot_agent")
