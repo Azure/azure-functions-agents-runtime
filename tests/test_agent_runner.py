@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -26,65 +27,90 @@ from azure_functions_agents.harness._harness_binding import AppHarness, HarnessK
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runtime
 from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
+from tests._harness_helpers import copilot_state, make_copilot_harness
+
+
+def _harness_for(kind: HarnessKind, root: Path) -> AppHarness:
+    if kind is HarnessKind.COPILOT:
+        return make_copilot_harness(root, default_model="fixture-model")
+    return AppHarness(HarnessKind.MAF, root)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_facade_normalizes_all_tool_sources_before_backend_entry(streaming):
+async def test_bound_runners_normalize_all_tool_sources_before_execution(
+    kind, streaming, monkeypatch, tmp_path
+):
     def lookup(value: int) -> int:
         return value
 
-    backend = SimpleNamespace(run_agent=AsyncMock(return_value=runner.AgentResult("s", "ok")))
-    seen = {}
+    def sandbox_lookup(value: int) -> int:
+        return value
 
-    def stream(prompt, **kwargs):
-        seen.update(kwargs)
+    def web_lookup(value: int) -> int:
+        return value
 
-        async def chunks():
-            yield "ok"
+    backend = _maf_execution if kind is HarnessKind.MAF else _copilot_execution
+    requests = []
 
-        return chunks()
+    async def execute(harness, request, **kwargs):
+        requests.append(request)
+        return runner.AgentResult("s", "ok")
 
-    backend.run_agent_stream = stream
-    facade = _agent_runner.AgentRunner(backend)
-    kwargs = {"tools": [lookup], "sandbox_tools": [lookup], "web_request_tools": [lookup]}
+    async def stream(harness, request, **kwargs):
+        requests.append(request)
+        yield "ok"
+
+    monkeypatch.setattr(backend, "run", execute)
+    if kind is HarnessKind.MAF:
+        monkeypatch.setattr(backend, "run_stream", stream)
+    selected = _agent_runner.get_agent_runner(_harness_for(kind, tmp_path))
+    inputs = [lookup, sandbox_lookup, web_lookup]
+    kwargs = {
+        "tools": [lookup],
+        "sandbox_tools": [sandbox_lookup],
+        "web_request_tools": [web_lookup],
+    }
     if streaming:
-        assert [chunk async for chunk in facade.run_agent_stream("p", **kwargs)] == ["ok"]
+        assert [chunk async for chunk in selected.run_agent_stream("p", deadline=123, **kwargs)]
     else:
-        await facade.run_agent("p", **kwargs)
-        seen = backend.run_agent.call_args.kwargs
-    for key in kwargs:
-        [descriptor] = seen[key]
+        await selected.run_agent("p", deadline=123, **kwargs)
+    [request] = requests
+    assert len(request.tools) == 3
+    for descriptor, authored in zip(request.tools, inputs, strict=True):
         assert isinstance(descriptor, ToolDescriptor)
-        assert descriptor.func is lookup
+        assert descriptor.func is authored
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["delegate", "workflow_subagent"])
-async def test_facade_normalizes_leaf_tools_before_backend_entry(role):
+async def test_leaf_capabilities_normalize_tools_before_backend_entry(role, monkeypatch, tmp_path):
     def lookup(value: int) -> int:
         return value
 
-    capabilities = AgentCapabilities(filtered_user_tools=(lookup,))
-    backend = SimpleNamespace(run_leaf_agent_task=AsyncMock(return_value="ok"))
-    facade = _agent_runner.AgentRunner(backend)
-    assert await facade.run_leaf_agent_task(
+    capabilities = AgentCapabilities.create(filtered_user_tools=(lookup,))
+    execute = AsyncMock(return_value="ok")
+    monkeypatch.setattr(_maf_execution, "run_leaf_agent_task", execute)
+    selected = _agent_runner.get_agent_runner(AppHarness(HarnessKind.MAF, tmp_path))
+    assert await selected.run_leaf_agent_task(
         SimpleNamespace(), capabilities, "p", timeout=1, execution_role=role,
     ) == "ok"
-    approved = backend.run_leaf_agent_task.call_args.args[1]
+    approved = execute.call_args.args[1]
     [descriptor] = approved.filtered_user_tools
     assert isinstance(descriptor, ToolDescriptor)
     assert descriptor.func is lookup
-    assert capabilities.filtered_user_tools == (lookup,)
+    assert approved.filtered_user_tools is capabilities.filtered_user_tools
+    assert capabilities._harness is None
 
 
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 def test_history_availability_is_owned_by_selected_backend(kind, tmp_path):
-    selected = _agent_runner.get_agent_runner(AppHarness(kind, tmp_path))
+    selected = _agent_runner.get_agent_runner(_harness_for(kind, tmp_path))
     if kind is HarnessKind.MAF:
-        assert selected.history_unavailable_reason is None
+        assert selected.session_history_unavailable_message is None
     else:
-        assert selected.history_unavailable_reason == (
+        assert selected.session_history_unavailable_message == (
             "Copilot preview does not support transcript replay. Native state is separate "
             "from MAF history."
         )
@@ -122,7 +148,7 @@ async def test_shared_scenario_inventory_is_filtered_once_and_forwarded_unchange
     monkeypatch.setattr(backend, "run", execution)
     no_parse = Mock(side_effect=AssertionError("Filtered descriptors must not be rediscovered"))
     monkeypatch.setattr(runner, "describe_skill_catalog", no_parse)
-    harness = AppHarness(kind, root, default_model="fixture-model")
+    harness = _harness_for(kind, root)
 
     await _agent_runner.get_agent_runner(harness).run_agent(
         "prompt",
@@ -152,7 +178,7 @@ def test_get_agent_runner_caches_per_binding_resource_cell(monkeypatch: pytest.M
     module = ModuleType("azure_functions_agents.harness.agent_framework._maf_runner")
     first = object()
     create_runner = Mock(return_value=first)
-    module.create_runner = create_runner
+    module.MafRunner = create_runner
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
@@ -160,6 +186,18 @@ def test_get_agent_runner_caches_per_binding_resource_cell(monkeypatch: pytest.M
     assert _agent_runner.get_agent_runner(harness) is first
     assert _agent_runner.get_agent_runner(harness) is first
     create_runner.assert_called_once_with(harness)
+
+
+def test_concurrent_runner_construction_is_once_per_binding(tmp_path):
+    selected = object()
+    factory = Mock(return_value=selected)
+    harness = AppHarness(HarnessKind.MAF, tmp_path, factory)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        runners = list(pool.map(_agent_runner.get_agent_runner, [harness] * 32))
+
+    assert all(actual is selected for actual in runners)
+    factory.assert_called_once_with(harness)
 
 
 def test_get_agent_runner_keeps_same_root_clones_independent(
@@ -173,7 +211,7 @@ def test_get_agent_runner_keeps_same_root_clones_independent(
         created.append(runner_object)
         return runner_object
 
-    module.create_runner = create_runner
+    module.MafRunner = create_runner
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
     original = AppHarness(HarnessKind.MAF, Path.cwd())
@@ -241,7 +279,7 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
 async def test_copilot_unsupported_configuration_rejects_before_native_acquisition(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    harness = AppHarness(HarnessKind.COPILOT, tmp_path)
+    harness = make_copilot_harness(tmp_path)
     get_runtime = Mock(side_effect=AssertionError("native runtime should not start"))
     native_run = AsyncMock(side_effect=AssertionError("native run should not start"))
     monkeypatch.setattr(_copilot_runtime, "get_runtime", get_runtime)
@@ -274,7 +312,7 @@ async def test_copilot_unsupported_configuration_rejects_before_native_acquisiti
 async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution(
     kind, monkeypatch, tmp_path
 ):
-    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
+    harness = _harness_for(kind, tmp_path)
     selected = _agent_runner.get_agent_runner(harness)
     assert _agent_runner.get_agent_runner(harness) is selected
     descriptor = ToolDescriptor.create(
@@ -303,6 +341,7 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
         skill_catalog=(approved, excluded),
         session_id="session",
         session_is_new=True,
+        model="fixture-model",
     )
 
     assert result.content == "answer"
@@ -369,7 +408,7 @@ async def test_cached_leaf_facade_binds_immutable_capabilities_to_its_app_root(
 async def test_cached_facade_preserves_none_vs_empty_skill_path_semantics(
     kind, paths, expected_calls, monkeypatch, tmp_path
 ):
-    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
+    harness = _harness_for(kind, tmp_path)
     selected = _agent_runner.get_agent_runner(harness)
     observed = []
     parser_calls = []
@@ -405,7 +444,7 @@ async def test_cached_facade_preserves_none_vs_empty_skill_path_semantics(
 async def test_cached_facade_expands_nested_skill_paths_once_before_selected_execution(
     kind, monkeypatch, tmp_path
 ):
-    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
+    harness = _harness_for(kind, tmp_path)
     selected = _agent_runner.get_agent_runner(harness)
     observed = []
     parser_calls = []
@@ -453,16 +492,16 @@ async def test_cached_facade_expands_nested_skill_paths_once_before_selected_exe
 
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 def test_real_facades_keep_same_root_app_and_clone_ownership_independent(kind, tmp_path, monkeypatch):
-    first = AppHarness(kind, tmp_path)
-    second = AppHarness(kind, tmp_path)
+    first = _harness_for(kind, tmp_path)
+    second = _harness_for(kind, tmp_path)
     clone = replace(first)
     facades = [_agent_runner.get_agent_runner(app) for app in (first, second, clone)]
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "false" if kind is HarnessKind.COPILOT else "true")
 
     assert len({id(facade) for facade in facades}) == 3
-    assert len({id(facade._backend) for facade in facades}) == 3
     for app, facade in zip((first, second, clone), facades, strict=True):
         assert _agent_runner.get_agent_runner(app) is facade
         assert app._resources.runner is facade
-        assert facade._backend._harness is app
-        assert app._resources.runtime is None
+        assert facade._harness is app
+        if app.name is HarnessKind.COPILOT:
+            assert copilot_state(app).runtime is None

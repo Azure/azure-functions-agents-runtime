@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MethodType
@@ -47,7 +47,7 @@ def _parameter_type_matches(value: Any, kind: str) -> bool:
 def _validate_json_arguments(
     name: str, values: dict[str, Any], schema: dict[str, Any]
 ) -> None:
-    """Preserve top-level schema checks without enforcing extra JSON Schema keywords."""
+    """Apply the runtime's lightweight top-level JSON-schema checks."""
     missing = {
         key for key in schema.get("required", ()) if isinstance(key, str)
     } - values.keys()
@@ -232,7 +232,3 @@ def tool_description(candidate: ToolInput) -> str:
     return (
         description if isinstance(description, str) and description else candidate.__doc__ or ""
     ).strip()
-
-
-def describe_tools(candidates: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
-    return tuple(candidate for candidate in candidates if isinstance(candidate, ToolDescriptor))

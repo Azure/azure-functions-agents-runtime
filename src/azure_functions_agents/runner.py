@@ -18,6 +18,7 @@ from ._logger import logger
 from ._observability import (
     FaultDomain,
     RuntimeSpan,
+    SpanOutcome,
     current_span,
     record_delegate_call,
 )
@@ -159,11 +160,15 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
 
 
 def _record_generic_delegate_failure(
-    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
+    span: RuntimeSpan,
+    tracker: _DelegateErrorTracker,
+    harness: AppHarness | None,
+    slug: str,
+    exc: BaseException,
 ) -> str:
     tracker.record_error()
     record_delegate_call(error=True)
-    span.set_attribute("af.delegate.outcome", "error")
+    span.set_attribute("af.delegate.outcome", SpanOutcome.ERROR)
     span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return _sanitize_delegate_failure(slug, exc)
 
@@ -171,6 +176,7 @@ def _record_generic_delegate_failure(
 def _record_delegate_timeout(
     span: RuntimeSpan,
     tracker: _DelegateErrorTracker,
+    harness: AppHarness | None,
     slug: str,
     effective_timeout: float,
     exc: BaseException,
@@ -232,7 +238,7 @@ def _build_delegate_tool(
         timeout = min(resolved.timeout, remaining)
         if timeout <= 0:
             exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
-            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
+            return _record_delegate_timeout(span, tracker, harness, slug, timeout, exc)
         try:
             result = await run_leaf_agent_task(
                 resolved,
@@ -243,14 +249,14 @@ def _build_delegate_tool(
             )
         except asyncio.CancelledError:
             record_delegate_call(error=False)
-            span.set_attribute("af.delegate.outcome", "cancelled")
+            span.set_attribute("af.delegate.outcome", SpanOutcome.CANCELLED)
             raise
         except TimeoutError as exc:
-            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
+            return _record_delegate_timeout(span, tracker, harness, slug, timeout, exc)
         except Exception as exc:
-            return _record_generic_delegate_failure(span, tracker, slug, exc)
+            return _record_generic_delegate_failure(span, tracker, harness, slug, exc)
         record_delegate_call(error=False)
-        span.set_attribute("af.delegate.outcome", "success")
+        span.set_attribute("af.delegate.outcome", SpanOutcome.SUCCESS)
         span.set_attribute("af.delegate.response_bytes", len(result))
         span.set_content("af.delegate.result", result)
         return result

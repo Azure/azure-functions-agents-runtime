@@ -31,8 +31,6 @@ from azure_functions_agents.harness import (
     _harness_lifecycle as _lifecycle,
 )
 from azure_functions_agents.harness._harness_binding import (
-    AppHarness,
-    HarnessKind,
     HarnessRequest,
     ProviderKind,
     UnsupportedCapabilityError,
@@ -60,6 +58,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
 from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
+from tests._harness_helpers import copilot_state, make_copilot_harness
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
@@ -70,12 +69,10 @@ def preview(monkeypatch, tmp_path):
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("AzureWebJobsStorage", raising=False)
     monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
-    return AppHarness(
-        HarnessKind.COPILOT,
+    return make_copilot_harness(
         tmp_path,
-        tmp_path / "state",
-        "gpt-4.1-mini",
-        OpenAIProvider("not-a-credential"),
+        storage_root=tmp_path / "state",
+        provider=OpenAIProvider("not-a-credential"),
         session_storage=resolve_route(tmp_path),
     )
 
@@ -199,7 +196,7 @@ async def test_sdk_factory_receives_the_open_opaque_filesystem(preview, monkeypa
         with pytest.raises(OSError) as caught:
             await providers[0].read_file("/session-state/unfamiliar.sdk")
         assert caught.value.errno == errno.EBADF
-        reopened = await open_session_fs(preview.session_storage, "main", "example")
+        reopened = await open_session_fs(copilot_state(preview).session_storage, "main", "example")
         try:
             assert await reopened.read_file("/session-state/unfamiliar.sdk") == content
         finally:
@@ -401,6 +398,8 @@ async def test_incompatible_authored_input_surfaces_python_error_before_acquisit
     import copilot
     from copilot.tools import Tool, ToolResult
 
+    from azure_functions_agents import runner
+
     factory = Mock(side_effect=AssertionError("Native client must not start"))
     credential = Mock(side_effect=AssertionError("Credentials must not be acquired"))
     monkeypatch.setattr(copilot, "CopilotClient", factory)
@@ -416,12 +415,12 @@ async def test_incompatible_authored_input_surfaces_python_error_before_acquisit
     )
 
     with pytest.raises(TypeError, match="callable"):
-        await _copilot.run(preview, replace(_request(), tools=(candidate,)))
+        await runner.run_agent("prompt", tools=(candidate,), mcp_tools=(), _harness=preview)
 
     factory.assert_not_called()
     credential.assert_not_called()
     assert not _lifecycle._SHUTDOWN_CALLBACKS
-    assert not preview.storage_root.exists()
+    assert not copilot_state(preview).storage_root.exists()
 
 
 @pytest.mark.asyncio
@@ -1070,6 +1069,110 @@ async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_me
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+async def test_usage_events_deduplicate_observations_but_keep_invocation_totals(
+    preview, monkeypatch, caplog, capture_sensitive_data,
+):
+    import logging
+
+    import copilot
+    from copilot.session_events import (
+        AssistantUsageData,
+        SessionEvent,
+        SessionEventType,
+        SkillInvokedData,
+    )
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-usage-events-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    client = _fake_client()
+    session = client.create_session.return_value
+    usage = SessionEvent(
+        data=AssistantUsageData(
+            model="reported-model",
+            input_tokens=0,
+            output_tokens=8,
+            reasoning_tokens=3,
+            cache_read_tokens=0,
+            cache_write_tokens=2,
+            duration=timedelta(seconds=1.25),
+            time_to_first_token=timedelta(milliseconds=25),
+            output_ttft=timedelta(milliseconds=40),
+            inter_token_latency=timedelta(milliseconds=5),
+        ),
+        id=uuid4(),
+        timestamp=datetime.now(UTC),
+        type=SessionEventType.ASSISTANT_USAGE,
+    )
+    skill = SessionEvent(
+        data=SkillInvokedData(
+            content="private skill instructions",
+            name="review/skill",
+            path="C:/private/skills/review/SKILL.md",
+            allowed_tools=["private-tool"],
+            description="private skill description",
+        ),
+        id=uuid4(),
+        timestamp=datetime.now(UTC),
+        type=SessionEventType.SKILL_INVOKED,
+    )
+
+    async def send(*_args, **_kwargs):
+        [on_event] = session.handlers
+        on_event(usage)
+        on_event(usage)
+        on_event(skill)
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    parent = tracer.start_span("agent.run primary")
+    try:
+        with (
+            trace.use_span(parent, end_on_exit=True),
+            caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
+        ):
+            await _copilot.run(preview, _request())
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    [run_span] = exporter.get_finished_spans()
+    usage_events = [event for event in run_span.events if event.name == "af.agent.model.usage"]
+    skill_events = [event for event in run_span.events if event.name == "af.skill.invoked"]
+    assert len(usage_events) == 1
+    assert usage_events[0].attributes["gen_ai.request.model"] == "reported-model"
+    assert usage_events[0].attributes["gen_ai.usage.input_tokens"] == 0
+    assert usage_events[0].attributes["gen_ai.usage.output_tokens"] == 8
+    assert usage_events[0].attributes["gen_ai.usage.reasoning.output_tokens"] == 3
+    assert usage_events[0].attributes["gen_ai.usage.cache_read.input_tokens"] == 0
+    assert usage_events[0].attributes["gen_ai.usage.cache_write.input_tokens"] == 2
+    assert usage_events[0].attributes["af.agent.usage.duration_ms"] == 1250
+    assert usage_events[0].attributes["af.agent.usage.time_to_first_token_ms"] == 25
+    assert usage_events[0].attributes["af.agent.usage.output_ttft_ms"] == 40
+    assert usage_events[0].attributes["af.agent.usage.inter_token_latency_ms"] == 5
+    assert len(skill_events) == 1
+    assert skill_events[0].attributes == {"af.skill.name": "review_skill"}
+    assert "private" not in repr(run_span.events)
+    usage_logs = [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("Agent token usage:")
+    ]
+    assert len(usage_logs) == 1
+    assert json.loads(usage_logs[0].partition(": ")[2])["output_tokens"] == 16
+
+
+@pytest.mark.asyncio
 async def test_event_sink_uses_call_provenance_for_native_and_custom_tool_events(
     preview, monkeypatch,
 ):
@@ -1313,7 +1416,12 @@ async def test_provider_options_use_sdk_declared_types(
     import copilot
     from copilot.session import ProviderConfig
 
-    selected = replace(preview, provider=provider)
+    selected = make_copilot_harness(
+        preview.app_root,
+        storage_root=copilot_state(preview).storage_root,
+        provider=provider,
+        session_storage=copilot_state(preview).session_storage,
+    )
     credential = SimpleNamespace(
         get_token=AsyncMock(return_value=AccessToken("not-a-credential", 9999999999)),
         close=AsyncMock(),
@@ -1353,9 +1461,11 @@ async def test_concurrent_entra_failure_diagnostic_is_request_scoped(preview, mo
     import copilot
     from copilot.session_events import AssistantMessageData, SessionEvent, SessionEventType
 
-    selected = replace(
-        preview,
+    selected = make_copilot_harness(
+        preview.app_root,
+        storage_root=copilot_state(preview).storage_root,
         provider=AzureOpenAIProvider("https://fixture.openai.azure.com"),
+        session_storage=copilot_state(preview).session_storage,
     )
     credential = SimpleNamespace(
         get_token=AsyncMock(side_effect=RuntimeError("sentinel-private-credential-detail")),
@@ -1632,7 +1742,7 @@ async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, m
 
 
 async def _sdk_file(preview):
-    provider = await open_session_fs(preview.session_storage, "main", "example")
+    provider = await open_session_fs(copilot_state(preview).session_storage, "main", "example")
     try:
         return await provider.read_file("/session-state/uninterpreted.sdk")
     finally:
@@ -1645,7 +1755,7 @@ async def test_resume_retry_preserves_opaque_sdk_files(preview, monkeypatch):
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
-    provider = await open_session_fs(preview.session_storage, "main", "example")
+    provider = await open_session_fs(copilot_state(preview).session_storage, "main", "example")
     try:
         await provider.write_file("/session-state/uninterpreted.sdk", "\x00opaque\r\n")
     finally:
@@ -1872,7 +1982,7 @@ async def test_detach_failure_alone_still_fails_the_turn(preview, monkeypatch):
 async def test_maf_history_does_not_block_or_get_loaded_by_copilot(preview, monkeypatch):
     import copilot
 
-    history = preview.session_storage.local_dir / "agent-sessions" / "main" / "example.jsonl"
+    history = copilot_state(preview).session_storage.local_dir / "agent-sessions" / "main" / "example.jsonl"
     history.parent.mkdir(parents=True)
     history.write_bytes(b"unrelated MAF-owned history")
     maf_history = Mock(side_effect=AssertionError("MAF history must not be constructed"))
@@ -2095,13 +2205,13 @@ async def test_failed_adapter_close_is_reported_without_owner_retention(preview,
     providers[0].backend.close.assert_awaited()
     assert providers[0].backend.close.await_count == 1
     assert not providers[0]._closed
-    assert preview._resources.runtime is owner
+    assert copilot_state(preview).runtime is owner
     monkeypatch.setattr(_copilot, "open_session_fs", original_open)
     peer = await _copilot.run(preview, replace(_request(), session_id="peer"))
     assert peer.content == "synthetic reply"
     await _lifecycle._shutdown_harnesses()
     client.stop.assert_awaited_once()
-    assert preview._resources.runtime is None
+    assert copilot_state(preview).runtime is None
 
 
 @pytest.mark.asyncio
@@ -2180,7 +2290,12 @@ async def test_send_scope_observes_usage_once_and_unsubscribes(preview, monkeypa
 
     selected = preview
     if outcome == "late_token":
-        selected = replace(preview, provider=AzureOpenAIProvider("https://fixture.openai.azure.com"))
+        selected = make_copilot_harness(
+            preview.app_root,
+            storage_root=copilot_state(preview).storage_root,
+            provider=AzureOpenAIProvider("https://fixture.openai.azure.com"),
+            session_storage=copilot_state(preview).session_storage,
+        )
         monkeypatch.setattr(_runtime, "build_async_credential", Mock(return_value=SimpleNamespace(
             get_token=AsyncMock(side_effect=RuntimeError("private token failure")),
             close=AsyncMock(),
@@ -2322,7 +2437,7 @@ async def test_cleanup_failures_preserve_original_request_cancellation(preview, 
     client.stop.assert_not_awaited()
     await _lifecycle._shutdown_harnesses()
     assert not opened[0]._closed
-    assert preview._resources.runtime is None
+    assert copilot_state(preview).runtime is None
 
 
 @pytest.mark.asyncio
@@ -2492,6 +2607,6 @@ async def test_invocation_owned_cleanup_unsubscribes_before_disconnect_and_files
         else:
             recorder.emit_counts.assert_called_once_with(input_tokens=2, output_tokens=3)
         client.stop.assert_not_awaited()
-        assert preview._resources.runtime._client is client
+        assert copilot_state(preview).runtime._client is client
     finally:
         await _lifecycle._shutdown_harnesses()

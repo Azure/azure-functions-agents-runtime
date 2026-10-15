@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..._function_tool import normalize_tool
-from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput, tool_name
+from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...workflows.tools import build_workflow_tools
@@ -42,6 +43,7 @@ def check_sdk_dependency() -> None:
 def select_copilot_harness(root: Path) -> AppHarness:
     """Freeze provider and storage settings without acquiring runtime resources."""
     from ._copilot_providers import _PROVIDERS
+    from ._copilot_runner import CopilotRunner
     from ._copilot_session_identity import resolve_route
 
     check_sdk_dependency()
@@ -68,10 +70,13 @@ def select_copilot_harness(root: Path) -> AppHarness:
     return AppHarness(
         HarnessKind.COPILOT,
         root,
-        route.local_dir / "copilot-preview",
-        model,
-        copilot_provider,
-        session_storage=route,
+        partial(
+            CopilotRunner,
+            storage_root=route.local_dir / "copilot-preview",
+            default_model=model,
+            provider=copilot_provider,
+            session_storage=route,
+        ),
     )
 
 
@@ -103,7 +108,7 @@ def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
                 "Copilot preview supports ordinary runtime @tool declarations only when "
                 f'approval_mode="{ApprovalMode.NEVER_REQUIRE.value}".'
             )
-        name = tool_name(function)
+        name = function.name
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", name):
             raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")
         if name in names:
@@ -129,13 +134,13 @@ def validate_copilot_agent(
     )
     if resolved.workflows is not None and resolved.workflows.enabled:
         management_names = {function.name for function in build_workflow_tools()}
-        if management_names.intersection(tool_name(function) for function in prepared):
+        if management_names.intersection(function.name for function in prepared):
             raise UnsupportedCapabilityError(
                 "Copilot preview workflow management tool names must not collide with authored tools."
             )
     if (
         resolved.sandbox_config is not None
         and not resolved.tools_disabled
-        and any(tool_name(function) == SANDBOX_TOOL_NAME for function in prepared)
+        and any(function.name == SANDBOX_TOOL_NAME for function in prepared)
     ):
         raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")

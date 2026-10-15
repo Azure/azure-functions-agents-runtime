@@ -29,6 +29,7 @@ from azure_functions_agents.registration.capabilities import (
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
+from tests._harness_helpers import copilot_state, make_copilot_harness
 from tests.test_copilot_execution import _fake_client, _request
 from tests.test_copilot_execution import preview as preview
 
@@ -52,6 +53,13 @@ def native(monkeypatch):
     client.delete_session = AsyncMock()
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     return client
+
+
+def _exception_event(span, *, message: str):
+    [event] = [item for item in span.events if item.name == "exception"]
+    assert event.attributes["exception.message"] == message
+    assert message in event.attributes["exception.stacktrace"]
+    return event
 
 
 @pytest.mark.asyncio
@@ -84,8 +92,12 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
     locks = dict(_harness_execution._SESSION_LOCKS)
     # Ephemeral leaves must not open the primary route, even when it is configured for Blob.
     monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
-    primary = replace(preview, session_storage=resolve_route(preview.app_root))
-    assert primary.session_storage.mode is StorageMode.BLOB
+    primary = make_copilot_harness(
+        preview.app_root,
+        storage_root=copilot_state(preview).storage_root,
+        session_storage=resolve_route(preview.app_root),
+    )
+    assert copilot_state(primary).session_storage.mode is StorageMode.BLOB
     try:
         results = await asyncio.gather(*[
             runner.run_leaf_agent_task(
@@ -98,7 +110,7 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
         assert ids[0] != ids[1]
         assert {call.args[0] for call in native.delete_session.call_args_list} == set(ids)
         assert locks == _harness_execution._SESSION_LOCKS
-        assert not (primary.session_storage.local_dir / "copilot-native").exists()
+        assert not (copilot_state(primary).session_storage.local_dir / "copilot-native").exists()
         for provider in providers:
             assert not provider.backend.root.exists()
         native.resume_session.assert_not_awaited()
@@ -247,6 +259,495 @@ async def test_leaf_roles_keep_project_skills_without_runtime_workflow_skill(pre
     assert request.execution_role == "workflow_subagent"
     assert [skill.name for skill in request.skills] == ["authored"]
     assert "data-driven-workflows" not in [skill.name for skill in request.skill_catalog]
+
+
+@pytest.mark.asyncio
+async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, monkeypatch):
+    from copilot.tools import ToolInvocation
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-delegate-trace-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    leaf_result = runner.AgentResult("leaf-session", "leaf answer")
+
+    leaf_request = None
+
+    async def fake_leaf_execution(_harness, request):
+        nonlocal leaf_request
+        leaf_request = request
+        observability.current_span().add_event(
+            "af.agent.model.usage",
+            {"gen_ai.usage.output_tokens": 4},
+        )
+        return leaf_result
+
+    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fake_leaf_execution))
+    leaf_runner = copilot_state(preview)
+
+    async def delegate(task: str) -> str:
+        return await leaf_runner.run_leaf_agent_task(
+            _specialist(),
+            AgentCapabilities(_harness=preview),
+            task,
+            timeout=3,
+            execution_role="delegate",
+        )
+
+    descriptor = ToolDescriptor.create(
+        name="delegate_analyst",
+        description="Delegate to analyst.",
+        func=delegate,
+    )
+    parent = tracer.start_span("agent.run coordinator")
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            custom_tool_names=(descriptor.name,),
+        )
+        wrapped = _tool(descriptor, calls)
+        callback_span = tracer.start_span("sdk.native.callback")
+        with trace.use_span(callback_span, end_on_exit=True):
+            result = await wrapped.handler(ToolInvocation(
+                session_id="main-session",
+                tool_call_id="delegate-call",
+                tool_name=descriptor.name,
+                arguments={"task": "analyze this"},
+            ))
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    root = spans["agent.run coordinator"]
+    tool_span = spans["execute_tool delegate_analyst"]
+    leaf_span = spans["agent.run analyst"]
+    assert tool_span.parent.span_id == root.context.span_id
+    assert leaf_span.parent.span_id == tool_span.context.span_id
+    assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
+    assert leaf_span.attributes["af.agent.outcome"] == "success"
+    assert leaf_span.attributes["af.agent.harness"] == "copilot"
+    assert "af.harness" not in leaf_span.attributes
+    assert "gen_ai.operation.name" not in leaf_span.attributes
+    assert leaf_span.attributes["af.agent.session_id"] == leaf_request.session_id
+    [usage_event] = [
+        event for event in leaf_span.events if event.name == "af.agent.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 4
+    assert result.text_result_for_llm == "leaf answer"
+
+
+@pytest.mark.asyncio
+async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, monkeypatch):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-sse-telemetry-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    async def fake_execution(harness, request):
+        observability.current_span().add_event(
+            "af.agent.model.usage",
+            {"gen_ai.usage.output_tokens": 5},
+        )
+        return runner.AgentResult(
+            session_id=request.session_id,
+            content="stream reply",
+            tool_calls=[],
+            model=request.model,
+        )
+
+    monkeypatch.setattr(_copilot_execution, "run", fake_execution)
+    harness_runner = copilot_state(preview)
+    events = [
+        json.loads(chunk.removeprefix("data: ").strip())
+        async for chunk in harness_runner.run_agent_stream(
+            "hello",
+            deadline=asyncio.get_running_loop().time() + 5,
+            model="test-model",
+            session_id="sse-session",
+            agent_name="sse_agent",
+            tools=[],
+            mcp_tools=[],
+        )
+    ]
+
+    assert [event["type"] for event in events] == ["delta", "done"], events
+    [span] = exporter.get_finished_spans()
+    assert span.name == "agent.run sse_agent"
+    assert span.attributes["af.agent.harness"] == "copilot"
+    assert "af.harness" not in span.attributes
+    assert span.attributes["af.agent.session_id"] == "sse-session"
+    assert "gen_ai.operation.name" not in span.attributes
+    [usage_event] = [
+        event for event in span.events if event.name == "af.agent.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_cancellation_closes_wrapper_span_without_exception_content(
+    preview, monkeypatch,
+):
+    from copilot.tools import ToolInvocation
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-tool-cancellation-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    async def cancelled(task: str) -> str:
+        raise asyncio.CancelledError(task)
+
+    descriptor = ToolDescriptor.create(
+        name="cancel_tool",
+        description="Cancel the active call.",
+        func=cancelled,
+    )
+    parent = tracer.start_span("agent.run primary")
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            custom_tool_names=(descriptor.name,),
+        )
+        wrapped = _tool(descriptor, calls)
+        with pytest.raises(asyncio.CancelledError):
+            await wrapped.handler(ToolInvocation(
+                session_id="main-session",
+                tool_call_id="cancel-call",
+                tool_name=descriptor.name,
+                arguments={"task": "cancel"},
+            ))
+        calls.finish_telemetry()
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    cancelled_span = spans["execute_tool cancel_tool"]
+    assert cancelled_span.attributes["af.tool.outcome"] == "cancelled"
+    assert cancelled_span.status.status_code.name == "UNSET"
+    assert "af.fault_domain" not in cancelled_span.attributes
+    assert all(event.name != "exception" for event in cancelled_span.events)
+    assert "cancel" not in repr(cancelled_span.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+async def test_custom_tool_error_records_exception_once_without_changing_model_visible_failure(
+    preview, monkeypatch, capture_sensitive_data,
+):
+    from copilot.tools import ToolInvocation
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-tool-error-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    def fail() -> str:
+        raise RuntimeError("private tool failure")
+
+    descriptor = ToolDescriptor.create(
+        name="failing_tool",
+        description="Return a controlled failure.",
+        func=fail,
+    )
+    parent = tracer.start_span("agent.run primary")
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            custom_tool_names=(descriptor.name,),
+        )
+        wrapped = _tool(descriptor, calls)
+        result = await wrapped.handler(ToolInvocation(
+            session_id="main-session",
+            tool_call_id="failure-call",
+            tool_name=descriptor.name,
+            arguments={},
+        ))
+        calls.finish_telemetry()
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    failed_span = spans["execute_tool failing_tool"]
+    assert result.result_type == "failure"
+    assert "private tool failure" not in result.text_result_for_llm
+    assert failed_span.attributes["af.tool.outcome"] == "error"
+    assert failed_span.status.status_code.name == "ERROR"
+    assert failed_span.status.description == "RuntimeError('private tool failure')"
+    assert failed_span.attributes["af.fault_domain"] == "app"
+    assert failed_span.attributes["error.type"] == "RuntimeError"
+    _exception_event(failed_span, message="private tool failure")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+async def test_delegate_tool_error_records_exception_once_and_keeps_model_visible_failure_sanitized(
+    preview, monkeypatch, capture_sensitive_data,
+):
+    from copilot.tools import ToolInvocation
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+    from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-delegate-error-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    monkeypatch.setattr(
+        runner,
+        "run_leaf_agent_task",
+        AsyncMock(side_effect=RuntimeError("private leaf failure")),
+    )
+
+    specialist = _specialist()
+    catalog = build_catalog({
+        specialist.slug: CatalogEntry(specialist, AgentCapabilities()),
+    })
+    [descriptor], tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent=specialist.slug)],
+        catalog,
+        coordinator_deadline=asyncio.get_running_loop().time() + 5,
+        harness=preview,
+    )
+
+    parent = tracer.start_span("agent.run coordinator")
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            custom_tool_names=(descriptor.name,),
+        )
+        wrapped = _tool(descriptor, calls)
+        result = await wrapped.handler(ToolInvocation(
+            session_id="main-session",
+            tool_call_id="delegate-call",
+            tool_name=descriptor.name,
+            arguments={"task": "analyze this"},
+        ))
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    delegate_span = spans["execute_tool delegate_analyst"]
+    assert tracker.count == 1
+    assert result.result_type == "success"
+    assert "private leaf failure" not in result.text_result_for_llm
+    assert delegate_span.attributes["af.delegate.outcome"] == "error"
+    assert delegate_span.attributes["af.fault_domain"] == "delegate"
+    assert delegate_span.status.status_code.name == "ERROR"
+    assert delegate_span.status.description == "RuntimeError('private leaf failure')"
+    assert "error.type" not in delegate_span.attributes
+    _exception_event(delegate_span, message="private leaf failure")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+async def test_workflow_leaf_failure_records_exception_once_without_changing_usage_events(
+    preview, monkeypatch, capture_sensitive_data,
+):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-workflow-leaf-failure-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    async def fail_with_usage(*_args, **_kwargs):
+        observability.current_span().add_event(
+            "af.agent.model.usage",
+            {"gen_ai.usage.output_tokens": 6},
+        )
+        raise RuntimeError("private session-open detail")
+
+    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fail_with_usage))
+    leaf_runner = copilot_state(preview)
+    parent = tracer.start_span("agent.run workflow")
+
+    with (
+        trace.use_span(parent, end_on_exit=True),
+        pytest.raises(RuntimeError, match="private session-open detail"),
+    ):
+        await leaf_runner.run_leaf_agent_task(
+            _specialist(),
+            AgentCapabilities(_harness=preview),
+            "Analyze",
+            timeout=3,
+            execution_role="workflow_subagent",
+        )
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    workflow_span = spans["agent.run analyst"]
+    assert workflow_span.parent.span_id == spans["agent.run workflow"].context.span_id
+    assert workflow_span.attributes["af.agent.execution_role"] == "workflow_subagent"
+    assert workflow_span.attributes["af.agent.outcome"] == "error"
+    assert workflow_span.attributes["af.fault_domain"] == "runtime"
+    assert workflow_span.attributes["error.type"] == "RuntimeError"
+    assert workflow_span.status.description == "RuntimeError('private session-open detail')"
+    _exception_event(workflow_span, message="private session-open detail")
+    [usage_event] = [
+        event for event in workflow_span.events if event.name == "af.agent.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+async def test_stream_failure_records_exception_once_without_changing_sse_error_semantics(
+    preview, monkeypatch, capture_sensitive_data,
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-stream-failure-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    async def fail_with_usage(*_args, **_kwargs):
+        observability.current_span().add_event(
+            "af.agent.model.usage",
+            {"gen_ai.usage.output_tokens": 4},
+        )
+        raise RuntimeError("private stream failure")
+
+    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fail_with_usage))
+    leaf_runner = copilot_state(preview)
+
+    chunks = [
+        chunk
+        async for chunk in leaf_runner.run_agent_stream(
+            "hello",
+            deadline=asyncio.get_running_loop().time() + 5,
+            model="test-model",
+            session_id="stream-session",
+            agent_name="stream_agent",
+            display_name="Stream Agent",
+        )
+    ]
+
+    assert chunks == ['data: {"type": "error", "content": "private stream failure"}\n\n']
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    stream_span = spans["agent.run stream_agent"]
+    assert stream_span.attributes["af.agent.outcome"] == "error"
+    assert stream_span.attributes["af.fault_domain"] == "runtime"
+    assert stream_span.attributes["error.type"] == "RuntimeError"
+    assert stream_span.status.description == "RuntimeError('private stream failure')"
+    _exception_event(stream_span, message="private stream failure")
+    [usage_event] = [
+        event for event in stream_span.events if event.name == "af.agent.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_delegate_leaf_cancellation_closes_run_span_without_error_status(
+    preview, monkeypatch,
+):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-delegate-leaf-cancellation-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+
+    async def cancel_with_usage(*_args, **_kwargs):
+        observability.current_span().add_event(
+            "af.agent.model.usage",
+            {"gen_ai.usage.output_tokens": 6},
+        )
+        raise asyncio.CancelledError("private cancellation detail")
+
+    monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=cancel_with_usage))
+    leaf_runner = copilot_state(preview)
+    parent = tracer.start_span("agent.run coordinator")
+
+    with trace.use_span(parent, end_on_exit=True), pytest.raises(asyncio.CancelledError):
+        await leaf_runner.run_leaf_agent_task(
+            _specialist(),
+            AgentCapabilities(_harness=preview),
+            "Analyze",
+            timeout=3,
+            execution_role="delegate",
+        )
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    leaf_span = spans["agent.run analyst"]
+    assert leaf_span.parent.span_id == spans["agent.run coordinator"].context.span_id
+    assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
+    assert leaf_span.attributes["af.agent.outcome"] == "cancelled"
+    assert leaf_span.status.status_code.name == "UNSET"
+    assert "af.fault_domain" not in leaf_span.attributes
+    assert all(event.name != "exception" for event in leaf_span.events)
+    [usage_event] = [
+        event for event in leaf_span.events if event.name == "af.agent.model.usage"
+    ]
+    assert usage_event.attributes["gen_ai.usage.output_tokens"] == 6
 
 
 @pytest.mark.asyncio
@@ -484,4 +985,4 @@ async def test_leaf_resume_is_rejected_without_creating_storage(preview, native)
             preview, replace(_request(new_session=False), execution_role="delegate"),
         )
     native.start.assert_not_awaited()
-    assert not preview.storage_root.exists()
+    assert not copilot_state(preview).storage_root.exists()

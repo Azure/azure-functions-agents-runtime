@@ -37,6 +37,13 @@ from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
+from tests._harness_helpers import make_copilot_harness
+
+
+def _harness_for(kind: HarnessKind) -> AppHarness:
+    if kind is HarnessKind.COPILOT:
+        return make_copilot_harness(Path.cwd(), default_model="fixture-model")
+    return AppHarness(HarnessKind.MAF, Path.cwd())
 
 
 def test_agent_result_preserves_existing_positional_argument_order() -> None:
@@ -86,7 +93,7 @@ async def test_both_bound_runners_normalize_authored_callables_before_execution(
     def authored() -> str:
         return "allowed"
 
-    harness = AppHarness(kind, Path.cwd(), default_model="fixture-model")
+    harness = _harness_for(kind)
     invoke = AsyncMock(return_value=runner.AgentResult("session", "captured"))
     backend = maf if kind is HarnessKind.MAF else _copilot_execution
     monkeypatch.setattr(backend, "run", invoke)
@@ -138,7 +145,7 @@ async def test_incompatible_authored_callable_fails_before_harness_execution(kin
     with pytest.raises(ValueError, match="no signature found"):
         await runner.run_agent(
             "p", tools=[candidate], mcp_tools=[],
-            _harness=AppHarness(kind, Path.cwd(), default_model="fixture-model"),
+            _harness=_harness_for(kind),
         )
     invoke.assert_not_called()
 
@@ -154,7 +161,7 @@ async def test_copilot_backend_rejects_authored_approval_before_effects(monkeypa
 
     invoke = AsyncMock()
     monkeypatch.setattr(_copilot_execution, "run", invoke)
-    harness = AppHarness(HarnessKind.COPILOT, Path.cwd(), default_model="fixture-model")
+    harness = make_copilot_harness(Path.cwd(), default_model="fixture-model")
     with pytest.raises(UnsupportedCapabilityError, match="approval"):
         await runner.run_agent(
             "fixture", tools=[bounded], mcp_tools=[], _harness=harness,
@@ -268,7 +275,6 @@ def test_public_maf_runner_bootstraps_shared_sensitive_data_policy_without_app_s
     maf_obs = importlib.import_module(
         "azure_functions_agents.harness.agent_framework._maf_observability"
     )
-    maf_runner = importlib.import_module("azure_functions_agents.harness.agent_framework._maf_runner")
     if env_value is None:
         monkeypatch.delenv("ENABLE_SENSITIVE_DATA", raising=False)
     else:
@@ -286,11 +292,6 @@ def test_public_maf_runner_bootstraps_shared_sensitive_data_policy_without_app_s
         maf_obs,
         "enable_instrumentation",
         lambda *, enable_sensitive_data: calls.append(enable_sensitive_data),
-    )
-    monkeypatch.setattr(
-        maf_runner,
-        "configure_maf_instrumentation",
-        maf_obs.configure_maf_instrumentation,
     )
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
 

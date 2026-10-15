@@ -35,7 +35,7 @@ class _AgentUsageRecorder:
     _emission_attempted: bool = field(default=False, init=False)
 
     def emit_counts(self, *, input_tokens: int | None, output_tokens: int | None) -> None:
-        """Record backend-neutral token counts without a MAF-shaped intermediate."""
+        """Record backend-neutral token counts without an SDK-shaped intermediate."""
         if self._emission_attempted:
             return
         self._emission_attempted = True

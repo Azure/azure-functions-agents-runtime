@@ -691,9 +691,8 @@ and normalizes them to the runtime's `ApprovalMode` enum; other values raise
 `ValueError` during authoring.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
-tasks; either decorator order is supported. This does not enable workflow roles
-in the Copilot preview. Use `_`-prefixed helpers for functions that should be
-neither normal tools nor workflow tools.
+tasks; either decorator order is supported. Use `_`-prefixed helpers for
+functions that should be neither normal tools nor workflow tools.
 
 `workflows.exclude` filters only that agent's workflow Activity targets; it does
 not affect normal tools or another agent's workflow policy. Conversely,

@@ -47,6 +47,18 @@ Restarting with the flag off selects MAF and its existing history provider.
 Only the selected harness constructs, uses and closes its persistence adapter;
 shared configuration does not initialize or probe the other implementation.
 
+Runtime-owned telemetry keeps the same invocation surface under either
+harness. Direct, streaming, built-in chat, inbound MCP, non-HTTP, delegate, and
+leaf runtime spans use `agent.run {slug}` plus the shared `af.agent.*`
+attributes and `af.agent.harness=maf|copilot`. Copilot adds observed tool spans
+and usage events without changing the runtime-owned surface.
+
+## Authored Python tools
+
+Authored Python tools follow the normal runtime surface: runtime `@tool`
+descriptors or local public functions discovered from `tools/*.py`. Runtime
+filters, authentication, and input schemas still apply.
+
 ## MCP and scoped skills
 
 These are outbound capabilities of the existing direct, non-streaming HTTP
@@ -226,6 +238,49 @@ bounded graceful stop and then bounded `force_stop`, still attempts credential
 cleanup, reports cleanup failures immediately, and clears cached handles so a
 stopped or closing resource is never reused. This preview does **not** claim
 that every host termination awaits that async shutdown path.
+
+## Telemetry addendum
+
+Copilot telemetry reuses the active turn's existing public session-event
+subscription, the current OpenTelemetry provider, and the custom-tool wrapper.
+It adds no new telemetry settings and leaves MAF behavior unchanged.
+
+Each unique public `ASSISTANT_USAGE` event is recorded as a custom
+`af.agent.model.usage` span event on the owning runtime invocation span.
+It uses standard `gen_ai.usage.*` fields where reported semantics match
+exactly; reported duration, TTFT, and inter-token measures remain custom
+`af.agent.usage.*` values. The existing once-only eight-field invocation totals
+stay unchanged.
+
+Completion records, including completion-only records, continue to contribute
+to `AgentResult` and aggregate tool counts. A timed telemetry span requires a
+coherent call-ID/timestamp-matched `tool.execution_start` /
+`tool.execution_complete` pair. Custom tools restore captured host context
+before invocation, and the wrapper owns each wrapped call ID so one wrapped
+call is counted once. This preserves the host's nested coordinator invocation
+-> `execute_tool delegate_<slug>` -> child invocation trace shape for delegates
+while leaving coordinator-visible SSE limited to the delegate tool boundary and
+final child text.
+
+| Source | Expectation |
+| --- | --- |
+| Direct HTTP and built-in chat UI turns | Use the same turn-scoped runtime invocation span, tool accounting, and usage observations. |
+| `/chatstream` SSE | Mirrors translated callbacks for the current turn only; it is not evidence of full native child-span hierarchy. |
+| Delegates | Preserve the nested host trace shape above; native specialist session events do not appear as a second coordinator stream. |
+| Workflow Sub Agent leaves | Each leaf is observed as its own invocation span; model/duration appear only when reported by the SDK. |
+| Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
+
+`ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but
+Copilot run-log payloads never include full `tool_calls` records; MAF run
+logging is unchanged. Credentials, authorization headers, raw event envelopes,
+reasoning text, and skill paths or content are never exported; skill telemetry
+uses the sanitized skill name only. Diagnostics and telemetry cleanup stay
+best-effort and non-throwing so they do not change request outcomes,
+cancellation, or SSE termination.
+
+Caught Python exception messages and stack traces are recorded regardless of
+`ENABLE_SENSITIVE_DATA`, matching MAF behavior; application exception text
+may contain sensitive data.
 
 ## Inspecting a session
 

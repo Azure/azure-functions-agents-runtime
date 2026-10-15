@@ -3,14 +3,12 @@
 Multi-identity Function Apps need an explicit ``managed_identity_client_id``;
 without one, :class:`DefaultAzureCredential` picks a managed identity
 non-deterministically when more than one is assigned. These helpers centralize
-the ``AZURE_CLIENT_ID`` lookup so every component (the MAF client manager,
-the ACA sandbox, the ARM/connector data-plane clients) selects the same
-identity in the same way.
+the ``AZURE_CLIENT_ID`` lookup so runtime components that use managed identity
+select the same identity in the same way.
 
-``BlobHistoryProvider`` deliberately does **not** use these helpers because it
-follows a storage-specific precedence (``AzureWebJobsStorage__clientId`` wins,
-then falls back to ``AZURE_CLIENT_ID``); see
-:mod:`azure_functions_agents.harness.agent_framework._maf_blob_history`.
+Session storage deliberately does **not** use these helpers when it has its own
+storage-specific precedence (``AzureWebJobsStorage__clientId`` wins, then falls
+back to ``AZURE_CLIENT_ID``).
 """
 
 from __future__ import annotations
