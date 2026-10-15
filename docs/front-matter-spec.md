@@ -230,9 +230,10 @@ bounds only the message context sent to the model. Specialist runs remain fresh,
 executions with no nested delegation or persistent history.
 
 On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), the runtime also uses
-the SDK's native compaction defaults. Configured `max_output_tokens` is rejected on that path; the
-underlying Copilot SDK/provider surface has similarly named token-budget fields, but this bounded
-internal preview does not map or expose them as a supported authoring contract.
+the SDK's native compaction defaults. Configured `max_output_tokens` warns and is ignored on that
+path; the runtime does not enforce the cap, and the underlying SDK/provider default remains in
+effect because this bounded internal preview does not expose a verified provider generation-cap
+mapping.
 
 Session storage is not an `agent_configuration` or front-matter setting.
 The selected harness uses the existing `AzureWebJobsStorage` connection string

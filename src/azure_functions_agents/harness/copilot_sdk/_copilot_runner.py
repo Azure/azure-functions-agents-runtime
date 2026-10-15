@@ -155,8 +155,9 @@ class CopilotRunner:
 
         del timeout
 
-        configuration = agent_configuration or AgentConfiguration()
-        _copilot_capabilities.validate_configuration(configuration)
+        configuration = _copilot_capabilities.effective_configuration(
+            agent_configuration or AgentConfiguration()
+        )
         if workflow_enabled and workflow_policy is None:
             raise UnsupportedCapabilityError(
                 "Copilot workflow management requires a bound per-agent workflow policy."
@@ -366,7 +367,9 @@ class CopilotRunner:
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str:
-        _copilot_capabilities.validate_configuration(resolved.agent_configuration)
+        configuration = _copilot_capabilities.effective_configuration(
+            resolved.agent_configuration
+        )
         resolved_model = resolved.model or self.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
@@ -405,7 +408,7 @@ class CopilotRunner:
                                 *list(capabilities.web_request_tools or []),
                             ]
                         ),
-                        max_output_tokens=resolved.agent_configuration.max_output_tokens,
+                        max_output_tokens=configuration.max_output_tokens,
                         deadline=asyncio.get_running_loop().time() + timeout,
                         mcp_servers=tuple(capabilities.filtered_mcp_tools or ()),
                         skills=tuple(capabilities.skills or ()),

@@ -166,6 +166,7 @@ network or configuration failures surface as errors, never a local fallback.
 | `AzureWebJobsStorage__clientId` / `AZURE_CLIENT_ID` | Optional managed-identity client ID for storage; the storage-specific `clientId` takes precedence. |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER` | Blob container name; defaults to `azure-functions-agents` (the same container the MAF history provider uses, in a disjoint prefix). |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Existing local root override; defaults to `~/.azure-functions-agents`. Determines the local SDK workspace even with Blob persistence, and the native file storage root when no Blob setting is configured. Keep it stable when resuming SDK sessions. |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` / `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | The Copilot preview logs a warning and ignores these settings. The selected SDK/provider keeps its native reasoning defaults. |
 
 Storage configuration is captured per app. Restart the host after changing
 captured settings, and check both process variables and `local.settings.json`
@@ -351,8 +352,9 @@ Native compaction is enabled with the SDK's own defaults; the host adds no
 summarizer, no second compacted-context format and no token-threshold mapping.
 Legacy `agent_configuration.agent_framework.compaction.max_context_window_tokens`
 configuration emits a warning and is ignored; MAF and Copilot each use their
-native defaults. The portable `max_output_tokens` cap remains rejected in this
-preview.
+native defaults. On the Copilot path, `agent_configuration.max_output_tokens`
+also emits a warning and is ignored; the host does not enforce the cap, and the
+selected SDK/provider default remains in effect.
 
 All compaction artifacts are persisted as opaque SDK files. Filesystem tests
 alone do not prove native compaction or session restoration, and the host adds

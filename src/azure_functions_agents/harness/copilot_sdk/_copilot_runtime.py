@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 
 from ..._credential import build_async_credential
 from ..._logger import logger
-from ...config.env import EnvVar, raw_env_value
+from ...config.env import EnvVar
 from .. import _harness_lifecycle
 from .._agent_runner import get_agent_runner
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .._provider_config import resolve_inference_target
+from ._copilot_warnings import warn_ignored_reasoning_setting
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
@@ -49,18 +50,23 @@ def select_copilot_harness(root: Path) -> AppHarness:
     from ._copilot_session_identity import resolve_route
 
     check_sdk_dependency()
+    supported_providers = [provider.value for provider in _PROVIDERS]
+    provider_list = (
+        supported_providers[0]
+        if len(supported_providers) == 1
+        else ", ".join(supported_providers[:-1]) + f", or {supported_providers[-1]}"
+    )
     try:
         target = resolve_inference_target(None)
         provider, model = target.require()
     except RuntimeError:
         raise UnsupportedCapabilityError(
-            f"Copilot preview supports {PROVIDER_ENV}=openai, azure_openai, or foundry "
+            f"Copilot preview supports {PROVIDER_ENV}={provider_list} "
             "with the existing explicit-or-autodetected provider settings."
         ) from None
     copilot_provider = _PROVIDERS[provider].from_environment()
     for name in (EnvVar.REASONING_EFFORT, EnvVar.REASONING_SUMMARY):
-        if raw_env_value(name):
-            raise UnsupportedCapabilityError(f"Copilot preview does not support {name}.")
+        warn_ignored_reasoning_setting(name)
     route = resolve_route(root)
     from ._copilot_runner import CopilotRunner
 

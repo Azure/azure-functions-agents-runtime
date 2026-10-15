@@ -346,8 +346,10 @@ cleanup errors. Shared code normalizes only the public `AgentResult` and
 tool-call accounting contracts; MAF usage decoding remains local to MAF, and
 Copilot result/event conversion remains local to Copilot.
 
-The current preview stays intentionally narrow and fails unsupported behavior
-explicitly rather than degrading quietly.
+The preview keeps the shared authoring, registration, and policy surfaces while
+leaving SDK-specific execution, persistence, and native-session behavior inside
+the selected Copilot harness. Unsupported capabilities still fail explicitly
+when the runtime cannot preserve their semantics.
 
 The supported execution subset includes primary HTTP chat and SSE,
 chat-time delegates, Workflow Sub Agent Activities, Dynamic Workflow

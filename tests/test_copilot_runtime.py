@@ -41,6 +41,7 @@ from azure_functions_agents.harness._harness_binding import (
     HarnessKind,
     UnsupportedCapabilityError,
 )
+from azure_functions_agents.harness._provider_config import ProviderKind
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 from azure_functions_agents.harness.copilot_sdk import (
@@ -50,9 +51,15 @@ from azure_functions_agents.harness.copilot_sdk import (
     _copilot_execution as _copilot,
 )
 from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_providers as provider_registry,
+)
+from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as runtime,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_providers import OpenAIProvider
+from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
+    FoundryProvider,
+    OpenAIProvider,
+)
 from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from azure_functions_agents.registration._handlers import make_http_agent_handler
 from azure_functions_agents.registration.capabilities import build_capabilities
@@ -144,16 +151,41 @@ def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview,
     assert _harness.get_harness().name is HarnessKind.COPILOT
 
 
+def test_provider_selection_error_lists_registered_copilot_providers(preview, monkeypatch):
+    monkeypatch.setattr(runtime, "version", lambda _: "0.0.0")
+    monkeypatch.setattr(runtime, "resolve_inference_target", Mock(side_effect=RuntimeError))
+    monkeypatch.setattr(
+        provider_registry,
+        "_PROVIDERS",
+        {
+            ProviderKind.OPENAI: OpenAIProvider,
+            ProviderKind.FOUNDRY: FoundryProvider,
+        },
+    )
+    with pytest.raises(
+        UnsupportedCapabilityError,
+        match=(
+            r"AZURE_FUNCTIONS_AGENTS_PROVIDER=openai, or foundry "
+            r"with the existing explicit-or-autodetected provider settings\."
+        ),
+    ):
+        runtime.select_copilot_harness(preview)
+
+
 @pytest.mark.parametrize(
-    ("name", "value", "diagnostic"),
+    ("name", "value"),
     [
-        ("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high", "REASONING_EFFORT"),
+        ("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high"),
+        ("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", "detailed"),
     ],
 )
-def test_unsupported_app_settings(preview, monkeypatch, name, value, diagnostic):
+def test_reasoning_app_settings_warn_and_are_ignored(preview, monkeypatch, caplog, name, value):
     monkeypatch.setenv(name, value)
-    with pytest.raises((UnsupportedCapabilityError, ValueError), match=diagnostic):
-        _harness.get_harness()
+    with caplog.at_level("WARNING"):
+        harness = _harness.get_harness()
+    assert harness.name is HarnessKind.COPILOT
+    assert name in caplog.text
+    assert "Ignoring" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -190,12 +222,12 @@ def test_host_owned_worker_and_hosting_settings_are_accepted(preview, monkeypatc
         (EnvVar.WEBSITE_INSTANCE_ID, "cloud-instance", True, ""),
         (EnvVar.REASONING_EFFORT, None, True, ""),
         (EnvVar.REASONING_EFFORT, "", True, ""),
-        (EnvVar.REASONING_EFFORT, "   ", False, "REASONING_EFFORT"),
-        (EnvVar.REASONING_EFFORT, "high", False, "REASONING_EFFORT"),
+        (EnvVar.REASONING_EFFORT, "   ", True, ""),
+        (EnvVar.REASONING_EFFORT, "high", True, ""),
         (EnvVar.REASONING_SUMMARY, None, True, ""),
         (EnvVar.REASONING_SUMMARY, "", True, ""),
-        (EnvVar.REASONING_SUMMARY, "   ", False, "REASONING_SUMMARY"),
-        (EnvVar.REASONING_SUMMARY, "detailed", False, "REASONING_SUMMARY"),
+        (EnvVar.REASONING_SUMMARY, "   ", True, ""),
+        (EnvVar.REASONING_SUMMARY, "detailed", True, ""),
     ],
 )
 def test_copilot_environment_edge_semantics(preview, monkeypatch, name, value, allowed, diagnostic):
@@ -382,20 +414,26 @@ def test_retired_maf_compaction_has_no_active_copilot_configuration(preview):
     _capabilities.validate_configuration(AgentConfiguration())
 
 
-def test_unsupported_output_limit_fails_before_native_execution(preview):
-    with pytest.raises(UnsupportedCapabilityError, match="max_output_tokens"):
+def test_output_limit_warns_and_is_ignored_before_native_execution(preview, caplog):
+    with caplog.at_level("WARNING"):
         _capabilities.validate_configuration(AgentConfiguration(max_output_tokens=256))
+    assert "agent_configuration.max_output_tokens" in caplog.text
+    assert "not enforced" in caplog.text
 
 
-def test_standalone_output_limit_fails_before_native_execution(preview, monkeypatch):
-    invoke = AsyncMock()
+def test_standalone_output_limit_warns_and_clears_request_boundary(preview, monkeypatch, caplog):
+    invoke = AsyncMock(return_value=runner.AgentResult("session-id", "native reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
-    with pytest.raises(UnsupportedCapabilityError, match="max_output_tokens"):
-        asyncio.run(runner.run_agent(
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(runner.run_agent(
             "no inference", tools=[], mcp_tools=[],
             agent_configuration=AgentConfiguration(max_output_tokens=256),
         ))
-    invoke.assert_not_called()
+    assert result.content == "native reply"
+    invoke.assert_awaited_once()
+    request = invoke.await_args.args[1]
+    assert request.max_output_tokens is None
+    assert "agent_configuration.max_output_tokens" in caplog.text
 
 
 @pytest.mark.parametrize("policy", [{"approval_mode": "always_require"}])

@@ -33,7 +33,6 @@ from azure_functions_agents.harness import (
 from azure_functions_agents.harness._harness_binding import (
     HarnessRequest,
     ProviderKind,
-    UnsupportedCapabilityError,
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import (
@@ -1336,6 +1335,26 @@ async def test_provider_options_use_sdk_declared_types(
 
 
 @pytest.mark.asyncio
+async def test_direct_execution_warns_and_ignores_request_output_limit(preview, monkeypatch, caplog):
+    import copilot
+
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    request = _request()
+    request = replace(request, max_output_tokens=256)
+    with caplog.at_level("WARNING"):
+        try:
+            result = await _copilot.run(preview, request)
+        finally:
+            await _lifecycle._shutdown_harnesses()
+
+    assert result.content == "synthetic reply"
+    assert "request.max_output_tokens" in caplog.text
+    assert "not enforced" in caplog.text
+    assert "max_output_tokens" not in client.create_session.call_args.kwargs["provider"]
+
+
+@pytest.mark.asyncio
 async def test_concurrent_entra_failure_diagnostic_is_request_scoped(preview, monkeypatch):
     import copilot
     from copilot.session_events import AssistantMessageData, SessionEvent, SessionEventType
@@ -1880,7 +1899,9 @@ async def test_maf_history_does_not_block_or_get_loaded_by_copilot(preview, monk
         await _lifecycle._shutdown_harnesses()
 
 
-def test_portable_output_limit_is_rejected_during_registration(tmp_path, monkeypatch):
+def test_portable_output_limit_warns_during_registration_and_does_not_start_native_runtime(
+    tmp_path, monkeypatch, caplog
+):
     import copilot
 
     root = tmp_path / "app"
@@ -1904,8 +1925,11 @@ def test_portable_output_limit_is_rejected_during_registration(tmp_path, monkeyp
     factory = Mock(side_effect=AssertionError("Native runtime must not start"))
     monkeypatch.setattr(copilot, "CopilotClient", factory)
 
-    with pytest.raises(UnsupportedCapabilityError, match="max_output_tokens"):
-        create_function_app(root)
+    with caplog.at_level("WARNING"):
+        app = create_function_app(root)
+    assert app.get_functions()
+    assert "agent_configuration.max_output_tokens" in caplog.text
+    assert "not enforced" in caplog.text
     factory.assert_not_called()
 
 

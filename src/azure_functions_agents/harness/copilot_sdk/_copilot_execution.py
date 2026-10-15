@@ -20,7 +20,7 @@ from ..._observability import (
 from ..._skill_policy import SkillPolicy
 from ..._tool_descriptor import ToolDescriptor
 from .. import _harness_execution
-from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
+from .._harness_binding import AppHarness, HarnessRequest
 from .._provider_config import InferenceTarget
 from .._stream_events import ContentEvent, SessionEvent, StreamEvent
 from ._copilot_capabilities import (
@@ -34,6 +34,7 @@ from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
 from ._copilot_session_local import LocalSessionFileBackend
 from ._copilot_tool_calls import CopilotToolCalls, tool_result_text
+from ._copilot_warnings import warn_ignored_output_limit
 
 if TYPE_CHECKING:
     from copilot import CopilotClient
@@ -435,11 +436,7 @@ async def _run_session_turn(
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
-    if request.max_output_tokens is not None:
-        raise UnsupportedCapabilityError(
-            "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
-            "Remove the cap or use the MAF harness."
-        )
+    warn_ignored_output_limit("request.max_output_tokens", request.max_output_tokens)
     from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
     from copilot.session_events import (
         AssistantMessageData,
