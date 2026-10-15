@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -15,8 +14,6 @@ from azure_functions_agents.harness import (
     _harness_lifecycle as lifecycle,
 )
 from azure_functions_agents.harness._harness_binding import (
-    AppHarness,
-    HarnessKind,
     UnsupportedCapabilityError,
 )
 from azure_functions_agents.harness._provider_config import ProviderKind
@@ -34,7 +31,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     FoundryProvider,
     OpenAIProvider,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import resolve_route
+from tests._harness_helpers import copilot_state, make_copilot_harness
 from tests.test_copilot_preview import preview as preview
 
 
@@ -44,9 +41,10 @@ def binding(monkeypatch, tmp_path):
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("AzureWebJobsStorage", raising=False)
     monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
-    return AppHarness(
-        HarnessKind.COPILOT, tmp_path, tmp_path / "state", "gpt-4.1-mini",
-        OpenAIProvider("not-a-credential"), session_storage=resolve_route(tmp_path),
+    return make_copilot_harness(
+        tmp_path,
+        storage_root=tmp_path / "state",
+        provider=OpenAIProvider("not-a-credential"),
     )
 
 
@@ -93,8 +91,8 @@ def test_provider_target_is_resolved_without_maf_client_construction(
     maf = Mock(side_effect=AssertionError("MAF client construction must not run"))
     monkeypatch.setattr(_maf_client, "build_chat_client", maf)
     selected = _harness.get_harness()
-    assert selected.provider is not None
-    assert selected.provider.kind == provider
+    assert copilot_state(selected).provider is not None
+    assert copilot_state(selected).provider.kind == provider
     assert selected.default_model == expected_model
     maf.assert_not_called()
 
@@ -155,11 +153,11 @@ def test_foundry_configuration_is_frozen_without_authentication(preview, monkeyp
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://fixture.services.ai.azure.com/api/projects/test")
     monkeypatch.setenv("FOUNDRY_MODEL", "deployed-model")
     selected = _harness.get_harness()
-    assert selected.provider is not None
-    assert selected.provider.kind == "foundry"
+    assert copilot_state(selected).provider is not None
+    assert copilot_state(selected).provider.kind == "foundry"
     assert selected.default_model == "deployed-model"
     assert "fixture.services.ai.azure.com" not in repr(selected)
-    assert not selected.storage_root.exists()
+    assert not copilot_state(selected).storage_root.exists()
 
 
 @pytest.mark.asyncio
@@ -182,9 +180,12 @@ async def test_openai_provider_callback_uses_frozen_startup_key(binding, monkeyp
 
 
 def test_azure_api_key_provider_avoids_credential_construction(binding, monkeypatch):
-    selected = replace(binding, provider=AzureOpenAIProvider(
-        "https://fixture.openai.azure.com", "2024-10-21", "sentinel-not-a-secret",
-    ))
+    selected = make_copilot_harness(
+        binding.app_root,
+        provider=AzureOpenAIProvider(
+            "https://fixture.openai.azure.com", "2024-10-21", "sentinel-not-a-secret"
+        ),
+    )
     monkeypatch.setattr(
         runtime, "build_async_credential",
         Mock(side_effect=AssertionError("Azure API key must not build a credential")),
@@ -210,7 +211,7 @@ def test_azure_api_key_provider_avoids_credential_construction(binding, monkeypa
     ],
 )
 async def test_entra_callbacks_refresh_overlap_and_close(binding, monkeypatch, provider, endpoint, scope):
-    selected = replace(binding, provider=provider(endpoint))
+    selected = make_copilot_harness(binding.app_root, provider=provider(endpoint))
     issued = 0
 
     async def get_token(received_scope):
@@ -241,7 +242,10 @@ async def test_entra_callbacks_refresh_overlap_and_close(binding, monkeypatch, p
 
 @pytest.mark.asyncio
 async def test_entra_callback_failure_is_sanitized(binding, monkeypatch):
-    selected = replace(binding, provider=AzureOpenAIProvider("https://fixture.openai.azure.com"))
+    selected = make_copilot_harness(
+        binding.app_root,
+        provider=AzureOpenAIProvider("https://fixture.openai.azure.com"),
+    )
     credential = SimpleNamespace(
         get_token=AsyncMock(side_effect=RuntimeError("sentinel-private-credential-detail")),
         close=AsyncMock(),

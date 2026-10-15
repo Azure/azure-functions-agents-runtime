@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-07
+updated: 2026-10-14
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -24,8 +24,9 @@ selection, mixed-harness roles, or fallback after selection.
 
 The design goal is architectural separation, not a public harness plug-in model.
 Discovery, merge, validation, and registration remain SDK-neutral. Selected
-execution adapters own SDK object creation, provider auth timing, native event
-translation, and persistence details.
+runners own SDK object creation, provider auth timing, native event translation,
+and persistence details. Authored tools remain user-owned code, not a promise of
+compatibility with every harness.
 
 ## 2. Motivation / problem
 
@@ -44,7 +45,7 @@ The runtime must make that change without:
 - re-parsing authored files at execution time;
 - turning the host into a second skill loader, session protocol, or MCP policy
   engine; or
-- weakening existing validation by silently dropping unsupported behavior.
+- weakening capability authorization or silently dropping authored tools.
 
 ## 3. Goals / Non-goals
 
@@ -53,8 +54,10 @@ The runtime must make that change without:
 - Preserve the existing discover -> translate -> register -> execute pipeline,
   with `ResolvedAgent` and `AgentCapabilities` remaining authoritative.
 - Keep MAF as the default path; make Copilot an explicit app-level preview.
-- Introduce immutable SDK-neutral descriptors for tools, MCP servers, and skill
-  roots, with SDK construction deferred to the selected adapter.
+- Use immutable SDK-neutral descriptors for runtime-owned tools, MCP servers,
+  and skill roots, with SDK construction deferred to the selected runner.
+- Preserve user-supplied tools without rejecting their SDK origin; let the
+  selected SDK and ordinary execution determine compatibility.
 - Preserve current authoring and role contracts where supported, and reject
   unsupported Copilot preview behavior explicitly.
 - Keep Copilot session persistence as a thin SessionFs boundary: the SDK owns
@@ -67,8 +70,8 @@ The runtime must make that change without:
   skill catalog.
 - Host parsing of `SKILL.md` metadata, host-managed skill advertising, or a
   runtime-owned script engine for parity.
-- Silent MAF fallback, silent capability drops, or hidden accommodations for
-  harness-specific callable signatures.
+- Silent MAF fallback, silent capability drops, cross-SDK tool translation, or
+  hidden accommodations for harness-specific callable signatures.
 
 ## 4. Proposed design
 
@@ -90,7 +93,8 @@ Copilot fails. Standalone runner calls use the same resolution boundary.
 
 ### 4.2 SDK-neutral capability boundary
 
-Discovery and registration emit immutable SDK-free capability descriptors:
+Discovery and registration do not import harness SDKs. Runtime-owned capabilities
+use immutable SDK-free descriptors:
 
 | Descriptor | Required contents | Excluded from the descriptor |
 | --- | --- | --- |
@@ -98,27 +102,28 @@ Discovery and registration emit immutable SDK-free capability descriptors:
 | MCP server | name, URL, transport, static headers, tool filter, optional Entra scope/client ID | SDK transport/client objects, live tokens |
 | Skill | canonical candidate directory path, directory-name identity | parsed `SKILL.md`, authored description, loaded content |
 
-The concrete runner facade is cached once per bound app context, alongside the
-existing lazy native-runtime resource cell, so public runner helpers do not
-repeat per-operation harness branching after selection. Creating that facade does
-not itself acquire native processes, credentials, history providers, or session
-filesystems. Those remain lazy backend responsibilities, and unsupported
-Copilot configuration must still fail before native/provider acquisition.
+One concrete runner is cached per bound app context. Its execution, configuration
+qualification, default model, history support, and observability policies share
+one internal runner contract; there is no separate adapter strategy or forwarding
+facade. The frozen app binding captures a construction callable and owns a fresh
+guard/cache cell, including for `dataclasses.replace` clones. Creating the runner
+does not import an SDK or acquire native processes, credentials, history
+providers, or session filesystems. Those remain lazy execution responsibilities,
+and unsupported Copilot configuration must still fail before native/provider acquisition.
 Direct, streaming, and leaf execution share that binding. Public helper
 signatures, deadline timing, SSE error boundaries, and cleanup guarantees stay
 unchanged.
 
-`HarnessRequest` carries only these descriptors plus scalar execution settings.
-It does not carry MAF or Copilot SDK types.
+`HarnessRequest` carries runtime descriptors plus scalar execution settings.
 
-Adapters own SDK construction:
+Selected execution implementations own SDK construction:
 
 - `harness/agent_framework/*` maps descriptors to MAF tools, MCP wrappers, and
   `SkillsProvider.from_paths`.
 - `harness/copilot_sdk/*` maps descriptors to Copilot custom tools, MCP server
   configuration, and skill-directory configuration.
 
-The selected adapter also owns auth materialization timing, native event
+The selected runner also owns auth materialization timing, native event
 handling, SDK session lifecycle, and SDK-specific result conversion.
 
 ### 4.3 Tool authoring contract
@@ -130,16 +135,8 @@ The supported runtime authoring surface is intentionally narrow:
   the tool fallback.
 - Raw SDK tool objects, SDK decorators, and undecorated direct programmatic
   inputs outside discovery are ignored with a sanitized warning.
-
-Runtime `@tool` supports only `name`, `description`, `schema`, and
-`approval_mode`. Extra keyword arguments are logged once by name and ignored;
-they are not forwarded to either harness, and `max_invocations` is not enforced.
-`ToolDescriptor.maf_options` is removed.
-
-The runtime does not recognize or adapt harness-specific callable signatures
-such as `FunctionInvocationContext`. If normal schema generation or SDK
-validation rejects such callables, that explicit failure is the supported
-behavior.
+- `@tool` accepts only `name`, `description`, `schema`, and `approval_mode`;
+  extra keyword arguments are warned and ignored rather than passed through.
 
 ### 4.4 Skills boundary
 
@@ -184,12 +181,13 @@ skill roots; general file reads and general shell commands stay denied.
 
 ### 4.6 Execution and result boundaries
 
-The public runner surface stays stable. One cached private runner facade binds
-the already selected harness per app context and forwards:
+The public runner surface stays stable. One cached private concrete runner binds
+the already selected harness per app context and implements:
 
 - `run_agent`
 - `run_agent_stream`
 - `run_leaf_agent_task`
+- session-history projection and selected configuration/policy queries
 
 Common contracts stay outside adapters only where they are truly shared:
 
@@ -314,7 +312,7 @@ Current supported direction:
 
 - same authoring/config surfaces as MAF;
 - once-per-app local preview selection;
-- direct-role execution with neutral tool/MCP/skill descriptors;
+- direct-role execution with runtime tool/MCP/skill descriptors and user-supplied tools;
 - SDK-owned session files behind SessionFs; and
 - no silent weakening of policy or validation.
 
@@ -340,6 +338,45 @@ field warns and is ignored; MAF uses its native model-aware default. Failed
 requests always return caller-supplied session IDs, and return generated IDs
 only after resumability is confirmed, consistently across response surfaces.
 `shutdown_runtime()` is the public async cleanup entry point.
+
+### 4.9 Telemetry addendum
+
+This addendum extends the runtime telemetry contract for the Copilot execution
+path. The shared run-log sensitive-data gate applies to both harnesses.
+
+- Reuse the active turn's existing session-event subscription and custom-tool
+  wrapper with the existing OpenTelemetry provider and Application Insights
+  destination. Do not add a subscription, settings, sampling, caps, exporters,
+  flush/shutdown calls, or create/resume telemetry; keep
+  `continue_pending_work=False`.
+- Runtime-owned invocation telemetry is harness-neutral: both MAF and Copilot
+  use `agent.run {slug}` spans and the shared `af.agent.*` attributes, with
+  `af.agent.harness=maf|copilot` identifying the selected app-level harness. The
+  runtime does not create a synthetic harness span and does not add
+  Copilot-only GenAI invocation fields when the shared fields carry the same
+  stable facts.
+- Keep `ASSISTANT_USAGE` as a custom `af.agent.model.usage` event on the owning
+  Copilot invocation span. Reuse standard `gen_ai.usage.*` fields only where
+  the reported SDK semantics match exactly, keep the existing once-only
+  eight-field usage recorder and counters unchanged, and defer inference spans
+  and standard GenAI metrics until the runtime has reliable evidence for exact
+  model boundaries and attribution.
+- Export only allowlisted telemetry. Standard identity, conversation, and tool
+  fields come only from stable runtime state, and `ENABLE_SENSITIVE_DATA` remains
+  the only content opt-in for prompt/request/response and tool content.
+  Non-HTTP and HTTP run-log payloads share the same metadata-by-default shape:
+  response content is logged only when sensitive-data capture is enabled, while
+  raw tool-call records follow the selected harness policy (MAF permitted,
+  Copilot excluded). Credentials, authorization headers, raw envelopes,
+  reasoning text, and skill content/paths are never exported.
+  **Carve-out:** per Decision 24, runtime-owned Copilot ingress, delegate,
+  leaf, and custom-tool spans still record caught Python exception messages and
+  stack traces regardless of `ENABLE_SENSITIVE_DATA`, so arbitrary exception
+  text may contain sensitive content if application code includes it.
+  Content-free diagnostics and best-effort telemetry cleanup must not change
+  results, errors, cancellation, or SSE termination.
+- Coverage is turn-scoped. Do not fabricate model spans or missing timing,
+  claim complete native hierarchy, or promise recovery of lost events.
 
 ## 5. Decisions log
 
@@ -371,6 +408,30 @@ still govern the feature.
 | 19 | Failed-turn session IDs | echo generated ID on any failure / echo only resumable generated IDs | Always return caller-supplied IDs; return generated IDs only when the runtime confirms the session is resumable, consistently across HTTP, chat, and SSE surfaces. | Human (larohra) | 2026-10-07 |
 | 20 | Public shutdown API | keep manager-specific name / use neutral runtime name | Remove `shutdown_client_manager()` and expose `shutdown_runtime()` for acquired harness-owned resources. | Human (larohra) | 2026-10-07 |
 
+### Approved telemetry addendum decisions
+
+These decisions govern the telemetry addendum only; they do not revise the
+previously approved harness decisions above.
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 21 | GenAI-semantics scope | new Copilot telemetry follows GenAI semantics / whole-runtime blanket compliance | Have the new Copilot runtime-owned invocation and tool telemetry follow the selected GenAI semantic-conventions snapshot only where the runtime has exact matching values; keep MAF unchanged and avoid any duplicate canonical wrappers. | Human (larohra) | 2026-10-13 |
+| 22 | Canonical invocation and tool boundaries | keep custom `agent.run` naming / adopt Copilot canonical GenAI names | Use `invoke_agent {name}` for Copilot invocation spans and `execute_tool {name}` for Copilot tool spans, preserving the existing session-event subscription, explicit host context, wrapper ownership, and matched native-timing rules. | Human (larohra) | 2026-10-13 |
+| 23 | Stable fields, usage, and privacy | infer missing provider/model semantics / emit only proven fields | Emit standard identity, conversation, provider, and tool fields only from stable runtime state; keep usage as the existing custom event plus exact-match `gen_ai.usage.*` fields; defer inference spans and standard metrics; keep allowlisted telemetry and never include full `tool_calls` records in Copilot run logs. | Human (larohra) | 2026-10-13 |
+| 24 | Copilot exception diagnostics | keep Copilot exception details suppressed/content-free / match installed MAF exception capture at runtime-owned boundaries | Disable automatic OTel exception/status recording on Copilot runtime-owned ingress, delegate, leaf, and custom-tool spans, then explicitly capture actual caught Python failures once per span with OpenTelemetry exception events, `error.type`, `ERROR` status, and `af.fault_domain` regardless of `ENABLE_SENSITIVE_DATA`; keep prompt/request/response gating unchanged, preserve cancellation as nonfailure, and keep native-only SDK tool failures as structured statuses without fabricated exception events. | Human (larohra) | 2026-10-14 |
+| 25 | Harness-neutral runtime telemetry surface | divergent Copilot `invoke_agent` invocation naming / shared runtime invocation contract | Supersede the divergent invocation naming from the earlier telemetry addendum: runtime-owned invocation spans use `agent.run {slug}` and shared `af.agent.*` fields for both harnesses, with `af.agent.harness=maf\|copilot` as a span attribute. Keep adapter-owned tool and usage projection truthful without fabricating unavailable model spans, timing, provider, or native SDK hierarchy. | Human (larohra) | 2026-10-14 |
+| 26 | Non-HTTP run-log content gating | keep non-HTTP raw response/tool logging unchanged / share the HTTP run-log privacy switch | Use the shared run-log payload builder for non-HTTP and HTTP entrypoints: metadata is logged by default, response content is logged only when `ENABLE_SENSITIVE_DATA=true`, raw tool-call records remain allowed for MAF when enabled, and Copilot run logs continue to exclude raw tool-call records. | Human (larohra) | 2026-10-14 |
+
+### Approved runner simplification
+
+These decisions supersede earlier restrictions only where stated. Authentication,
+capability authorization, privacy, and cleanup contracts remain unchanged.
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 28 | Bound-runner responsibilities | separate adapter strategy and forwarding facade / one app-bound runner contract | Use one concrete runner per immutable app binding for execution, pre-registration qualification, defaults, history support, and observability policy. Runner creation is resource-free; SDK imports and acquired resources stay lazy. Same-root apps and binding clones retain independent runners and native owners, and shutdown preserves existing error/cancellation precedence. | Human (larohra) | 2026-10-14 |
+| 29 | Harness discriminator namespace | `af.harness` / shared `af.agent.*` namespace | Refine the harness-neutral telemetry decision to use `af.agent.harness=maf\|copilot`; invocation names, other attributes, exception policy, privacy, and truthful tool/usage evidence stay unchanged. | Human (larohra) | 2026-10-14 |
+
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |
@@ -385,12 +446,13 @@ still govern the feature.
 | Debug UI/history | Verify live chat/streaming and native continuation, display the no-transcript-restore notice, preserve MAF transcript replay, and surface native resume failures without retry-as-create. |
 | Non-HTTP entrypoints | Exercise each existing binding serializer and shared-handler contract offline; separately qualify each trigger on a real Functions host with actual binding delivery before marking it supported. Resource-blocked triggers remain unqualified, not unsupported. |
 | Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, and errors without replacement sessions. Real-host transport and system-key auth qualification remains separate. |
-| Harness cleanup | Verify selected-harness-only provider, warning, observability, and history ownership; legacy compaction warning/default behavior; public shutdown; and failed-turn session IDs on HTTP, chat, and SSE. |
+| Harness cleanup | Verify resource-free runner creation/qualification, per-binding and clone isolation, concurrent runner caching, selected-harness-only provider/warning/observability/history ownership, legacy compaction warning/default behavior, public shutdown, and failed-turn session IDs on HTTP, chat, and SSE. |
+| Copilot telemetry | Cover direct/SSE, delegates, workflow leaves, non-HTTP and UI ingress; usage deduplication/accounting, tool ownership and ordering, incomplete timing, cancellation/error cleanup, both privacy modes, and unchanged MAF behavior. |
 
 ## 7. Docs impact
 
 - `docs/architecture.md` documents the harness boundary, neutral capability
-  model, and selected-harness persistence split at the architecture level.
+  model, selected-harness persistence split, and Copilot telemetry ownership.
 - `docs/front-matter-spec.md` documents unchanged authoring surfaces and calls
   out that Copilot reuses the same MCP/skill filtering fields.
 - The cleanup amendment removes public custom-client injection, documents the
@@ -399,6 +461,10 @@ still govern the feature.
 - `README.md` and operational docs may describe the bounded preview and storage
   namespace, but should defer detailed operational behavior to dedicated preview
   documentation rather than expanding this FRD.
+- `docs/observability.md` and `docs/copilot-preview-operations.md` document
+  telemetry semantics, limits, privacy, and operator setup; align
+  `README.md`, `docs/index.md`, and `docs/getting-started.md` if preview
+  observability expectations change.
 
 ## 8. Status & sign-off
 
@@ -406,6 +472,15 @@ still govern the feature.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.
+- **Telemetry addendum sign-off:** larohra approved the revised Copilot
+  telemetry addendum on 2026-10-13. The addendum decisions above govern
+  Copilot telemetry except where a later row explicitly names shared runtime
+  behavior. On
+  2026-10-14 larohra approved the harness-neutral runtime invocation and
+  `af.agent.harness` attribute contract, which supersedes the earlier divergent
+  Copilot invocation naming while preserving truthful tool and usage telemetry.
+  The same day, larohra approved applying the shared sensitive-data run-log
+  payload contract to non-HTTP entrypoints for both harnesses.
 - **Scope note:** This FRD records the durable feature contract only. It does
   not preserve superseded iteration history, review churn, or qualification
   narratives that no longer change the product boundary.
@@ -413,3 +488,7 @@ still govern the feature.
   cleanup amendment on 2026-10-07. Independent architecture review returned
   **READY** on 2026-10-07; implementation may proceed under this amended
   contract.
+- **Runner simplification sign-off:** larohra approved the bound-runner
+  simplification on 2026-10-14. The shared harness discriminator is
+  `af.agent.harness`. Existing authorization, lazy acquisition, isolation,
+  telemetry privacy, and cleanup guarantees remain required.

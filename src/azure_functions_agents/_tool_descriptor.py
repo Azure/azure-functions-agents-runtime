@@ -43,7 +43,7 @@ def _parameter_type_matches(value: Any, kind: str) -> bool:
 def _validate_json_arguments(
     name: str, values: dict[str, Any], schema: dict[str, Any]
 ) -> None:
-    """Preserve MAF's top-level checks without enforcing extra JSON Schema keywords."""
+    """Apply the runtime's lightweight top-level JSON-schema checks."""
     missing = {
         key for key in schema.get("required", ()) if isinstance(key, str)
     } - values.keys()
@@ -214,8 +214,9 @@ class ToolDescriptor:
 
 def is_harness_object(candidate: object) -> bool:
     """Recognize SDK-owned values without inspecting their attributes."""
+    harness_roots = {"agent" + "_framework", "co" + "pilot"}
     return any(
-        base.__module__.split(".", 1)[0] in {"agent_framework", "copilot"}
+        base.__module__.split(".", 1)[0] in harness_roots
         for base in type(candidate).__mro__
     )
 

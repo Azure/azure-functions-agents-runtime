@@ -10,7 +10,6 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger
-from azure_functions_agents._observability import record_agent_file_discovery
 from azure_functions_agents._slug import (
     _agent_file_suffix,
     _is_single_agent_file,
@@ -31,6 +30,12 @@ _FRONTMATTER_ACTION_ITEMS = (
 )
 
 type _ConfigDocument = dict[str, object]
+
+
+def record_agent_file_discovery(*, suffix: str) -> None:
+    from azure_functions_agents._observability import record_agent_file_discovery as record
+
+    record(suffix=suffix)
 
 
 def _collect_agent_files(directory: Path) -> list[Path]:
@@ -111,7 +116,7 @@ def _mapping_field(data: _ConfigDocument, key: str) -> _ConfigDocument | None:
 def _ignore_retired_compaction_setting(
     data: _ConfigDocument, source_file: Path
 ) -> _ConfigDocument:
-    """Drop only the retired MAF compaction setting while preserving strict validation."""
+    """Drop only the retired compaction setting while preserving strict validation."""
     configuration = _mapping_field(data, "agent_configuration")
     if configuration is None:
         return data
@@ -125,7 +130,7 @@ def _ignore_retired_compaction_setting(
     logger.warning(
         "Ignoring retired configuration field "
         "agent_configuration.agent_framework.compaction.max_context_window_tokens: file=%s "
-        "MAF uses its native model-aware compaction default.",
+        "the selected runtime uses its native model-aware compaction default.",
         source_file,
     )
     compaction.pop("max_context_window_tokens")

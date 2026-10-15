@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from copilot.session_events import (
@@ -14,9 +15,11 @@ from copilot.session_events import (
 from copilot.tools import ToolInvocation, ToolResult
 from pydantic import BaseModel
 
+import azure_functions_agents._observability as observability
 from azure_functions_agents._agent_run_diagnostics import _tool_error_count
 from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import (
     CopilotToolCalls,
+    _timestamp_ns,
     tool_result_text,
 )
 
@@ -37,6 +40,12 @@ class _DictionaryResult:
 
 class _TextResult:
     text = "ordinary custom text"
+
+
+def test_timestamp_ns_uses_exact_integer_epoch_conversion() -> None:
+    moment = datetime(2042, 3, 4, 5, 6, 7, 890123, tzinfo=UTC)
+
+    assert _timestamp_ns(moment) == 2_277_522_367_890_123_000
 
 
 @pytest.mark.parametrize(
@@ -83,8 +92,12 @@ def test_ordinary_results_preserve_text_and_json_shape(value, expected):
     assert tool_result_text(value) == expected
 
 
-def test_harness_sdk_results_are_rejected_instead_of_flattened():
+def test_sdk_results_use_the_same_python_conversion_as_other_values():
     from agent_framework import Content
+
+    from azure_functions_agents.harness.copilot_sdk._tool_result import (
+        tool_result_text as ordinary_conversion,
+    )
 
     values = [
         Content.from_text("SDK-owned content"),
@@ -93,13 +106,12 @@ def test_harness_sdk_results_are_rejected_instead_of_flattened():
         {"nested": ToolResult(text_result_for_llm="SDK-owned content")},
     ]
     for value in values:
-        with pytest.raises(TypeError, match="SDK objects"):
-            tool_result_text(value)
+        assert tool_result_text(value) == ordinary_conversion(value)
 
 
-def _start(call_id="native-1", name="skill", arguments=None):
+def _start(call_id="native-1", name="skill", arguments=None, **kwargs):
     return ToolExecutionStartData(
-        tool_call_id=call_id, tool_name=name, arguments=arguments
+        tool_call_id=call_id, tool_name=name, arguments=arguments, **kwargs
     )
 
 
@@ -306,3 +318,441 @@ def test_start_only_preserves_an_uncompleted_call_and_first_seen_order():
     assert [call["tool_call_id"] for call in recorded.calls] == ["first", "second"]
     assert "result" not in recorded.calls[0]
     assert recorded.calls[1]["result"] == "ok"
+
+
+@pytest.mark.parametrize("mcp_metadata", [False, True])
+def test_native_tool_pair_creates_one_explicitly_parented_span(monkeypatch, mcp_metadata):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-tool-calls-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(seconds=2)
+    start_event_id = uuid4()
+    end_event_id = uuid4()
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            agent_name="main",
+            session_id="session-123",
+        )
+        calls.start_native(
+            _start(
+                name="remote_lookup",
+                **(
+                    {"mcp_server_name": "fixture-server", "mcp_tool_name": "lookup"}
+                    if mcp_metadata
+                    else {}
+                ),
+            ),
+            event_id=start_event_id,
+            timestamp=start,
+        )
+        calls.complete_native(
+            _complete(),
+            event_id=end_event_id,
+            timestamp=end,
+        )
+        calls.complete_native(
+            _complete(content="duplicate"),
+            event_id=end_event_id,
+            timestamp=end,
+        )
+        calls.finish_telemetry()
+
+    tool_spans = [
+        span for span in exporter.get_finished_spans()
+        if span.name == "execute_tool remote_lookup"
+    ]
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    start_delta = start - epoch
+    end_delta = end - epoch
+    expected_start_ns = (
+        (start_delta.days * 86_400 + start_delta.seconds) * 1_000_000_000
+        + start_delta.microseconds * 1_000
+    )
+    expected_end_ns = (
+        (end_delta.days * 86_400 + end_delta.seconds) * 1_000_000_000
+        + end_delta.microseconds * 1_000
+    )
+    assert len(tool_spans) == 1
+    assert tool_spans[0].parent.span_id != 0
+    assert tool_spans[0].start_time == expected_start_ns
+    assert tool_spans[0].end_time == expected_end_ns
+    assert tool_spans[0].attributes["gen_ai.operation.name"] == "execute_tool"
+    assert tool_spans[0].attributes["gen_ai.tool.call.id"] == "native-1"
+    assert tool_spans[0].attributes["af.tool.source"] == "native"
+    assert tool_spans[0].attributes["gen_ai.agent.name"] == "main"
+    assert tool_spans[0].attributes["gen_ai.agent.id"] == "local/main"
+    assert tool_spans[0].attributes["gen_ai.conversation.id"] == "session-123"
+    assert tool_spans[0].attributes["gen_ai.tool.name"] == "remote_lookup"
+    assert tool_spans[0].attributes["af.tool.outcome"] == "success"
+    assert "af.tool.name" not in tool_spans[0].attributes
+    if mcp_metadata:
+        assert tool_spans[0].attributes["mcp.method.name"] == "tools/call"
+    else:
+        assert "mcp.method.name" not in tool_spans[0].attributes
+
+
+def test_failed_native_tool_sets_error_status_without_exception_content(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-native-tool-error-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(seconds=2)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            agent_name="main",
+            session_id="session-123",
+        )
+        calls.start_native(
+            _start(name="remote_lookup"),
+            event_id=uuid4(),
+            timestamp=start,
+        )
+        calls.complete_native(
+            _complete(
+                success=False,
+                content="private failure detail",
+                error=ToolExecutionCompleteError(message="private error detail"),
+            ),
+            event_id=uuid4(),
+            timestamp=end,
+        )
+        calls.finish_telemetry()
+
+    [failed_span] = [
+        span for span in exporter.get_finished_spans()
+        if span.name == "execute_tool remote_lookup"
+    ]
+    assert failed_span.attributes["af.tool.outcome"] == "error"
+    assert failed_span.attributes["error.type"] == "tool_execution_error"
+    assert failed_span.status.status_code.name == "ERROR"
+    assert failed_span.status.description == "Native tool failed or was denied."
+    assert failed_span.attributes["af.fault_domain"] == "unknown"
+    assert all(event.name != "exception" for event in failed_span.events)
+    assert "private failure detail" not in repr(failed_span.events)
+    assert "private error detail" not in repr(failed_span.events)
+
+
+@pytest.mark.parametrize(
+    ("start_event_id", "start_time", "end_event_id", "end_time", "reason"),
+    [
+        (
+            None, datetime(2026, 1, 1, tzinfo=UTC), uuid4(),
+            datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC), "missing_event_id",
+        ),
+        (
+            uuid4(), datetime(2026, 1, 1), uuid4(),
+            datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC), "invalid_interval",
+        ),
+        (
+            uuid4(), datetime(2026, 1, 1, tzinfo=UTC), uuid4(),
+            datetime(2025, 12, 31, tzinfo=UTC), "invalid_interval",
+        ),
+    ],
+)
+def test_invalid_native_timing_emits_incomplete_metadata_not_a_span(
+    monkeypatch, start_event_id, start_time, end_event_id, end_time, reason,
+):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-tool-calls-invalid-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+        )
+        calls.start_native(
+            _start(name="remote_lookup"),
+            event_id=start_event_id,
+            timestamp=start_time,
+        )
+        calls.complete_native(
+            _complete(),
+            event_id=end_event_id,
+            timestamp=end_time,
+        )
+        calls.finish_telemetry()
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["agent.run main"]
+    [incomplete] = spans[0].events
+    assert incomplete.name == "af.tool.incomplete"
+    assert incomplete.attributes["af.tool.incomplete_reason"] == reason
+
+
+@pytest.mark.parametrize("native_first", [False, True])
+def test_custom_tool_wrapper_claims_reserved_native_call_once(monkeypatch, native_first):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-custom-tool-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+            custom_tool_names=("host_tool",),
+            agent_name="main",
+            session_id="session-123",
+        )
+
+        def emit_native_pair():
+            start_time = datetime.now(UTC)
+            calls.start_native(
+                _start(name="host_tool"),
+                event_id=uuid4(),
+                timestamp=start_time,
+            )
+            calls.complete_native(
+                _complete(),
+                event_id=uuid4(),
+                timestamp=start_time + timedelta(seconds=1),
+            )
+
+        if native_first:
+            emit_native_pair()
+        invocation = ToolInvocation(
+            tool_call_id="native-1",
+            tool_name="host_tool",
+            arguments={},
+        )
+        claimed = calls.start_custom(invocation)
+        with calls.custom_span(invocation, claimed=claimed) as span:
+            span.set_attribute("af.tool.outcome", "success")
+        calls.complete_custom("native-1", "safe result", success=True)
+        if not native_first:
+            emit_native_pair()
+        calls.finish_telemetry()
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans].count("execute_tool host_tool") == 1
+    [custom_span] = [span for span in spans if span.name == "execute_tool host_tool"]
+    assert custom_span.attributes["gen_ai.operation.name"] == "execute_tool"
+    assert custom_span.attributes["gen_ai.tool.call.id"] == "native-1"
+    assert custom_span.attributes["af.tool.source"] == "wrapper"
+    assert custom_span.attributes["gen_ai.tool.name"] == "host_tool"
+    assert custom_span.attributes["gen_ai.conversation.id"] == "session-123"
+    assert "af.tool.name" not in custom_span.attributes
+
+
+def test_duplicate_custom_start_claims_one_wrapper_span(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-duplicate-wrapper-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    parent = tracer.start_span("agent.run main")
+    invocation = ToolInvocation(
+        tool_call_id="same-call",
+        tool_name="host_tool",
+        arguments={},
+    )
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(parent_context=observability.capture_current_context())
+        first_claim = calls.start_custom(invocation)
+        with calls.custom_span(invocation, claimed=first_claim):
+            pass
+        second_claim = calls.start_custom(invocation)
+        with calls.custom_span(invocation, claimed=second_claim) as duplicate_span:
+            duplicate_span.set_attribute("af.tool.duplicate", True)
+        calls.finish_telemetry()
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans].count("execute_tool host_tool") == 1
+
+
+def test_reused_native_event_id_is_incomplete_not_timed(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-reused-native-event-id-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    event_id = uuid4()
+    start = datetime.now(UTC)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+        )
+        calls.start_native(
+            _start(name="remote_lookup"),
+            event_id=event_id,
+            timestamp=start,
+        )
+        calls.complete_native(
+            _complete(),
+            event_id=event_id,
+            timestamp=start + timedelta(seconds=1),
+        )
+        calls.finish_telemetry()
+
+    [run_span] = exporter.get_finished_spans()
+    [incomplete] = run_span.events
+    assert incomplete.name == "af.tool.incomplete"
+    assert incomplete.attributes["af.tool.incomplete_reason"] == "duplicate_event_id"
+
+
+def test_duplicate_native_starts_are_incomplete_not_timed(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-duplicate-native-start-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+        )
+        calls.start_native(_start(name="remote_lookup"), event_id=uuid4(), timestamp=start)
+        calls.start_native(
+            _start(name="remote_lookup"),
+            event_id=uuid4(),
+            timestamp=start + timedelta(milliseconds=10),
+        )
+        calls.complete_native(
+            _complete(),
+            event_id=uuid4(),
+            timestamp=start + timedelta(seconds=1),
+        )
+        calls.finish_telemetry()
+
+    [run_span] = exporter.get_finished_spans()
+    [incomplete] = run_span.events
+    assert incomplete.name == "af.tool.incomplete"
+    assert incomplete.attributes["af.tool.incomplete_reason"] == "ambiguous_start_events"
+
+
+def test_native_start_without_terminal_marks_incomplete_during_cleanup(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-missing-native-terminal-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+        )
+        calls.start_native(
+            _start(name="remote_lookup"),
+            event_id=uuid4(),
+            timestamp=datetime.now(UTC),
+        )
+        calls.finish_telemetry()
+
+    [run_span] = exporter.get_finished_spans()
+    [incomplete] = run_span.events
+    assert incomplete.name == "af.tool.incomplete"
+    assert incomplete.attributes["af.tool.incomplete_reason"] == "missing_completion"
+
+
+def test_native_completion_before_start_remains_incomplete(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-completion-before-start-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    start = datetime.now(UTC)
+    parent = tracer.start_span("agent.run main")
+
+    with trace.use_span(parent, end_on_exit=True):
+        calls = CopilotToolCalls(
+            parent_context=observability.capture_current_context(),
+            run_span=observability.current_span(),
+        )
+        calls.complete_native(
+            _complete(),
+            event_id=uuid4(),
+            timestamp=start + timedelta(seconds=1),
+        )
+        calls.start_native(
+            _start(name="remote_lookup"),
+            event_id=uuid4(),
+            timestamp=start,
+        )
+        calls.finish_telemetry()
+
+    [run_span] = exporter.get_finished_spans()
+    [incomplete] = run_span.events
+    assert incomplete.name == "af.tool.incomplete"
+    assert incomplete.attributes["af.tool.incomplete_reason"] == "invalid_interval"

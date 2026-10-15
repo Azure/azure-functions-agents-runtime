@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from .._function_tool import WorkflowTool
 from .._logger import logger
 from .._slug import delegate_tool_name
-from .._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor, describe_skill_catalog, describe_skill_paths
@@ -43,11 +43,11 @@ class AgentCapabilities:
     def create(
         cls,
         *,
-        filtered_user_tools: Sequence[ToolInput] | None = None,
+        filtered_user_tools: Sequence[ToolDescriptor] | None = None,
         filtered_workflow_tools: Sequence[WorkflowTool] = (),
         filtered_mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         enabled_skill_paths: Sequence[Path] = (),
-        web_request_tools: Sequence[ToolInput] | None = None,
+        web_request_tools: Sequence[ToolDescriptor] | None = None,
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] = (),
         _harness: AppHarness | None = None,
@@ -66,7 +66,7 @@ class AgentCapabilities:
             ),
             enabled_skill_paths=tuple(skill.path for skill in approved),
             web_request_tools=(
-                None if web_request_tools is None else describe_tools(web_request_tools)
+                None if web_request_tools is None else tuple(web_request_tools)
             ),
             skills=approved,
             skill_catalog=catalog,
@@ -104,7 +104,7 @@ def with_runtime_skill_paths(
 
 
 def _filter_tools_by_name(
-    tools: Sequence[ToolInput], exclude_names: set[str]
+    tools: Sequence[ToolDescriptor], exclude_names: set[str]
 ) -> tuple[ToolDescriptor, ...]:
     return tuple(tool for tool in describe_tools(tools) if tool.name not in exclude_names)
 
@@ -125,13 +125,13 @@ def _build_web_request_tools(resolved: ResolvedAgent) -> tuple[ToolDescriptor, .
         return ()
     # Imported lazily so registration import cost stays low when the tool is unused.
     web_request_module = import_module("azure_functions_agents.system_tools.web_request")
-    return describe_tools(web_request_module.create_web_request_tools(resolved.web_request_config))
+    return tuple(web_request_module.create_web_request_tools(resolved.web_request_config))
 
 
 def build_capabilities(
     resolved: ResolvedAgent,
     *,
-    discovered_user_tools: Sequence[ToolInput],
+    discovered_user_tools: Sequence[ToolDescriptor],
     discovered_workflow_tools: Sequence[WorkflowTool] | None = None,
     discovered_mcp_tools: Mapping[str, MCPServerDescriptor],
     discovered_skills: Mapping[str, Path],
@@ -205,8 +205,8 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     Used by :func:`validate_subagent_tool_names` for fail-fast collision
     checks. Skill tools are excluded (not exposed as top-level tools by
     name). Covers each MCP server's configured name but not its individual
-    remote functions (unknown at composition time) — MAF's ``Agent.run()``
-    independently rejects those collisions once expanded.
+    remote functions, which are unknown at composition time and remain the
+    selected adapter's responsibility once expanded.
     """
     names = {tool.name for tool in capabilities.filtered_user_tools or ()}
     names.update(tool.name for tool in capabilities.filtered_mcp_tools or ())

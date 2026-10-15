@@ -15,8 +15,17 @@ from azure_functions_agents import runner as _runner
 from ..._agent_identity import agent_id
 from ..._agent_run_diagnostics import AgentExecutionSurface, _looks_like_tool_error
 from ..._logger import logger
-from ..._observability import FaultDomain, LifecycleStage, start_span
-from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ..._observability import (
+    ATTR_AGENT_OUTCOME,
+    ATTR_AGENT_TOOL_ERROR_COUNT,
+    FaultDomain,
+    LifecycleStage,
+    SpanOutcome,
+    agent_run_span_name,
+    gen_ai_agent_name,
+    start_span,
+)
+from ..._tool_descriptor import ToolCallable, ToolDescriptor
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
 from ...config.paths import get_app_root
@@ -27,7 +36,13 @@ from ...discovery.tools import discover_user_tools
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .. import _harness_execution
-from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest, HarnessSessionState
+from .._harness_binding import (
+    AppHarness,
+    ExecutionRole,
+    HarnessRequest,
+    HarnessSessionState,
+    agent_run_attributes_for_harness,
+)
 from .._history_identity import validate_agent_slug
 from .._provider_config import InferenceTarget
 from ._maf_client import build_chat_client
@@ -41,13 +56,12 @@ if TYPE_CHECKING:
         AgentResponseUpdate,
         AgentSession,
         Content,
-        FunctionTool,
         HistoryProvider,
-        MCPStreamableHTTPTool,
         Message,
         ResponseStream,
         RoleLiteral,
         SupportsChatGetResponse,
+        ToolTypes,
         UsageDetails,
     )
     from azure.durable_functions import DurableFunctionsClient
@@ -55,8 +69,8 @@ if TYPE_CHECKING:
     from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
-type AgentFunctionTool = ToolInput
-type AgentTool = FunctionTool | MCPStreamableHTTPTool
+type AgentFunctionTool = ToolDescriptor
+type AgentTool = ToolTypes | ToolCallable
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
 type _FunctionArguments = str | Mapping[str, Any] | None
 type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
@@ -256,25 +270,25 @@ def _build_chat_options_from_environment() -> _ChatOptions | None:
 def assemble_agent_inputs(
     *,
     instructions: str | None,
-    tools: Sequence[ToolInput] | None,
+    tools: Sequence[ToolDescriptor] | None,
     mcp_tools: Sequence[MCPServerDescriptor] | None,
-    sandbox_tools: Sequence[ToolInput] | None,
-    web_request_tools: Sequence[ToolInput] | None,
+    sandbox_tools: Sequence[ToolDescriptor] | None,
+    web_request_tools: Sequence[ToolDescriptor] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None,
     agent_name: str | None,
     resolved_id: str | None,
-    delegate_tools: Sequence[ToolInput] | None,
+    delegate_tools: Sequence[ToolDescriptor] | None,
     workflow_policy: WorkflowPlanPolicy | None,
     app_root: Path | None = None,
 ) -> tuple[list[AgentTool], str | None]:
     root = app_root or get_app_root()
     descriptors = [
-        *describe_tools(discover_user_tools(root).tools if tools is None else tools),
-        *describe_tools(sandbox_tools or ()),
-        *describe_tools(web_request_tools or ()),
+        *(discover_user_tools(root).tools if tools is None else tools),
+        *(sandbox_tools or ()),
+        *(web_request_tools or ()),
     ]
     if workflow_enabled:
         from ...workflows.tools import build_workflow_tools
@@ -299,7 +313,7 @@ def assemble_agent_inputs(
 
         resolved_tools.extend(build_maf_mcp_tools(servers))
     if delegate_tools:
-        resolved_tools.extend(build_maf_tools(describe_tools(delegate_tools)))
+        resolved_tools.extend(build_maf_tools(delegate_tools))
     effective = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:
         effective = (effective or "") + system_addendum
@@ -333,8 +347,7 @@ def _build_role_agent(
         if skill_paths
         else None
     )
-    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
-    maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
+    maf_agent_name = gen_ai_agent_name(agent_name, default="main")
     with suppress_experimental_warnings():
         return create_harness_agent(
             chat_client,
@@ -445,13 +458,13 @@ async def _build_agent_session(
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path] | None,
     model: str | None,
-    sandbox_tools: Sequence[ToolInput] | None,
+    sandbox_tools: Sequence[ToolDescriptor] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
-    web_request_tools: Sequence[ToolInput] | None = None,
+    web_request_tools: Sequence[ToolDescriptor] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -800,9 +813,19 @@ async def run_stream(
         "af.agent.execution_surface": execution_surface,
     }
     with start_span(
-        f"agent.run {agent_name or 'agent'}",
+        agent_run_span_name(agent_name=agent_name),
         lifecycle_stage=LifecycleStage.AGENT_RUN,
-        attributes=attributes,
+        attributes={
+            **agent_run_attributes_for_harness(
+                harness,
+                agent_name=agent_name,
+                display_name=display_name,
+                trigger_type="stream",
+                session_id=resolved_id,
+                model=model,
+            ),
+            "af.agent.execution_surface": execution_surface,
+        },
     ) as span:
         ordinary_tool_error_count = 0
         try:
@@ -920,7 +943,7 @@ async def run_stream(
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
                             yield _sse_frame(event)
-                    span.set_attribute("af.agent.outcome", "success")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
                     stream_settled = True
                     try:
                         yield _sse_frame({"type": "done"})
@@ -939,7 +962,7 @@ async def run_stream(
                     if not stream_settled:
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
@@ -957,7 +980,7 @@ async def run_stream(
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                     yield _sse_frame({"type": "error", "content": str(exc)})
                 finally:
@@ -969,14 +992,14 @@ async def run_stream(
                         if usage_recorder is not None:
                             _emit_usage(usage_recorder)
         except TimeoutError:
-            span.set_attribute("af.agent.outcome", "error")
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
             yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
         finally:
             span.set_attribute(
-                "af.agent.tool_error_count",
+                ATTR_AGENT_TOOL_ERROR_COUNT,
                 (delegate_error_tracker.count if delegate_error_tracker else 0)
                 + ordinary_tool_error_count,
             )

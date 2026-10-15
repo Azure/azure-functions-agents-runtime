@@ -84,11 +84,6 @@ if TYPE_CHECKING:
         return app
 
 
-def _tool_name(tool: object) -> str:
-    name = getattr(tool, "name", "") or ""
-    return str(name)
-
-
 def _serialize_capabilities_for_log(
     *,
     user_tools: Sequence[ToolDescriptor] | None,
@@ -158,7 +153,7 @@ def _compose_function_app(
     global_config = load_global_config(resolved_root)
 
     # Bootstrap runtime-owned observability before anything runs. The selected harness owns any
-    # additional SDK-native instrumentation (for example, MAF gen_ai spans).
+    # additional SDK-native instrumentation.
     configure_observability()
 
     agent_specs = load_agent_specs(resolved_root)
@@ -178,7 +173,7 @@ def _compose_function_app(
     skill_names = list(skills)
     mcp_names = list(mcp_tools)
     skill_name_by_path = {str(path.resolve()): name for name, path in skills.items()}
-    discovered_user_tool_names = sorted(_tool_name(tool) for tool in user_tools)
+    discovered_user_tool_names = sorted(tool.name for tool in user_tools)
 
     logger.info(
         "discovery_summary: mcp_servers=%s skills=%s user_tools=%s",

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, get_type_hints
 
 import azure.durable_functions as df
 import azure.functions as func
 import pytest
 
-import azure_functions_agents._hosted_skill_app as hosted_app_module
 from azure_functions_agents import HostedSkill
 from azure_functions_agents._hosted_skill_app import (
     HostedSkillDFApp,
@@ -67,16 +67,16 @@ def _app(
 ) -> tuple[HostedSkillFunctionApp, list[str | None]]:
     validated_models: list[str | None] = []
 
-    def resolve_inference_target(model: str | None) -> None:
-        validated_models.append(model)
+    def validate_hosted_skill(resolved: ResolvedAgent) -> None:
+        validated_models.append(resolved.model)
 
-    monkeypatch.setattr(
-        hosted_app_module,
-        "resolve_inference_target",
-        resolve_inference_target,
-    )
     catalog = build_catalog({"internal": entry or _entry(tmp_path)})
-    harness = AppHarness(harness_kind, tmp_path)
+    validator = validate_hosted_skill if harness_kind is HarnessKind.MAF else None
+    harness = AppHarness(
+        harness_kind,
+        tmp_path,
+        _create_runner=lambda _harness: SimpleNamespace(validate_hosted_skill=validator),
+    )
     return HostedSkillFunctionApp(catalog=catalog, harness=harness), validated_models
 
 
@@ -227,13 +227,14 @@ def test_enhanced_apps_preserve_sdk_base_types(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        hosted_app_module,
-        "resolve_inference_target",
-        lambda _model: None,
-    )
     catalog = build_catalog({"internal": _entry(tmp_path)})
-    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    harness = AppHarness(
+        HarnessKind.MAF,
+        tmp_path,
+        _create_runner=lambda _harness: SimpleNamespace(
+            validate_hosted_skill=lambda _resolved: None
+        ),
+    )
 
     function_app = HostedSkillFunctionApp(catalog=catalog, harness=harness)
     durable_app = HostedSkillDFApp(catalog=catalog, harness=harness)

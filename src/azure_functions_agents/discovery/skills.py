@@ -77,7 +77,7 @@ def describe_skill_paths(paths: Sequence[Path]) -> tuple[SkillDescriptor, ...]:
 
 
 def describe_skill_catalog(paths: Sequence[Path]) -> tuple[SkillDescriptor, ...]:
-    """Identify MAF-compatible roots beneath explicitly supplied search paths."""
+    """Identify skill roots beneath explicitly supplied search paths."""
     result = _describe_skill_files(_find_skill_files(paths))
     return result.descriptors
 

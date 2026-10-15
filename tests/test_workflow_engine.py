@@ -18,7 +18,7 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     WorkflowSubagentRef,
 )
-from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._harness_binding import HarnessKind
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import activity as workflow_activity
@@ -36,6 +36,7 @@ from azure_functions_agents.workflows.schema import (
     WorkflowPlanPolicy,
     validate_plan,
 )
+from tests._harness_helpers import make_copilot_harness
 
 
 class _FakeApp:
@@ -108,7 +109,7 @@ def _registered_function(
 
 @pytest.mark.asyncio
 async def test_sub_agent_activity_retains_app_harness_and_reauthorizes(monkeypatch, tmp_path):
-    bound = AppHarness(HarnessKind.COPILOT, tmp_path)
+    bound = make_copilot_harness(tmp_path)
     seen = []
 
     async def run_leaf(*args, **kwargs):
@@ -165,8 +166,8 @@ async def test_activity_redelivery_uses_serving_app_binding_after_environment_ch
     from azure_functions_agents.harness._harness_binding import FLAG
     from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
 
-    first = AppHarness(HarnessKind.COPILOT, tmp_path / "first")
-    replacement = AppHarness(HarnessKind.COPILOT, tmp_path / "replacement")
+    first = make_copilot_harness(tmp_path / "first")
+    replacement = make_copilot_harness(tmp_path / "replacement")
     policies = {
         "coordinator": WorkflowPlanPolicy(
             allowed_tools=frozenset(),
@@ -271,8 +272,8 @@ def test_compatibility_activities_propagate_distinct_app_harnesses(
     from azure_functions_agents.harness import _harness_binding as _harness
     from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
 
-    first = AppHarness(HarnessKind.COPILOT, tmp_path / "first")
-    replacement = AppHarness(HarnessKind.COPILOT, tmp_path / "replacement")
+    first = make_copilot_harness(tmp_path / "first")
+    replacement = make_copilot_harness(tmp_path / "replacement")
     catalog = _catalog("analyst")
     seen = []
 

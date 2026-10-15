@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from ..._credential import build_async_credential
 from ..._logger import logger
 from .. import _harness_lifecycle
+from .._agent_runner import get_agent_runner
 from .._harness_binding import AppHarness, HarnessKind
 from ._copilot_preview import CopilotPreviewError
 from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
     from copilot import CopilotClient
     from copilot.session import ProviderTokenArgs
 
+    from ._copilot_runner import CopilotRunner
+
 _START_TIMEOUT_SECONDS = 30
 _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 
@@ -25,11 +28,10 @@ _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 class CopilotRuntime:
     """One SDK-managed stdio client owned by one identity-distinct app binding."""
 
-    def __init__(self, harness: AppHarness) -> None:
-        if harness.storage_root is None:
-            raise CopilotPreviewError("Copilot was not selected for this app.")
+    def __init__(self, harness: AppHarness, runner: CopilotRunner) -> None:
         self._harness = harness
-        self.native_root = harness.storage_root / "native"
+        self._runner = runner
+        self.native_root = runner.storage_root / "native"
         self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
         self._start_lock = asyncio.Lock()
@@ -89,8 +91,8 @@ class CopilotRuntime:
 
     def _release_runtime(self) -> None:
         with self._harness._resources.guard:
-            if self._harness._resources.runtime is self:
-                self._harness._resources.runtime = None
+            if self._runner.runtime is self:
+                self._runner.runtime = None
         _harness_lifecycle._unregister_shutdown(self._close_callback)
 
     async def close(self) -> None:
@@ -145,11 +147,12 @@ class CopilotRuntime:
 
 def get_runtime(harness: AppHarness) -> CopilotRuntime:
     """Construct one resource-free owner under the app binding's synchronous guard."""
-    if harness.name is not HarnessKind.COPILOT or harness.storage_root is None:
+    if harness.name is not HarnessKind.COPILOT:
         raise CopilotPreviewError("Copilot was not selected for this app.")
+    runner = cast("CopilotRunner", get_agent_runner(harness))
     with harness._resources.guard:
-        owner = harness._resources.runtime
+        owner = runner.runtime
         if owner is None:
-            owner = CopilotRuntime(harness)
-            harness._resources.runtime = owner
+            owner = CopilotRuntime(harness, runner)
+            runner.runtime = owner
         return owner

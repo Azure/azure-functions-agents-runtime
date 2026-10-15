@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from weakref import WeakSet
+
 from agent_framework.observability import enable_instrumentation
 
 from ..._logger import logger
 from .._harness_binding import AppHarness
 
-_configured_harnesses: set[int] = set()
+_configured_harnesses: WeakSet[AppHarness] = WeakSet()
 
 
 def _capture_sensitive_data() -> bool:
@@ -18,11 +20,10 @@ def _capture_sensitive_data() -> bool:
 
 def configure_maf_instrumentation(harness: AppHarness) -> None:
     """Enable MAF instrumentation once for a selected MAF resource binding."""
-    key = id(harness)
-    if key in _configured_harnesses:
+    if harness in _configured_harnesses:
         return
     try:
         enable_instrumentation(enable_sensitive_data=_capture_sensitive_data())
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Could not enable Agent Framework instrumentation: %s", exc)
-    _configured_harnesses.add(key)
+    _configured_harnesses.add(harness)

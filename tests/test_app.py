@@ -365,7 +365,10 @@ def test_create_function_app_catalogs_inert_agent_for_hosted_skill(
         """,
     )
 
-    monkeypatch.setattr(hosted_app_module, "resolve_inference_target", lambda _model: None)
+    monkeypatch.setattr(
+        "azure_functions_agents.harness.agent_framework._maf_runner.resolve_inference_target",
+        lambda _model: None,
+    )
     app = create_function_app(tmp_path)
 
     @app.hosted_skill(arg_name="skill", agent_name="internal")

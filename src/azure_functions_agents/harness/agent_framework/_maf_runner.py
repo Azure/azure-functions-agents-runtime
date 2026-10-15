@@ -1,8 +1,8 @@
-"""Private MAF-backed implementation of the bound execution facade."""
+"""App-bound MAF execution and policy."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -10,16 +10,16 @@ from typing import TYPE_CHECKING, Literal
 from azure_functions_agents import runner as _runner
 
 from ..._agent_run_diagnostics import AgentExecutionSurface
-from ..._tool_descriptor import ToolInput
+from ..._tool_descriptor import ToolDescriptor
 from ...config import ResolvedAgent, SubagentRef
 from ...config.schema import AgentConfiguration
 from ...discovery.mcp import MCPServerDescriptor
 from ...discovery.skills import SkillDescriptor
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
-from .._agent_runner import AgentFunctionTool, AgentRunner
+from .._agent_runner import AgentFunctionTool
 from .._harness_binding import AppHarness, HarnessSessionState, SessionHistory
-from ._maf_observability import configure_maf_instrumentation
+from .._provider_config import resolve_inference_target
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -28,9 +28,25 @@ if TYPE_CHECKING:
     from ...workflows.schema import WorkflowPlanPolicy
 
 
-class _MAFHarnessRunner:
+class MafRunner:
+    default_model = None
+    auto_record_exceptions = True
+    include_raw_tool_calls_in_sensitive_logs = True
+    session_history_unavailable_message = None
+    validate_agent: Callable[[ResolvedAgent, AgentCapabilities], None] | None = None
+
+    @staticmethod
+    def validate_hosted_skill(resolved: ResolvedAgent) -> None:
+        resolve_inference_target(resolved.model)
+
     def __init__(self, harness: AppHarness) -> None:
         self._harness = harness
+
+    def _configure_instrumentation(self) -> None:
+        from ._maf_observability import configure_maf_instrumentation
+
+        with self._harness._resources.guard:
+            configure_maf_instrumentation(self._harness)
 
     async def run_agent(
         self,
@@ -44,13 +60,13 @@ class _MAFHarnessRunner:
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: Sequence[ToolInput] | None = None,
+        sandbox_tools: Sequence[ToolDescriptor] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
-        web_request_tools: Sequence[ToolInput] | None = None,
+        web_request_tools: Sequence[ToolDescriptor] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
@@ -62,6 +78,7 @@ class _MAFHarnessRunner:
     ) -> AgentResult:
         from . import _maf_execution
 
+        self._configure_instrumentation()
         request = _runner._request(
             self._harness,
             prompt,
@@ -114,14 +131,14 @@ class _MAFHarnessRunner:
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: Sequence[ToolInput] | None = None,
+        sandbox_tools: Sequence[ToolDescriptor] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
         display_name: str | None = None,
-        web_request_tools: Sequence[ToolInput] | None = None,
+        web_request_tools: Sequence[ToolDescriptor] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
@@ -130,9 +147,11 @@ class _MAFHarnessRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_state: HarnessSessionState | None = None,
-        execution_surface: AgentExecutionSurface,
+        execution_surface: AgentExecutionSurface = AgentExecutionSurface.RUNNER_API,
     ) -> AsyncGenerator[str]:
         from . import _maf_execution
+
+        self._configure_instrumentation()
         request = _runner._request(
             self._harness,
             prompt,
@@ -191,6 +210,7 @@ class _MAFHarnessRunner:
     ) -> str:
         from . import _maf_execution
 
+        self._configure_instrumentation()
         return await _maf_execution.run_leaf_agent_task(
             resolved,
             replace(capabilities, _harness=self._harness),
@@ -198,9 +218,3 @@ class _MAFHarnessRunner:
             timeout=timeout,
             execution_role=execution_role,
         )
-
-
-def create_runner(harness: AppHarness) -> AgentRunner:
-    """Create the MAF-backed bound execution facade for one app binding."""
-    configure_maf_instrumentation(harness)
-    return AgentRunner(_MAFHarnessRunner(harness))

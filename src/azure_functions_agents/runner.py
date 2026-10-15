@@ -17,9 +17,15 @@ from ._agent_run_diagnostics import AgentExecutionSurface
 from ._agent_validation import SESSION_ID_PATTERN, validate_session_id
 from ._function_tool import tool
 from ._logger import logger
-from ._observability import FaultDomain, RuntimeSpan, current_span, record_delegate_call
+from ._observability import (
+    FaultDomain,
+    RuntimeSpan,
+    SpanOutcome,
+    current_span,
+    record_delegate_call,
+)
 from ._slug import delegate_tool_name
-from ._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ._tool_descriptor import ToolDescriptor, describe_tools
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
@@ -50,7 +56,7 @@ if TYPE_CHECKING:
 
     from .workflows.schema import WorkflowPlanPolicy
 
-type AgentFunctionTool = ToolInput
+type AgentFunctionTool = ToolDescriptor
 type AgentTool = ToolDescriptor | MCPServerDescriptor
 
 
@@ -149,11 +155,15 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
 
 
 def _record_generic_delegate_failure(
-    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
+    span: RuntimeSpan,
+    tracker: _DelegateErrorTracker,
+    harness: AppHarness | None,
+    slug: str,
+    exc: BaseException,
 ) -> str:
     tracker.record_error()
     record_delegate_call(error=True)
-    span.set_attribute("af.delegate.outcome", "error")
+    span.set_attribute("af.delegate.outcome", SpanOutcome.ERROR)
     span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return _sanitize_delegate_failure(slug, exc)
 
@@ -161,6 +171,7 @@ def _record_generic_delegate_failure(
 def _record_delegate_timeout(
     span: RuntimeSpan,
     tracker: _DelegateErrorTracker,
+    harness: AppHarness | None,
     slug: str,
     effective_timeout: float,
     exc: BaseException,
@@ -222,7 +233,7 @@ def _build_delegate_tool(
         timeout = min(resolved.timeout, remaining)
         if timeout <= 0:
             exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
-            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
+            return _record_delegate_timeout(span, tracker, harness, slug, timeout, exc)
         try:
             result = await run_leaf_agent_task(
                 resolved,
@@ -233,14 +244,14 @@ def _build_delegate_tool(
             )
         except asyncio.CancelledError:
             record_delegate_call(error=False)
-            span.set_attribute("af.delegate.outcome", "cancelled")
+            span.set_attribute("af.delegate.outcome", SpanOutcome.CANCELLED)
             raise
         except TimeoutError as exc:
-            return _record_delegate_timeout(span, tracker, slug, timeout, exc)
+            return _record_delegate_timeout(span, tracker, harness, slug, timeout, exc)
         except Exception as exc:
-            return _record_generic_delegate_failure(span, tracker, slug, exc)
+            return _record_generic_delegate_failure(span, tracker, harness, slug, exc)
         record_delegate_call(error=False)
-        span.set_attribute("af.delegate.outcome", "success")
+        span.set_attribute("af.delegate.outcome", SpanOutcome.SUCCESS)
         span.set_attribute("af.delegate.response_bytes", len(result))
         span.set_content("af.delegate.result", result)
         return result
@@ -280,13 +291,13 @@ def _request(
     instructions: str | None,
     session_id: str | None,
     session_is_new: bool,
-    tools: Sequence[ToolInput] | None,
+    tools: Sequence[ToolDescriptor] | None,
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path] | None,
     skills: Sequence[SkillDescriptor] | None,
     skill_catalog: Sequence[SkillDescriptor] | None,
-    sandbox_tools: Sequence[ToolInput] | None,
-    web_request_tools: Sequence[ToolInput] | None,
+    sandbox_tools: Sequence[ToolDescriptor] | None,
+    web_request_tools: Sequence[ToolDescriptor] | None,
     system_addendum: str | None,
     model: str | None,
     agent_name: str | None,
@@ -349,13 +360,13 @@ async def run_agent(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolInput] | None = None,
+    sandbox_tools: Sequence[ToolDescriptor] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
-    web_request_tools: Sequence[ToolInput] | None = None,
+    web_request_tools: Sequence[ToolDescriptor] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -409,14 +420,14 @@ async def run_agent_events(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolInput] | None = None,
+    sandbox_tools: Sequence[ToolDescriptor] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
-    web_request_tools: Sequence[ToolInput] | None = None,
+    web_request_tools: Sequence[ToolDescriptor] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -471,14 +482,14 @@ async def run_agent_stream(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolInput] | None = None,
+    sandbox_tools: Sequence[ToolDescriptor] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
-    web_request_tools: Sequence[ToolInput] | None = None,
+    web_request_tools: Sequence[ToolDescriptor] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,

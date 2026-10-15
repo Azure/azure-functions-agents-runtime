@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,6 +42,7 @@ def check_sdk_dependency() -> None:
 def select_copilot_harness(root: Path) -> AppHarness:
     """Freeze provider and storage settings without acquiring runtime resources."""
     from ._copilot_providers import _PROVIDERS
+    from ._copilot_runner import CopilotRunner
     from ._copilot_session_identity import resolve_route
 
     check_sdk_dependency()
@@ -67,10 +69,13 @@ def select_copilot_harness(root: Path) -> AppHarness:
     return AppHarness(
         HarnessKind.COPILOT,
         root,
-        route.local_dir / "copilot-preview",
-        model,
-        copilot_provider,
-        session_storage=route,
+        partial(
+            CopilotRunner,
+            storage_root=route.local_dir / "copilot-preview",
+            default_model=model,
+            provider=copilot_provider,
+            session_storage=route,
+        ),
     )
 
 
