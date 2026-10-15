@@ -37,20 +37,20 @@ from azure_functions_agents.harness._harness_binding import (
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import (
-    _copilot_execution as _copilot,
+    _copilot_capabilities as _preview,
 )
 from azure_functions_agents.harness.copilot_sdk import (
-    _copilot_preview as _preview,
+    _copilot_execution as _copilot,
 )
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as _runtime,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     AzureOpenAIProvider,
     FoundryProvider,
     OpenAIProvider,
 )
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
 from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     CopilotSessionError,

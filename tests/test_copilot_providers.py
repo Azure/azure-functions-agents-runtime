@@ -24,15 +24,15 @@ from azure_functions_agents.harness.copilot_sdk import (
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as runtime,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     _PROVIDERS,
     AzureOpenAIProvider,
     FoundryProvider,
     OpenAIProvider,
 )
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from tests._harness_helpers import copilot_state, make_copilot_harness
-from tests.test_copilot_preview import preview as preview
+from tests.test_copilot_runtime import preview as preview
 
 
 @pytest.fixture

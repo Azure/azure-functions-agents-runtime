@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from functools import partial
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 from ..._credential import build_async_credential
 from ..._logger import logger
+from ...config.env import EnvVar, raw_env_value
 from .. import _harness_lifecycle
 from .._agent_runner import get_agent_runner
-from .._harness_binding import AppHarness, HarnessKind
-from ._copilot_preview import CopilotPreviewError
-from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
+from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
+from .._provider_config import resolve_inference_target
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
@@ -20,6 +23,58 @@ if TYPE_CHECKING:
     from copilot.session import ProviderTokenArgs
 
     from ._copilot_runner import CopilotRunner
+
+
+SDK_DISTRIBUTION = "github-copilot-sdk"
+PROVIDER_ENV = EnvVar.PROVIDER
+
+
+class CopilotPreviewError(RuntimeError):
+    """A safe, actionable Copilot SDK error without underlying SDK details."""
+
+
+def check_sdk_dependency() -> None:
+    try:
+        version(SDK_DISTRIBUTION)
+    except PackageNotFoundError:
+        raise CopilotPreviewError(
+            "Copilot preview requires azurefunctions-agents-runtime[copilot]. "
+            f"Install {SDK_DISTRIBUTION} through the optional extra."
+        ) from None
+
+
+def select_copilot_harness(root: Path) -> AppHarness:
+    """Freeze provider and storage settings without acquiring runtime resources."""
+    from ._copilot_providers import _PROVIDERS
+    from ._copilot_session_identity import resolve_route
+
+    check_sdk_dependency()
+    try:
+        target = resolve_inference_target(None)
+        provider, model = target.require()
+    except RuntimeError:
+        raise UnsupportedCapabilityError(
+            f"Copilot preview supports {PROVIDER_ENV}=openai, azure_openai, or foundry "
+            "with the existing explicit-or-autodetected provider settings."
+        ) from None
+    copilot_provider = _PROVIDERS[provider].from_environment()
+    for name in (EnvVar.REASONING_EFFORT, EnvVar.REASONING_SUMMARY):
+        if raw_env_value(name):
+            raise UnsupportedCapabilityError(f"Copilot preview does not support {name}.")
+    route = resolve_route(root)
+    from ._copilot_runner import CopilotRunner
+
+    return AppHarness(
+        HarnessKind.COPILOT,
+        root,
+        partial(
+            CopilotRunner,
+            storage_root=route.local_dir / "copilot-preview",
+            default_model=model,
+            provider=copilot_provider,
+            session_storage=route,
+        ),
+    )
 
 _START_TIMEOUT_SECONDS = 30
 _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
@@ -57,6 +112,8 @@ class CopilotRuntime:
                 return self._client
             self.workspace.mkdir(parents=True, exist_ok=True)
             from copilot import CopilotClient, RuntimeConnection
+
+            from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
 
             client = CopilotClient(
                 connection=RuntimeConnection.for_stdio(),

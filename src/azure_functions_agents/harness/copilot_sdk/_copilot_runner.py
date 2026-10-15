@@ -46,7 +46,7 @@ from .._stream_events import (
     StreamEvent,
     StreamTruncatedEvent,
 )
-from . import _copilot_preview
+from . import _copilot_capabilities
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -120,7 +120,7 @@ class CopilotRunner:
         self.runtime: CopilotRuntime | None = None
 
     def validate_agent(self, resolved: ResolvedAgent, capabilities: AgentCapabilities) -> None:
-        _copilot_preview.validate_copilot_agent(self._harness, resolved, capabilities)
+        _copilot_capabilities.validate_copilot_agent(self._harness, resolved, capabilities)
 
     async def run_agent(
         self,
@@ -156,7 +156,7 @@ class CopilotRunner:
         del timeout
 
         configuration = agent_configuration or AgentConfiguration()
-        _copilot_preview.validate_configuration(configuration)
+        _copilot_capabilities.validate_configuration(configuration)
         if workflow_enabled and workflow_policy is None:
             raise UnsupportedCapabilityError(
                 "Copilot workflow management requires a bound per-agent workflow policy."
@@ -215,7 +215,7 @@ class CopilotRunner:
 
         request = replace(
             request,
-            tools=_copilot_preview.prepare_tools(
+            tools=_copilot_capabilities.prepare_tools(
                 [*request.tools, *workflow_tools, *delegate_tools]
             ),
             event_sink=event_sink,
@@ -366,9 +366,7 @@ class CopilotRunner:
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str:
-        from . import _copilot_execution
-
-        _copilot_preview.validate_configuration(resolved.agent_configuration)
+        _copilot_capabilities.validate_configuration(resolved.agent_configuration)
         resolved_model = resolved.model or self.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
@@ -390,6 +388,8 @@ class CopilotRunner:
             },
         ) as span:
             try:
+                from . import _copilot_execution
+
                 result = await _copilot_execution.run(
                     self._harness,
                     HarnessRequest(
@@ -399,7 +399,7 @@ class CopilotRunner:
                         session_id=session_id,
                         new_session=True,
                         model=resolved_model,
-                        tools=_copilot_preview.prepare_tools(
+                        tools=_copilot_capabilities.prepare_tools(
                             [
                                 *list(capabilities.filtered_user_tools or []),
                                 *list(capabilities.web_request_tools or []),

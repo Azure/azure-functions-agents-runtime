@@ -25,7 +25,7 @@ from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import HarnessRequest
 from azure_functions_agents.harness.copilot_sdk import _copilot_capabilities
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 
 
 def _request(**changes):
