@@ -1331,6 +1331,7 @@ def test_run_agent_events_records_session_build_failure_on_span(monkeypatch: Any
 
     assert [event.kind for event in events] == [HostedSkillEventKind.ERROR]
     [span] = spans
+    assert span.attributes["af.agent.harness"] == "maf"
     assert span.attributes["af.agent.execution_surface"] == "hosted_skill_binding"
     assert span.attributes["af.agent.outcome"] == "error"
     assert span.exceptions == [failure]

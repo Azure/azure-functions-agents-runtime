@@ -784,19 +784,20 @@ async def run_stream(
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        attributes = {
-            "af.agent.name": agent_name,
-            "af.agent.display_name": display_name,
-            "af.agent.trigger_type": "stream",
-            "af.agent.model": model,
-            "af.agent.execution_surface": execution_surface,
-        }
         with start_span(
-            f"agent.run {agent_name or 'agent'}",
+            agent_run_span_name(agent_name=agent_name),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes=attributes,
+            attributes=agent_run_attributes_for_harness(
+                harness,
+                agent_name=agent_name,
+                display_name=display_name,
+                trigger_type="stream",
+                session_id=None,
+                model=model,
+                execution_surface=execution_surface,
+            ),
         ) as span:
-            span.set_attribute("af.agent.outcome", "error")
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
             span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
             yield _sse_frame({"type": "error", "content": str(exc)})
         return
@@ -804,14 +805,6 @@ async def run_stream(
     if not request.session_state.caller_supplied:
         yield _sse_frame({"type": "session", "session_id": resolved_id})
 
-    attributes = {
-        "af.agent.name": agent_name,
-        "af.agent.display_name": display_name,
-        "af.agent.trigger_type": "stream",
-        "af.agent.session_id": resolved_id,
-        "af.agent.model": model,
-        "af.agent.execution_surface": execution_surface,
-    }
     with start_span(
         agent_run_span_name(agent_name=agent_name),
         lifecycle_stage=LifecycleStage.AGENT_RUN,
