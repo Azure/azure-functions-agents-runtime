@@ -74,8 +74,15 @@ async def test_shared_ordinary_conversion_matches_actual_maf_invocation(value):
     assert tool_result_text(value) == parsed[0].text
 
 
-def test_nested_values_attempt_their_actual_conversion():
-    value = {"nested": _MappingResult()}
-    assert tool_result_text(value) == (
-        '{"nested": {"value": 1, "observed_on": "2026-10-06"}}'
-    )
+def test_adapter_can_reject_nested_unsupported_values_before_conversion():
+    forbidden = _MappingResult()
+    seen = []
+
+    def validate(value):
+        seen.append(value)
+        if value is forbidden:
+            raise TypeError("unsupported result")
+
+    with pytest.raises(TypeError, match="unsupported result"):
+        tool_result_text({"nested": forbidden}, validate_result=validate)
+    assert seen == [{"nested": forbidden}, forbidden]

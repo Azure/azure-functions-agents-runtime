@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from .._tool_descriptor import ToolInput
+from .._tool_descriptor import ToolDescriptor
 from ..config import ResolvedAgent, SubagentRef
 from ..config.schema import AgentConfiguration
 from ..discovery.mcp import MCPServerDescriptor
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from ..runner import AgentResult
     from ..workflows.schema import WorkflowPlanPolicy
 
-type AgentFunctionTool = ToolInput
+type AgentFunctionTool = ToolDescriptor
 
 
 class AgentRunner(Protocol):
@@ -56,13 +56,13 @@ class AgentRunner(Protocol):
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: Sequence[ToolInput] | None = None,
+        sandbox_tools: Sequence[ToolDescriptor] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
-        web_request_tools: Sequence[ToolInput] | None = None,
+        web_request_tools: Sequence[ToolDescriptor] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
@@ -85,14 +85,14 @@ class AgentRunner(Protocol):
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: Sequence[ToolInput] | None = None,
+        sandbox_tools: Sequence[ToolDescriptor] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
         display_name: str | None = None,
-        web_request_tools: Sequence[ToolInput] | None = None,
+        web_request_tools: Sequence[ToolDescriptor] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,

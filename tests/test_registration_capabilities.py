@@ -188,22 +188,8 @@ def test_build_capabilities_filters_user_tools_by_exclude_name() -> None:
     assert [t.name for t in capabilities.filtered_user_tools] == ["keep"]
 
 
-@pytest.mark.parametrize("kind", ["maf", "copilot", "function"])
-def test_authored_tools_keep_name_filters_and_delegate_collision_checks(kind):
-    from agent_framework import FunctionTool
-    from copilot.tools import Tool, ToolResult
-
-    def delegate_leaf(value: str) -> str:
-        return value
-
-    authored = (
-        FunctionTool(name="delegate_leaf", func=delegate_leaf)
-        if kind == "maf"
-        else Tool(name="delegate_leaf", description="Native",
-                  handler=lambda invocation: ToolResult(text_result_for_llm="ok"))
-        if kind == "copilot"
-        else delegate_leaf
-    )
+def test_filtered_tools_keep_name_filters_and_delegate_collision_checks() -> None:
+    authored = _named_tool("delegate_leaf")
     resolved = _resolved(subagents=[SubagentRef(agent="leaf")])
     capabilities = build_capabilities(
         resolved, discovered_user_tools=[authored],

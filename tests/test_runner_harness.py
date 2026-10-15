@@ -62,8 +62,8 @@ def test_agent_result_preserves_existing_positional_argument_order() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
-async def test_both_bound_runners_retain_authored_inputs_without_eager_invocation(
-    kind, monkeypatch,
+async def test_both_bound_runners_ignore_unsupported_inputs_without_eager_invocation(
+    kind, monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     from agent_framework import FunctionTool
 
@@ -91,8 +91,10 @@ async def test_both_bound_runners_retain_authored_inputs_without_eager_invocatio
     )
     assert result.content == "captured"
     request = invoke.call_args.args[1]
-    assert request.tools == (raw, undecorated, authored, raw, undecorated, raw, undecorated)
+    assert request.tools == (authored,)
     assert calls == []
+    assert "Ignoring unsupported custom tool" in caplog.text
+    assert "private-raw-name" not in caplog.text
 
 
 @pytest.mark.asyncio

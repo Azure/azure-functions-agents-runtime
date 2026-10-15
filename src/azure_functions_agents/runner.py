@@ -24,7 +24,7 @@ from ._observability import (
 )
 from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
-from ._tool_descriptor import ToolDescriptor, ToolInput
+from ._tool_descriptor import ToolDescriptor, describe_tools
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     from .workflows.schema import WorkflowPlanPolicy
 
-type AgentFunctionTool = ToolInput
+type AgentFunctionTool = ToolDescriptor
 type AgentTool = ToolDescriptor | MCPServerDescriptor
 
 
@@ -296,13 +296,13 @@ def _request(
     instructions: str | None,
     session_id: str | None,
     session_is_new: bool,
-    tools: Sequence[ToolInput] | None,
+    tools: Sequence[ToolDescriptor] | None,
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path] | None,
     skills: Sequence[SkillDescriptor] | None,
     skill_catalog: Sequence[SkillDescriptor] | None,
-    sandbox_tools: Sequence[ToolInput] | None,
-    web_request_tools: Sequence[ToolInput] | None,
+    sandbox_tools: Sequence[ToolDescriptor] | None,
+    web_request_tools: Sequence[ToolDescriptor] | None,
     system_addendum: str | None,
     model: str | None,
     agent_name: str | None,
@@ -311,10 +311,12 @@ def _request(
     deadline: float,
     session_state: HarnessSessionState | None = None,
 ) -> HarnessRequest:
-    authored_tools = (
-        *(discover_user_tools(harness.app_root).tools if tools is None else tools),
-        *(sandbox_tools or ()),
-        *(web_request_tools or ()),
+    descriptors = describe_tools(
+        (
+            *(discover_user_tools(harness.app_root).tools if tools is None else tools),
+            *(sandbox_tools or ()),
+            *(web_request_tools or ()),
+        )
     )
     servers = (
         tuple(discover_mcp_servers(harness.app_root).servers.values())
@@ -342,7 +344,7 @@ def _request(
         session_id=validated_id or uuid.uuid4().hex,
         new_session=validated_id is None or session_is_new,
         model=model or harness.default_model or "",
-        tools=authored_tools,
+        tools=descriptors,
         mcp_servers=servers,
         skills=approved,
         skill_catalog=_merge_skill_descriptors(discovered, approved),
@@ -363,13 +365,13 @@ async def run_agent(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolInput] | None = None,
+    sandbox_tools: Sequence[ToolDescriptor] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
-    web_request_tools: Sequence[ToolInput] | None = None,
+    web_request_tools: Sequence[ToolDescriptor] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -423,14 +425,14 @@ async def run_agent_stream(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolInput] | None = None,
+    sandbox_tools: Sequence[ToolDescriptor] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
-    web_request_tools: Sequence[ToolInput] | None = None,
+    web_request_tools: Sequence[ToolDescriptor] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,

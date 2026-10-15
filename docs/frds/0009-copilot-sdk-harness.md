@@ -94,13 +94,11 @@ Copilot fails. Standalone runner calls use the same resolution boundary.
 ### 4.2 SDK-neutral capability boundary
 
 Discovery and registration do not import harness SDKs. Runtime-owned capabilities
-use immutable SDK-free descriptors; authored tool objects may pass through
-unchanged as opaque user inputs:
+use immutable SDK-free descriptors:
 
 | Descriptor | Required contents | Excluded from the descriptor |
 | --- | --- | --- |
-| Runtime tool | name, description, JSON schema, callable, approval mode | SDK state |
-| Authored tool | original object or callable; public name metadata for filtering and collision checks | host-owned cross-SDK compatibility promises |
+| Tool | name, description, JSON schema, callable, approval mode | SDK tool objects, harness-only keyword passthrough |
 | MCP server | name, URL, transport, static headers, tool filter, optional Entra scope/client ID | SDK transport/client objects, live tokens |
 | Skill | canonical candidate directory path, directory-name identity | parsed `SKILL.md`, authored description, loaded content |
 
@@ -116,9 +114,7 @@ Direct, streaming, and leaf execution share that binding. Public helper
 signatures, deadline timing, SSE error boundaries, and cleanup guarantees stay
 unchanged.
 
-`HarnessRequest` carries runtime descriptors, opaque authored tool inputs, and
-scalar execution settings. Shared code neither interprets SDK tool state nor
-checks a tool's package, type origin, or return-value origin.
+`HarnessRequest` carries runtime descriptors plus scalar execution settings.
 
 Selected execution implementations own SDK construction:
 
@@ -132,31 +128,15 @@ handling, SDK session lifecycle, and SDK-specific result conversion.
 
 ### 4.3 Tool authoring contract
 
-Authored tools are user-controlled:
+The supported runtime authoring surface is intentionally narrow:
 
 - Runtime `@tool(...)` declarations remain supported.
-- A `tools/*.py` module contributes its first declared named tool, preferring
-  runtime descriptors, or its first public local function as the fallback.
-  Imported functions, classes, unrelated globals, and workflow-only declarations
-  are not automatically exposed. Discovery never invokes authored functions.
-- Programmatic tools retain the supplied objects or callables. Native tools
-  accepted by the selected SDK execute without host origin restrictions.
-- Incompatible inputs fail through ordinary schema, SDK, serialization, or
-  execution errors. The host does not silently omit them or retry another harness.
-
-Runtime `@tool` supports only `name`, `description`, `schema`, and
-`approval_mode`. Unknown arguments raise the ordinary Python `TypeError` rather
-than being silently ignored. Authors who need native options use their SDK's
-own tools or decorators; those objects retain their native settings. The host
-does not snapshot SDK state into `ToolDescriptor`.
-
-Runtime descriptors retain their input-schema and approval-policy behavior.
-Native tools retain their SDK-owned metadata and invocation semantics. The host
-does not translate native tools across SDKs, enforce a portable-tool allowlist,
-or reject result objects because they came from an SDK. Ordinary conversion
-attempts supported serialization; conversion failures remain failures. Transport
-authentication, capability filters, scoped helper authorization, registration
-metadata, and request validation remain enforced.
+- A `tools/*.py` module may still contribute its first public local function as
+  the tool fallback.
+- Raw SDK tool objects, SDK decorators, and undecorated direct programmatic
+  inputs outside discovery are ignored with a sanitized warning.
+- `@tool` accepts only `name`, `description`, `schema`, and `approval_mode`;
+  extra keyword arguments are warned and ignored rather than passed through.
 
 ### 4.4 Skills boundary
 
@@ -439,17 +419,16 @@ previously approved harness decisions above.
 | 22 | Canonical invocation and tool boundaries | keep custom `agent.run` naming / adopt Copilot canonical GenAI names | Use `invoke_agent {name}` for Copilot invocation spans and `execute_tool {name}` for Copilot tool spans, preserving the existing session-event subscription, explicit host context, wrapper ownership, and matched native-timing rules. | Human (larohra) | 2026-10-13 |
 | 23 | Stable fields, usage, and privacy | infer missing provider/model semantics / emit only proven fields | Emit standard identity, conversation, provider, and tool fields only from stable runtime state; keep usage as the existing custom event plus exact-match `gen_ai.usage.*` fields; defer inference spans and standard metrics; keep allowlisted telemetry and never include full `tool_calls` records in Copilot run logs. | Human (larohra) | 2026-10-13 |
 | 24 | Copilot exception diagnostics | keep Copilot exception details suppressed/content-free / match installed MAF exception capture at runtime-owned boundaries | Disable automatic OTel exception/status recording on Copilot runtime-owned ingress, delegate, leaf, and custom-tool spans, then explicitly capture actual caught Python failures once per span with OpenTelemetry exception events, `error.type`, `ERROR` status, and `af.fault_domain` regardless of `ENABLE_SENSITIVE_DATA`; keep prompt/request/response gating unchanged, preserve cancellation as nonfailure, and keep native-only SDK tool failures as structured statuses without fabricated exception events. | Human (larohra) | 2026-10-14 |
-| 25 | Harness-neutral runtime telemetry surface | divergent Copilot `invoke_agent` invocation naming / shared runtime invocation contract | Supersede the divergent invocation naming from the earlier telemetry addendum: runtime-owned invocation spans use `agent.run {slug}` and shared `af.agent.*` fields for both harnesses, with `af.harness=maf\|copilot` as a span attribute. Keep adapter-owned tool and usage projection truthful without fabricating unavailable model spans, timing, provider, or native SDK hierarchy. | Human (larohra) | 2026-10-14 |
+| 25 | Harness-neutral runtime telemetry surface | divergent Copilot `invoke_agent` invocation naming / shared runtime invocation contract | Supersede the divergent invocation naming from the earlier telemetry addendum: runtime-owned invocation spans use `agent.run {slug}` and shared `af.agent.*` fields for both harnesses, with `af.agent.harness=maf\|copilot` as a span attribute. Keep adapter-owned tool and usage projection truthful without fabricating unavailable model spans, timing, provider, or native SDK hierarchy. | Human (larohra) | 2026-10-14 |
 | 26 | Non-HTTP run-log content gating | keep non-HTTP raw response/tool logging unchanged / share the HTTP run-log privacy switch | Use the shared run-log payload builder for non-HTTP and HTTP entrypoints: metadata is logged by default, response content is logged only when `ENABLE_SENSITIVE_DATA=true`, raw tool-call records remain allowed for MAF when enabled, and Copilot run logs continue to exclude raw tool-call records. | Human (larohra) | 2026-10-14 |
 
-### Approved authored-tool and runner simplification
+### Approved runner simplification
 
 These decisions supersede earlier restrictions only where stated. Authentication,
 capability authorization, privacy, and cleanup contracts remain unchanged.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
-| 27 | Authored-tool responsibility | host portable-tool policing / user-owned tools with SDK execution | Supersede the origin restrictions and silent keyword dropping in the capability and tool-authoring decisions: retain authored tool objects and callables, run compatible inputs through the selected SDK, and surface ordinary incompatibility or conversion failures. Do not reject tool or result objects by SDK origin, silently drop them, or guarantee cross-harness compatibility. The convenience decorator has an explicit Python signature; native options stay on authored SDK objects. Keep runtime schema behavior, basic registration metadata, authentication, and capability authorization. | Human (larohra) | 2026-10-14 |
 | 28 | Bound-runner responsibilities | separate adapter strategy and forwarding facade / one app-bound runner contract | Use one concrete runner per immutable app binding for execution, pre-registration qualification, defaults, history support, and observability policy. Runner creation is resource-free; SDK imports and acquired resources stay lazy. Same-root apps and binding clones retain independent runners and native owners, and shutdown preserves existing error/cancellation precedence. | Human (larohra) | 2026-10-14 |
 | 29 | Harness discriminator namespace | `af.harness` / shared `af.agent.*` namespace | Refine the harness-neutral telemetry decision to use `af.agent.harness=maf\|copilot`; invocation names, other attributes, exception policy, privacy, and truthful tool/usage evidence stay unchanged. | Human (larohra) | 2026-10-14 |
 
@@ -458,8 +437,8 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | Area | Required proof |
 | --- | --- |
 | Harness selection | Resolve once per app, propagate to handlers/delegates/workflows, and reject invalid selector values without fallback. |
-| Neutral capability boundary | Prove shared modules import no harness SDKs and do not inspect SDK tool state. Retain immutable runtime/MCP/skill descriptors and opaque authored inputs; enforce concrete import boundaries. |
-| Tool authoring | Cover runtime `@tool`, named native tools, first-public-function fallback, callable inputs, retained native SDK metadata, ordinary result conversion, honest failures, and no authored invocation during discovery. Run native-tool discovery in a fresh process so import order cannot mask behavior. |
+| Neutral capability boundary | Prove discovery/registration outputs and `HarnessRequest` contain only immutable SDK-free descriptors; enforce import boundaries so MAF imports stay in MAF adapters and Copilot imports stay in Copilot adapters. |
+| Tool authoring | Cover runtime `@tool`, first-public-function fallback, raw SDK tool rejection warnings, ignored extra kwargs, and explicit failure for unsupported callable signatures. |
 | Skills | Cover depth-2 path discovery, basename exclusions, path-only discovery, ownership for overlapping roots, and the absence of host `SKILL.md` parsing or manual catalog generation. |
 | MCP/auth/helpers | Cover existing per-agent/per-server filters, blank-scope normalization, generated bearer precedence, native MCP/helper event accounting, and scoped helper permission denials. |
 | Persistence | Exercise SessionFs read/write/append/stat/list/mkdir/remove/rename behavior on local and Blob backends, selected-harness-only initialization, and shared `agent_id` path routing. |
@@ -498,7 +477,7 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
   Copilot telemetry except where a later row explicitly names shared runtime
   behavior. On
   2026-10-14 larohra approved the harness-neutral runtime invocation and
-  `af.harness` attribute contract, which supersedes the earlier divergent
+  `af.agent.harness` attribute contract, which supersedes the earlier divergent
   Copilot invocation naming while preserving truthful tool and usage telemetry.
   The same day, larohra approved applying the shared sensitive-data run-log
   payload contract to non-HTTP entrypoints for both harnesses.
@@ -509,9 +488,7 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
   cleanup amendment on 2026-10-07. Independent architecture review returned
   **READY** on 2026-10-07; implementation may proceed under this amended
   contract.
-- **Authored-tool and runner simplification sign-off:** larohra approved the
-  user-owned authored-tool contract and removal of redundant harness layers on
-  2026-10-14. Tools and results are not rejected by SDK origin; compatibility is
-  determined by the selected SDK and execution. The shared harness discriminator
-  is `af.agent.harness`. Existing authorization, lazy acquisition, isolation,
+- **Runner simplification sign-off:** larohra approved the bound-runner
+  simplification on 2026-10-14. The shared harness discriminator is
+  `af.agent.harness`. Existing authorization, lazy acquisition, isolation,
   telemetry privacy, and cleanup guarantees remain required.

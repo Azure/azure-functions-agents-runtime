@@ -466,14 +466,15 @@ def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
     assert [function.name for function in request.tools] == ["user_tool", "execute_python", "web_request"]
 
 
-def test_authored_duplicate_names_are_left_to_the_selected_sdk(preview, monkeypatch):
+def test_duplicate_tool_names_are_rejected_before_native_execution(preview, monkeypatch):
     invoke = AsyncMock(return_value=runner.AgentResult("session", "captured"))
     monkeypatch.setattr(_copilot, "run", invoke)
     duplicate = tool(name="web_request")(lambda: "duplicate")
-    asyncio.run(runner.run_agent(
-        "hello", tools=[duplicate], mcp_tools=[], web_request_tools=[duplicate],
-    ))
-    assert invoke.call_args.args[1].tools == (duplicate, duplicate)
+    with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
+        asyncio.run(runner.run_agent(
+            "hello", tools=[duplicate], mcp_tools=[], web_request_tools=[duplicate],
+        ))
+    invoke.assert_not_called()
 
 
 def test_workflow_management_requires_bound_policy(preview):

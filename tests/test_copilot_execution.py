@@ -309,8 +309,6 @@ def test_tool_result_text_preserves_plain_text_and_serializes_sdk_content():
 async def _invoke_native_tool(function, arguments, event_sink=None):
     from copilot.tools import ToolInvocation
 
-    from azure_functions_agents._tool_descriptor import tool_name
-
     calls = CopilotToolCalls()
     descriptor = function
     native_tool = _copilot._tool(descriptor, calls, event_sink)
@@ -319,136 +317,11 @@ async def _invoke_native_tool(function, arguments, event_sink=None):
         ToolInvocation(
             session_id="native-session",
             tool_call_id="call-1",
-            tool_name=tool_name(descriptor),
+            tool_name=descriptor.name,
             arguments=arguments,
         )
     )
     return result, calls.calls
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("result_type", ["success", "failure", "denied"])
-async def test_authored_native_tool_preserves_sdk_metadata_results_and_invocation(
-    asynchronous, result_type
-):
-    from copilot.tools import Tool, ToolBinaryResult, ToolResult
-
-    effects = []
-    native_result = ToolResult(
-        text_result_for_llm="native response",
-        result_type=result_type,
-        binary_results_for_llm=[ToolBinaryResult(data="Zml4dHVyZQ==", mime_type="text/plain")],
-    )
-
-    def synchronous(invocation):
-        effects.append(invocation.arguments)
-        return native_result
-
-    async def awaited(invocation):
-        await asyncio.sleep(0)
-        return synchronous(invocation)
-
-    native = Tool(
-        name="native", description="Authored native tool",
-        handler=awaited if asynchronous else synchronous,
-        parameters={"type": "object", "properties": {"value": {"type": "string"}}},
-        metadata={"author": "fixture"},
-        overrides_built_in_tool=True,
-        skip_permission=True,
-        defer="never",
-        is_terminal=True,
-    )
-    wrapped = _copilot._tool(native, CopilotToolCalls())
-    assert wrapped is not native
-    assert native.handler is (awaited if asynchronous else synchronous)
-    for name in (
-        "name", "description", "parameters", "metadata", "overrides_built_in_tool",
-        "skip_permission", "defer", "is_terminal",
-    ):
-        assert getattr(wrapped, name) == getattr(native, name)
-    result, calls = await _invoke_native_tool(native, {"value": "ok"})
-    assert result is native_result
-    assert effects == [{"value": "ok"}]
-    assert calls[0]["result"] == "native response"
-    assert calls[0]["success"] is (result_type == "success")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("native", [False, True])
-async def test_authored_native_and_callable_failures_are_not_success_shaped(native):
-    from copilot.tools import Tool
-
-    def failing(value: str) -> str:
-        raise LookupError("actual authored failure")
-
-    candidate = (
-        Tool(name="failing", description="Fail", handler=lambda invocation: failing("value"))
-        if native else failing
-    )
-    result, calls = await _invoke_native_tool(candidate, {"value": "ok"})
-
-    assert result.result_type == "failure"
-    assert calls[0]["success"] is False
-    assert calls[0]["result"] == _copilot._SAFE_CUSTOM_TOOL_FAILURE
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sensitive", [False, True])
-async def test_native_result_failure_has_structured_status_without_invented_exception(
-    monkeypatch, sensitive
-):
-    from copilot.tools import Tool, ToolResult
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-    from opentelemetry.trace import StatusCode
-
-    import azure_functions_agents._observability as observability
-
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = provider.get_tracer("native-authored-tool")
-    monkeypatch.setattr(observability, "_enabled", True)
-    monkeypatch.setattr(observability, "_capture_sensitive_data", sensitive)
-    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
-    native_result = ToolResult(
-        text_result_for_llm="private-sentinel", result_type="failure", error="private-sentinel"
-    )
-    native = Tool(name="native", description="Native",
-                  handler=lambda invocation: native_result)
-
-    with tracer.start_as_current_span("agent.run main"):
-        result, calls = await _invoke_native_tool(native, {"value": "private-sentinel"})
-    [tool_span] = [span for span in exporter.get_finished_spans() if span.name == "execute_tool native"]
-
-    assert result is native_result
-    assert calls[0]["success"] is False
-    assert tool_span.status.status_code is StatusCode.ERROR
-    assert tool_span.attributes["af.tool.outcome"] == "error"
-    assert tool_span.attributes["error.type"] == "tool_execution_error"
-    assert not tool_span.events
-    assert "private-sentinel" not in repr(tool_span.attributes)
-    assert "private-sentinel" not in tool_span.status.description
-
-
-@pytest.mark.asyncio
-async def test_incompatible_authored_input_surfaces_python_error_before_acquisition(preview, monkeypatch):
-    import copilot
-
-    factory = Mock(side_effect=AssertionError("Native client must not start"))
-    credential = Mock(side_effect=AssertionError("Credentials must not be acquired"))
-    monkeypatch.setattr(copilot, "CopilotClient", factory)
-    monkeypatch.setattr(_runtime, "build_async_credential", credential)
-
-    with pytest.raises(TypeError, match="callable"):
-        await _copilot.run(preview, replace(_request(), tools=(object(),)))
-
-    factory.assert_not_called()
-    credential.assert_not_called()
-    assert not _lifecycle._SHUTDOWN_CALLBACKS
-    assert not copilot_state(preview).storage_root.exists()
 
 
 @pytest.mark.asyncio
@@ -1404,24 +1277,6 @@ async def test_native_custom_tools_preserve_json_results_and_fresh_parameter_sch
     result, calls = await _invoke_native_tool(descriptor, {"value": "ok"})
     assert result.result_type == "success"
     assert result.text_result_for_llm == '{"value": "ok", "items": [true, null]}'
-    assert calls[0]["result"] == result.text_result_for_llm
-
-
-@pytest.mark.asyncio
-async def test_runtime_tool_can_return_a_native_sdk_result_without_losing_semantics():
-    from copilot.tools import ToolResult
-
-    from azure_functions_agents._tool_descriptor import ToolDescriptor
-
-    native_result = ToolResult(text_result_for_llm="SDK result", result_type="denied")
-    descriptor = ToolDescriptor.create(
-        name="native_result", description="Returns an SDK result.", func=lambda: native_result
-    )
-    result, calls = await _invoke_native_tool(descriptor, {})
-
-    assert result is native_result
-    assert result.result_type == "denied"
-    assert calls[0]["success"] is False
     assert calls[0]["result"] == result.text_result_for_llm
 
 

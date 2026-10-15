@@ -676,22 +676,17 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools may be runtime `@tool` descriptors, native SDK tools, or
-local public functions in `tools/*.py`. Discovery selects one tool per module:
-runtime descriptors first, then named objects with public `name`/`description`
-metadata, then the first local public function. It does not invoke authored
-functions or expose imported functions and unrelated globals.
-Programmatic tools retain supplied objects/callables. The selected SDK determines
-compatibility; the runtime does not reject SDK origins, silently drop inputs,
-or guarantee cross-harness portability. Runtime schemas and capability
-authorization remain enforced.
-The convenience `@tool` accepts `name`, `description`, `schema`, and
-`approval_mode`; unknown keywords raise ordinary Python errors. Use your SDK's
-own tool objects or decorators for native settings such as `max_invocations`.
+Normal custom tools may be runtime `@tool` descriptors or local public
+functions in `tools/*.py`. Discovery selects one tool per module: runtime
+descriptors first, then the first local public function. It does not invoke
+authored functions or expose imported functions, classes, and unrelated
+globals. The convenience `@tool` accepts `name`, `description`, `schema`, and
+`approval_mode`; extra keyword arguments are warned and ignored. Runtime
+schemas and capability authorization still apply.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
-tasks; either decorator order is supported. Use `_`-prefixed helpers for functions that should be
-neither normal tools nor workflow tools.
+tasks; either decorator order is supported. Use `_`-prefixed helpers for
+functions that should be neither normal tools nor workflow tools.
 
 `workflows.exclude` filters only that agent's workflow Activity targets; it does
 not affect normal tools or another agent's workflow policy. Conversely,

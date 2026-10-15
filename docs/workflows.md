@@ -263,11 +263,9 @@ async def fetch_order(args: dict[str, Any]) -> dict[str, Any]:
 Only the workflow tool runs as async code. The Durable orchestrator
 continues to use `yield` and does not run tool I/O.
 
-Normal tools may be local public functions, runtime `@tool` descriptors, or
-native SDK tool objects in `tools/*.py`. Authored tools are retained; compatibility
-belongs to the selected SDK rather than an origin-based host allowlist. Use both
-decorators when one callable should be available both directly in chat
-and inside workflows:
+Normal tools may be local public functions or runtime `@tool` descriptors in
+`tools/*.py`. Use both decorators when one callable should be available both
+directly in chat and inside workflows:
 
 ```python
 from azure_functions_agents import tool, workflow_tool

@@ -14,7 +14,7 @@ from .._observability import TelemetryAttributeValue
 from .._observability import (
     agent_run_attributes as common_agent_run_attributes,
 )
-from .._tool_descriptor import ToolInput
+from .._tool_descriptor import ToolDescriptor
 from ..config.env import EnvVar, raw_env_value
 from ..config.paths import get_app_root
 from ..discovery.mcp import MCPServerDescriptor
@@ -99,7 +99,7 @@ class AppHarness:
 
 @dataclass(frozen=True)
 class HarnessRequest:
-    """Neutral request with runtime descriptors and opaque authored tools."""
+    """Neutral request with runtime descriptors and selected capabilities."""
 
     prompt: str
     instructions: str | None
@@ -107,7 +107,7 @@ class HarnessRequest:
     session_id: str
     new_session: bool
     model: str
-    tools: tuple[ToolInput, ...]
+    tools: tuple[ToolDescriptor, ...]
     max_output_tokens: int | None
     deadline: float
     mcp_servers: tuple[MCPServerDescriptor, ...] = ()

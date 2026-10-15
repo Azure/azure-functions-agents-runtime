@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from .._function_tool import WorkflowTool
 from .._logger import logger
 from .._slug import delegate_tool_name
-from .._tool_descriptor import ToolDescriptor, ToolInput, tool_name
+from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor, describe_skill_catalog, describe_skill_paths
@@ -30,7 +30,7 @@ SANDBOX_TOOL_NAME = "execute_python"
 class AgentCapabilities:
     """Resolved capability bundle for one agent — passed through to the runner."""
 
-    filtered_user_tools: tuple[ToolInput, ...] | None = None
+    filtered_user_tools: tuple[ToolDescriptor, ...] | None = None
     filtered_workflow_tools: tuple[WorkflowTool, ...] = ()
     filtered_mcp_tools: tuple[MCPServerDescriptor, ...] | None = None
     enabled_skill_paths: tuple[Path, ...] = ()
@@ -43,7 +43,7 @@ class AgentCapabilities:
     def create(
         cls,
         *,
-        filtered_user_tools: Sequence[ToolInput] | None = None,
+        filtered_user_tools: Sequence[ToolDescriptor] | None = None,
         filtered_workflow_tools: Sequence[WorkflowTool] = (),
         filtered_mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         enabled_skill_paths: Sequence[Path] = (),
@@ -58,7 +58,7 @@ class AgentCapabilities:
         catalog = _merge_skill_descriptors(skill_catalog, approved)
         return cls(
             filtered_user_tools=(
-                None if filtered_user_tools is None else tuple(filtered_user_tools)
+                None if filtered_user_tools is None else describe_tools(filtered_user_tools)
             ),
             filtered_workflow_tools=tuple(filtered_workflow_tools),
             filtered_mcp_tools=(
@@ -104,9 +104,9 @@ def with_runtime_skill_paths(
 
 
 def _filter_tools_by_name(
-    tools: Sequence[ToolInput], exclude_names: set[str]
-) -> tuple[ToolInput, ...]:
-    return tuple(tool for tool in tools if tool_name(tool) not in exclude_names)
+    tools: Sequence[ToolDescriptor], exclude_names: set[str]
+) -> tuple[ToolDescriptor, ...]:
+    return tuple(tool for tool in describe_tools(tools) if tool.name not in exclude_names)
 
 
 def _workflows_enabled(resolved: ResolvedAgent) -> bool:
@@ -131,7 +131,7 @@ def _build_web_request_tools(resolved: ResolvedAgent) -> tuple[ToolDescriptor, .
 def build_capabilities(
     resolved: ResolvedAgent,
     *,
-    discovered_user_tools: Sequence[ToolInput],
+    discovered_user_tools: Sequence[ToolDescriptor],
     discovered_workflow_tools: Sequence[WorkflowTool] | None = None,
     discovered_mcp_tools: Mapping[str, MCPServerDescriptor],
     discovered_skills: Mapping[str, Path],
@@ -141,7 +141,7 @@ def build_capabilities(
     exclude_names = set(resolved.tool_filter.exclude or [])
 
     if resolved.tools_disabled:
-        filtered_user_tools: tuple[ToolInput, ...] = ()
+        filtered_user_tools: tuple[ToolDescriptor, ...] = ()
     else:
         filtered_user_tools = _filter_tools_by_name(discovered_user_tools, exclude_names)
 
@@ -208,7 +208,7 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     remote functions, which are unknown at composition time and remain the
     selected adapter's responsibility once expanded.
     """
-    names = {tool_name(tool) for tool in capabilities.filtered_user_tools or ()}
+    names = {tool.name for tool in capabilities.filtered_user_tools or ()}
     names.update(tool.name for tool in capabilities.filtered_mcp_tools or ())
     names.update(tool.name for tool in capabilities.filtered_workflow_tools)
     names.update(tool.name for tool in capabilities.web_request_tools or ())

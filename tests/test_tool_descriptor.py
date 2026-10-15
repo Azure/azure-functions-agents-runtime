@@ -13,28 +13,7 @@ from pydantic import BaseModel, Field, create_model
 
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
-from azure_functions_agents.harness.agent_framework._maf_tools import (
-    build_maf_tools,
-)
-
-
-def test_programmatic_authored_tools_are_retained_without_inspection():
-    from agent_framework import FunctionTool
-
-    from azure_functions_agents.registration.capabilities import AgentCapabilities
-
-    class Opaque:
-        def __getattribute__(self, name):
-            raise AssertionError("Registration must not inspect SDK state")
-
-    def authored(value: str) -> str:
-        raise AssertionError("Registration must not execute authored code")
-
-    native = FunctionTool(name="native", func=authored)
-    candidates = (native, authored, Opaque())
-    capabilities = AgentCapabilities.create(filtered_user_tools=candidates)
-
-    assert capabilities.filtered_user_tools == candidates
+from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 
 
 class _Choice(Enum):

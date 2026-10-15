@@ -50,22 +50,14 @@ shared configuration does not initialize or probe the other implementation.
 Runtime-owned telemetry keeps the same invocation surface under either
 harness. Direct, streaming, built-in chat, inbound MCP, non-HTTP, delegate, and
 leaf runtime spans use `agent.run {slug}` plus the shared `af.agent.*`
-attributes and `af.agent.harness=maf|copilot`. The runtime does not create a
-separate harness span. Copilot fills only the SDK facts it actually observes:
-tool spans use `execute_tool {name}` when a wrapper or matched native event
-exists, usage arrives as `af.agent.model.usage` events with exact
-`gen_ai.usage.*` fields, and unavailable model timing, provider hierarchy, or
-native child spans are not fabricated.
+attributes and `af.agent.harness=maf|copilot`. Copilot adds observed tool spans
+and usage events without changing the runtime-owned surface.
 
 ## Authored Python tools
 
-Authored Python tools may use the runtime `@tool`, ordinary callables, or native
-Copilot `Tool`/`define_tool` declarations. The host preserves native metadata and
-`ToolResult` semantics, including failure status and binary results. Compatible
-tools execute; incompatible inputs and conversion errors fail without omission,
-origin-based rejection, or MAF fallback. No cross-harness compatibility is
-promised. Native permission settings remain SDK-owned; noninteractive execution
-requires appropriate authored settings, not a broad permission grant.
+Authored Python tools follow the normal runtime surface: runtime `@tool`
+descriptors or local public functions discovered from `tools/*.py`. Runtime
+filters, authentication, and input schemas still apply.
 
 ## MCP and scoped skills
 
@@ -251,17 +243,14 @@ that every host termination awaits that async shutdown path.
 
 Copilot telemetry reuses the active turn's existing public session-event
 subscription, the current OpenTelemetry provider, and the custom-tool wrapper.
-It adds no new settings, caps, receiver, exporter, flush/shutdown hook, or
-create/resume session-open telemetry. MAF behavior stays unchanged.
+It adds no new telemetry settings and leaves MAF behavior unchanged.
 
 Each unique public `ASSISTANT_USAGE` event is recorded as a custom
 `af.agent.model.usage` span event on the owning runtime invocation span.
 It uses standard `gen_ai.usage.*` fields where reported semantics match
 exactly; reported duration, TTFT, and inter-token measures remain custom
-`af.agent.usage.*` values. No backdated inference span is created or implied, and
-standard GenAI inference metrics remain deferred until the runtime has reliable
-boundary evidence. The existing once-only eight-field invocation totals stay
-unchanged.
+`af.agent.usage.*` values. The existing once-only eight-field invocation totals
+stay unchanged.
 
 Completion records, including completion-only records, continue to contribute
 to `AgentResult` and aggregate tool counts. A timed telemetry span requires a
@@ -282,16 +271,16 @@ final child text.
 | Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
 
 `ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but
-Copilot run-log payloads never include full `tool_calls` records; MAF run logging is unchanged. Credentials,
-authorization headers, raw event envelopes, reasoning text, and skill paths or
-content are never exported; skill telemetry uses the sanitized skill name only.
-Copilot runtime-owned ingress, delegate, leaf, and custom-tool spans still
-record caught Python exception messages and stack traces regardless of
-`ENABLE_SENSITIVE_DATA`, matching installed MAF behavior; prompt/request/
-response capture rules do not change, but arbitrary exception text may still be
-sensitive if application code includes it.
-Diagnostics and telemetry cleanup stay best-effort and non-throwing so they do
-not change request outcomes, cancellation, or SSE termination.
+Copilot run-log payloads never include full `tool_calls` records; MAF run
+logging is unchanged. Credentials, authorization headers, raw event envelopes,
+reasoning text, and skill paths or content are never exported; skill telemetry
+uses the sanitized skill name only. Diagnostics and telemetry cleanup stay
+best-effort and non-throwing so they do not change request outcomes,
+cancellation, or SSE termination.
+
+Caught Python exception messages and stack traces are recorded regardless of
+`ENABLE_SENSITIVE_DATA`, matching MAF behavior; application exception text
+may contain sensitive data.
 
 ## Inspecting a session
 
