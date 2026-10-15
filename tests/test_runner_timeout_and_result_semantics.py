@@ -1,9 +1,9 @@
-"""FRD 0009 C0: characterization tests locking `runner.py`'s current timeout
+"""FRD 0011 C0: characterization tests locking `runner.py`'s current timeout
 precedence and result/stream semantics.
 
 No product changes. These exist as a regression baseline before the C1
 dependency bump (Durable b2->b3, `durabletask`, MAF trio) — see
-docs/frds/0009-durable-agent-loop.md §4.14 (C0) and its test-plan §6 "Model/
+docs/frds/0011-durable-agent-loop.md §4.14 (C0) and its test-plan §6 "Model/
 replay" row ("whole-run timeout across replay/retry/human wait").
 
 Scope deliberately excludes what's already covered elsewhere:
