@@ -31,6 +31,9 @@ type AgentFunctionTool = ToolInput
 
 
 class _HarnessRunner(Protocol):
+    @property
+    def history_unavailable_reason(self) -> str | None: ...
+
     async def run_agent(
         self,
         prompt: str,
@@ -226,6 +229,10 @@ class AgentRunner:
             session_is_new=session_is_new,
             session_state=session_state,
         )
+
+    @property
+    def history_unavailable_reason(self) -> str | None:
+        return self._backend.history_unavailable_reason
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
         return await self._backend.get_session_history(agent_slug, session_id)

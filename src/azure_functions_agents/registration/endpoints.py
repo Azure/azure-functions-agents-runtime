@@ -22,7 +22,6 @@ from ..config import EndpointAuthConfig, ResolvedAgent
 from ..harness._agent_runner import get_agent_runner
 from ..harness._harness_binding import (
     AppHarness,
-    HarnessKind,
     HarnessSessionState,
     bind_harness,
     get_harness,
@@ -797,12 +796,9 @@ def _register_history_endpoint(
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
-        if selected_harness.name is HarnessKind.COPILOT:
-            return _json_error(
-                "Copilot preview does not support transcript replay. Native state is separate "
-                "from MAF history.",
-                status_code=501,
-            )
+        selected_runner = get_agent_runner(selected_harness)
+        if reason := selected_runner.history_unavailable_reason:
+            return _json_error(reason, status_code=501)
         session_id = _request_header_value(req, _SESSION_ID_HEADER) or ""
         if not session_id:
             return Response(
@@ -818,9 +814,7 @@ def _register_history_endpoint(
             )
 
         try:
-            history = await get_agent_runner(selected_harness).get_session_history(
-                slug, session_id
-            )
+            history = await selected_runner.get_session_history(slug, session_id)
         except Exception:
             logger.exception("history endpoint failed")
             return Response(

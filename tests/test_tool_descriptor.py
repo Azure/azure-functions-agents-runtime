@@ -417,3 +417,30 @@ def test_sdk_imports_stay_in_named_adapter_and_legacy_boundaries() -> None:
                 if (module == "copilot" or module.startswith("copilot.")) and path.parent != copilot_package:
                     violations.append(f"{path.relative_to(source)}:{node.lineno}: {module}")
     assert violations == []
+
+
+def test_shared_tool_and_registration_modules_do_not_select_harnesses():
+    source = Path(__file__).resolve().parents[1] / "src" / "azure_functions_agents"
+    paths = (
+        "_function_tool.py",
+        "_tool_descriptor.py",
+        "discovery/tools.py",
+        "registration/capabilities.py",
+        "registration/endpoints.py",
+        "runner.py",
+        "app.py",
+    )
+    violations: list[str] = []
+    for relative in paths:
+        path = source.joinpath(*relative.split("/"))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "HarnessKind":
+                violations.append(f"{relative}:{node.lineno}: HarnessKind")
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value in {"maf", "copilot", "agent_framework"}
+            ):
+                violations.append(f"{relative}:{node.lineno}: {node.value}")
+    assert violations == []

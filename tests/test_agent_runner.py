@@ -28,6 +28,18 @@ from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copi
 from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
 
 
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+def test_history_availability_is_owned_by_selected_backend(kind, tmp_path):
+    selected = _agent_runner.get_agent_runner(AppHarness(kind, tmp_path))
+    if kind is HarnessKind.MAF:
+        assert selected.history_unavailable_reason is None
+    else:
+        assert selected.history_unavailable_reason == (
+            "Copilot preview does not support transcript replay. Native state is separate "
+            "from MAF history."
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 @pytest.mark.parametrize("skills_disabled", [False, True])

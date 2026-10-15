@@ -352,6 +352,13 @@ class _CopilotHarnessRunner:
         )
         return result.content
 
+    @property
+    def history_unavailable_reason(self) -> str:
+        return (
+            "Copilot preview does not support transcript replay. Native state is separate "
+            "from MAF history."
+        )
+
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
         del agent_slug, session_id
         _copilot_preview.reject_unsupported(transcript_replay=True)

@@ -173,6 +173,10 @@ class _MAFHarnessRunner:
             session_state=session_state,
         )
 
+    @property
+    def history_unavailable_reason(self) -> str | None:
+        return None
+
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
         from ._maf_history import get_session_history
 

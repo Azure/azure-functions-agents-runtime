@@ -119,6 +119,38 @@ def test_raw_maf_tools_retain_their_sdk_model_and_identity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_tool_has_matching_schema_invocation_and_text_across_harnesses():
+    from copilot.tools import ToolInvocation
+
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+
+    effects: list[tuple[int, str]] = []
+
+    @tool(name="lookup", description="Look up items.")
+    def lookup(count: int, label: str = "default") -> dict[str, object]:
+        effects.append((count, label))
+        return {"count": count, "label": label}
+
+    [maf_tool] = _maf_tools.build_maf_tools((lookup,))
+    copilot_tool = _tool(lookup, CopilotToolCalls())
+    assert copilot_tool.name == maf_tool.name == "lookup"
+    assert copilot_tool.description == maf_tool.description == "Look up items."
+    assert copilot_tool.parameters == maf_tool.parameters()
+    maf_result = await maf_tool.invoke(arguments={"count": "3"})
+    copilot_result = await copilot_tool.handler(
+        ToolInvocation(
+            session_id="session",
+            tool_call_id="call",
+            tool_name="lookup",
+            arguments={"count": "3"},
+        )
+    )
+    assert copilot_result.text_result_for_llm == maf_result[0].text
+    assert effects == [(3, "default"), (3, "default")]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
