@@ -1,5 +1,5 @@
 {
-  "name": "@azure-functions-agents/vally-executor",
+  "name": "@azure-functions/vally-executor",
   "version": "0.1.0",
   "description": "Vally executor for Azure Functions Agents Runtime chat endpoints.",
   "license": "MIT",
