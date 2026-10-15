@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-`azure-functions-agents-runtime` turns a markdown-first agent project into an `azure.functions.FunctionApp`. The design goal is that you write `.agent.md` files plus a small amount of supporting configuration, and the runtime translates that authoring format into Azure Functions triggers, HTTP routes, MCP surfaces, and tool wiring. At startup, the runtime follows a three-stage pipeline: **discover** project files and inventories, **translate** them into typed runtime objects, and **register** the resulting agents on a Function App. The authoritative implementation of that pipeline lives in `src/azure_functions_agents/app.py:create_function_app()`.
+`azure-functions-agents-runtime` turns a markdown-first agent project into an enhanced `azure.functions.FunctionApp` or Durable `DFApp`. The design goal is that you write `.agent.md` files plus a small amount of supporting configuration, and the runtime translates that authoring format into Azure Functions triggers, HTTP routes, MCP surfaces, tool wiring, and catalog-backed `HostedSkill` injection for ordinary Functions. At startup, the runtime follows a three-stage pipeline: **discover** project files and inventories, **translate** them into typed runtime objects, and **register** the resulting agents on a Function App. The default entry point remains `create_function_app()`; the additive `HostedSkillFunctionApp()` constructor delegates to the same authoritative implementation in `src/azure_functions_agents/app.py:_compose_function_app()`.
 
 One agent can also declare a `subagents:` list so its own model can call other agents as `delegate_<slug>` tools during a normal `agent.run()` — chat-time multi-agent delegation (FRD 0007). That feature layers a small amount of extra structure onto the same pipeline (an app-wide identity index and an immutable, slug-keyed catalog built before any `FunctionApp` mutation) rather than introducing a new one; see Section 5, "Multi-agent delegation (subagents)".
 
@@ -31,6 +31,8 @@ flowchart LR
     G2 -->|"AgentCatalog"| H["registration/triggers.py<br/>registration/endpoints.py"]
     W -->|"workflow-agent policy by slug"| H
     H -->|"Decorators applied"| I
+    G2 -->|"AgentCatalog"| HS["_hosted_skill_app.py<br/>hosted_skill decorator"]
+    HS -->|"HostedSkill facade per invocation"| I
     B -->|"once-per-app selection"| HB["harness/_harness_binding.py<br/>AppHarness + HarnessRequest"]
     HB -.->|"bound construction"| R["harness/_agent_runner.py<br/>AgentRunner contract + per-app cache"]
     K["runner.py<br/>public host policy + neutral request factory"] -.->|"timed execution inputs"| R
@@ -69,13 +71,18 @@ A few boundaries are worth calling out explicitly:
 
 | Package/module | Role | Key entry points |
 | --- | --- | --- |
-| `azure_functions_agents/app.py` | Top-level two-pass composition root. Before app mutation it builds the slug index, `AgentCatalog`, complete workflow-handler catalog, and immutable workflow-agent policy catalog. It chooses `DFApp` when any agent enables workflows, registers the workflow runtime once, then registers each agent. | `create_function_app()`, `_fail_on_duplicate_slugs()` |
+| `azure_functions_agents/app.py` | Top-level two-pass composition root. Before app mutation it builds the slug index, `AgentCatalog`, complete workflow-handler catalog, and immutable workflow-agent policy catalog. It chooses the internal Durable app when any agent enables workflows and the normal app otherwise, registers the workflow runtime once, then registers each agent. The default factory and additive constructor delegate to the same private composition function. | `create_function_app()`, `HostedSkillFunctionApp()`, `HostedSkillApp`, `_compose_function_app()`, `_fail_on_duplicate_slugs()` |
+| `azure_functions_agents/_hosted_skill_app.py` | Defines the internal enhanced normal and Durable app implementations. Its decorator selects a catalog entry by slug, applies common capability checks plus MAF-only provider preflight, hides the injected parameter from worker indexing, and creates a fresh facade per Function invocation. Copilot qualification remains owned by app selection and catalog validation. | `hosted_skill()` |
+| `azure_functions_agents/hosted_skill_binding.py` | Implements the harness-neutral application facade. Each explicit `run()` or `stream()` call resolves a public session ID, binds per-session sandbox tools, copies mutable capability lists, and delegates resource ownership to the runner. | `HostedSkill.run()`, `HostedSkill.stream()` |
+| `azure_functions_agents/_agent_validation.py` | Owns dependency-free validation shared by the runner, endpoint layer, HostedSkill binding, and session storage identity. | `validate_prompt()`, `validate_session_id()`, `SESSION_ID_PATTERN` |
+| `azure_functions_agents/_agent_run_diagnostics.py` | Owns SDK-, harness-, and Azure-independent run diagnostics shared by registered handlers, built-in endpoints, HostedSkill, and both harness adapters: the canonical run span, tool-error accounting, and run-summary telemetry. | `start_agent_run_span()`, `_set_run_result_attributes()`, `_total_tool_error_count()` |
+| `azure_functions_agents/streaming_events.py`, `response_contract.py` | Own the harness-neutral typed stream vocabulary and payload conversion, plus the shared structured-response instruction/validation contract used by HTTP handlers and HostedSkill. The HostedSkill event names are runtime aliases of the neutral owning classes; HTTP transport serialization stays in the public runner. | `AgentStreamEvent`, `AgentStreamEventKind`, `HostedSkillEvent`, `HostedSkillEventKind`, `validate_response_contract()` |
 | `azure_functions_agents/config/paths.py` | Resolves the app root and the optional config/history directory. | `set_app_root()`, `get_app_root()`, `resolve_config_dir()` |
 | `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion across config string values in YAML, JSON, front matter, and markdown body content. | `substitute_env_vars_in_value()`, `resolve_env_vars_in_data()`, `substitute_env_vars_in_text()`, `_to_bool()` |
 | `azure_functions_agents/config/schema.py` | Defines the Pydantic models for raw, global, and merged config, including independent object-only chat and workflow Sub Agent grants. | `AgentSpec`, `GlobalConfig`, `ResolvedAgent`, `TriggerSpec`, `BuiltinEndpointsConfig`, `SubagentRef`, `WorkflowConfig`, `WorkflowSubagentRef` |
-| `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
+| `azure_functions_agents/config/loader.py` | Discovers supported agent markdown filenames and loads YAML front matter and `agents.config.yaml` into typed models while preserving real source paths. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config, including each agent's identity `slug` (via `_slug.py`) and its normalized `subagents` list. | `compose()` |
-| `azure_functions_agents/_slug.py` | Derives an agent's identity slug from its `.agent.md` filename (and the `delegate_<slug>` tool-name convention) in one shared place, so naming, config composition, and delegation can never compute a slug differently. | `_function_name_from_source()`, `delegate_tool_name()` |
+| `azure_functions_agents/_slug.py` | Owns recognized prefixed agent suffixes and derives identity slugs from their filename prefixes (plus the `delegate_<slug>` tool-name convention), so discovery, naming, config composition, and delegation cannot drift. | `_prefixed_agent_file_suffix()`, `_function_name_from_source()`, `delegate_tool_name()` |
 | `azure_functions_agents/_agent_identity.py` | Sole shared identity authority: trimmed, lower-case `WEBSITE_SITE_NAME` (or `local`) plus canonical slug. MAF and Copilot consume this helper unchanged; owner/deployment metadata does not affect it. | `agent_id()` |
 | `azure_functions_agents/harness/_history_identity.py` | Shared SDK-free canonical slug validation, consumed by both selected implementations. | `validate_agent_slug()` |
 | `azure_functions_agents/harness/agent_framework/_maf_blob_history.py`, `_maf_file_history.py` | Preserve MAF JSONL history by agent/session identity. Imported and used only on the MAF path; acquired Blob clients and owned credentials register their shutdown callback. | `BlobHistoryProvider`, `ScopedFileHistoryProvider`, `_maf_blob_history.shutdown()` |
@@ -88,14 +95,14 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters to neutral inventories; retains the complete discovered skill roots as ownership metadata, not access grants. Also fails fast on derived `delegate_<slug>` tool-name collisions. A shallow direct-role copy may add runtime-owned skills without mutating the project-only catalog. | `AgentCapabilities`, `build_capabilities()`, `with_runtime_skill_paths()`, `validate_subagent_tool_names()` |
 | `azure_functions_agents/registration/catalog.py` | Freezes every agent's `ResolvedAgent` + `AgentCapabilities` into one immutable, slug-keyed `AgentCatalog`, built once at startup and threaded read-only into request handlers (FRD 0007). | `AgentCatalog`, `CatalogEntry`, `build_catalog()` |
 | `azure_functions_agents/registration/_naming.py` | Fails fast via `allocate_unique_function_name()` / `allocate_unique_builtin_slug()` when two `.agent.md` files sanitize to the same identity slug — a **breaking change** (FRD 0007 §5 Decision #17) replacing the previous silent auto-suffix behavior; re-exports the `_slug.py` helpers for backward compatibility. | `allocate_unique_function_name()`, `allocate_unique_builtin_slug()` |
-| `azure_functions_agents/registration/_handlers.py` | Builds callable closures for trigger and HTTP requests, threads `AgentCatalog` through the runner, applies shared authorization, and combines tool-error accounting. Session-ID response policy is backend-neutral: always return caller-supplied IDs, and return generated IDs on failure only when the runtime confirms resumability. | `make_agent_handler()`, `make_http_agent_handler()`, `build_sandbox_tools_for_session()`, `_total_tool_error_count()` |
+| `azure_functions_agents/registration/_handlers.py` | Builds callable closures for trigger and HTTP requests, threads `AgentCatalog` through the runner, applies shared authorization, and combines tool-error accounting. Session-ID response policy is backend-neutral: always return caller-supplied IDs, and return generated IDs on failure only when the runtime confirms resumability. | `make_agent_handler()`, `make_http_agent_handler()`, `_total_tool_error_count()` |
 | `azure_functions_agents/registration/_trigger_serialization.py` | Uses native data contracts and public Azure Functions binding adapters to produce JSON-safe non-HTTP trigger payloads. | `serialize_trigger_data()`, `TriggerBindingSerializer` |
 | `azure_functions_agents/registration/triggers.py` | Registers each agent trigger, dispatching between the runtime HTTP adapter and Azure Functions trigger decorators. Resolves an `http_trigger`'s inbound auth (nested `auth`, deprecated flat `auth_level`) into the shared `EndpointAuthConfig` and applies the `_auth` route `AuthLevel`. | `register_agent()` |
 | `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP tools; owns route, authorization, status, and history dispatch. The selected runner owns history availability and projection. | `register_builtin_endpoints()` |
 | `azure_functions_agents/registration/_auth.py` | Enforces inbound endpoint auth: maps the configured `auth.mode` to a Functions `AuthLevel` (API key / anonymous) and enforces Entra ID identity by trusting the platform-validated Easy Auth `x-ms-client-principal` header (never validating tokens in-app), with optional tenant/audience/client-id allowlists. Because `entra` routes are anonymous, the header is trusted only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` / `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`); fails closed (401) otherwise. | `resolve_endpoint_auth_level()`, `authorize_entra_request()` |
-| `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
+| `azure_functions_agents/system_tools/sandbox.py` | Builds and binds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()`, `build_sandbox_tools_for_session()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
-| `azure_functions_agents/runner.py` | Public result/defaults/signatures, role/delegate policy, compatibility hooks and the single SDK-free request factory. Computes deadlines before selection/preparation and forwards every execution entry point through the cached bound runner. Keeps canonical `AgentResult` / `ToolCallEvidence`, including effective model and completed tool evidence. | `AgentResult`, `ToolCallEvidence`, `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
+| `azure_functions_agents/runner.py` | Public result/defaults/signatures, role/delegate policy, compatibility hooks and the single SDK-free request factory. Computes deadlines before selection/preparation and forwards every execution entry point through the cached bound runner. `run_agent_events()` adapts the backend SSE vocabulary into typed events for `HostedSkill.stream()`. Keeps canonical `AgentResult` / `ToolCallEvidence`, including effective model and completed tool evidence. | `AgentResult`, `ToolCallEvidence`, `run_agent()`, `run_agent_events()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/harness/_agent_runner.py` | One SDK-free private runner protocol for execution, history, optional configuration qualification, defaults, and observability policy. Caches the concrete selected runner under the binding's guard. No forwarding facade or separate adapter strategy. | `AgentRunner`, `get_agent_runner()` |
 | `azure_functions_agents/harness/_provider_config.py` | SDK-neutral provider/model target resolution shared by selected harnesses; does not construct SDK clients or acquire credentials. | `InferenceTarget`, `resolve_inference_target()` |
 | `azure_functions_agents/harness/agent_framework/_maf_runner.py` | Resource-free MAF runner with local default/history/observability policy. Uses the canonical request factory and bound app root, forwards approved skills, enables instrumentation at execution under the binding guard, and binds a shallow capability copy for leaf roles. | `MafRunner` |
@@ -111,7 +118,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/harness/_harness_lifecycle.py` | Acquired-owner shutdown callbacks only; visits every registered owner even if cleanup fails, without backend discovery/imports. | `_register_shutdown()`, `_unregister_shutdown()`, `_shutdown_harnesses()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_preview.py` | Copilot dependency/provider/hosting qualification, effective-capability validation, and neutral custom-tool qualification. Rejects unsupported preview contracts before effects, without fallback. | `select_copilot_harness()`, `validate_copilot_agent()`, `prepare_tools()`, `CopilotPreviewError` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_providers.py` | Copilot provider interface, registry, sanitized settings and frozen OpenAI / Azure OpenAI / Foundry mappings. SDK provider config is built lazily. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_runner.py` | Resource-free Copilot runner owning provider, storage, default model, history/observability policy, and the lazy native-owner reference. Qualifies preview configuration and composes direct, SSE, delegate, and workflow-leaf operations using the shared request factory. | `CopilotRunner` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_runner.py` | Resource-free Copilot runner owning provider, storage, default model, history/observability policy, and the lazy native-owner reference. Qualifies preview configuration and composes direct, typed-event/SSE, delegate, and workflow-leaf operations using the shared request factory while preserving caller execution-surface telemetry. | `CopilotRunner` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_execution.py` | Invocation-owned session and SessionFs create/resume, neutral custom/MCP/skill capabilities, conditional custom-only catalog validation, send-scoped synchronous `session.on`, result/usage translation, SSE event forwarding, isolated leaf-session cleanup, and bounded immediate teardown that preserves original failures/cancellation. | `run()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_observability.py` | Projects Copilot-owned tool attributes plus allowlisted usage and name-only skill events onto the owning run span; deduplicates usage observations per invocation and keeps optional reported measures separate from shared usage accounting. Runtime-owned invocation naming and `af.agent.*` attributes remain shared. Reuses the existing Python telemetry provider without opening another subscription. | `CopilotEventTelemetry`, `tool_span_attributes()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_capabilities.py` | Maps SDK-neutral capabilities into source-qualified availability, remote MCP configuration, individual approved skill directories/disabled names, and MCP-only/scoped-helper permissions. | Copilot capability projection |
@@ -148,7 +155,7 @@ A few boundaries are worth calling out explicitly:
 
 ### Typical startup trace
 
-When the host imports your app module and calls `create_function_app()`, control usually moves through the codebase in this order:
+When the host imports your app module and calls `create_function_app()` (or the additive `HostedSkillFunctionApp()` constructor), control usually moves through the codebase in this order:
 
 1. `app.py` resolves the project root.
    `harness/_harness_binding.get_harness()` freezes the app-level preview choice here, before
@@ -159,14 +166,14 @@ When the host imports your app module and calls `create_function_app()`, control
 5. `discovery/tools.py`, `discovery/mcp.py`, and `discovery/skills.py` build the shared inventories for the project.
 6. `config/merge.py` turns each `AgentSpec` plus `GlobalConfig` into one `ResolvedAgent`, computing its identity `slug` via `_slug.py`.
 7. `app.py`'s `_fail_on_duplicate_slugs()` builds the app-wide slug index and fails fast on collisions; `config/validation.py:validate_subagent_references()` then rejects unknown/duplicate/self `subagents:` references against that index.
-8. `config/validation.py:validate_resolved_agent()` checks each merged object for missing triggers, bad MCP references, and similar config mistakes (an agent referenced only as a `subagents:` target is exempt from the trigger-or-`builtin_endpoints` requirement).
+8. `config/validation.py:validate_resolved_agent()` checks each merged object for bad trigger types, capability references, and similar config mistakes. A valid agent may have no trigger or built-in endpoint and remain an inert catalog entry.
 9. `registration/capabilities.py` converts name-based filters into concrete tool lists and skill paths, and fails fast on any `delegate_<slug>` tool-name collision.
 10. `registration/catalog.py:build_catalog()` freezes every agent's
     `ResolvedAgent` + `AgentCapabilities`. `workflows/integration.py` then builds
     the complete immutable workflow-handler catalog and one immutable
     `WorkflowPlanPolicy` per workflow-enabled agent.
-11. `app.py` creates a `DFApp` when the workflow-agent policy catalog is non-empty
-    (otherwise a plain `FunctionApp`) and registers the app-wide Durable runtime
+11. `app.py` creates the enhanced Durable app when the workflow-agent policy catalog is non-empty
+  (otherwise the enhanced normal app) and registers the app-wide Durable runtime
     exactly once.
 12. `registration/triggers.py` and `registration/endpoints.py` register every
     agent, looking up workflow policy by workflow-agent slug and threading the catalogs
@@ -179,10 +186,10 @@ mutation.
 
 ## 4. Pipeline stages
 
-The `create_function_app()` docstring in `src/azure_functions_agents/app.py:create_function_app()` is the source of truth. The steps below restate it in module terms.
+The `_compose_function_app()` docstring in `src/azure_functions_agents/app.py:_compose_function_app()` is the source of truth. The steps below restate it in module terms.
 
 1. **Resolve app root**
-   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/config/paths.py`
+  - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/app.py:HostedSkillFunctionApp()`, `src/azure_functions_agents/app.py:_compose_function_app()`, `src/azure_functions_agents/config/paths.py`
    - **Input:** optional `app_root: Path | None` plus environment variables such as `AZURE_FUNCTIONS_AGENTS_APP_ROOT` and `AzureWebJobsScriptRoot`
    - **Output:** `resolved_root: Path`
    - **Notes:** this is the root path handed to every later loader/discovery function. It is not a generic project-file read grant for native helpers.
@@ -197,10 +204,10 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:_load_agent_spec()`, `src/azure_functions_agents/config/loader.py:load_agent_specs()`
    - **Input:** `app_root: Path`
    - **Output:** `list[AgentSpec]`
-   - **Notes:** the loader searches for agent markdown files in two locations: the app root and an optional `agents/` folder (`{app_root}/agents/`). The folder name is case-insensitive (`agents/` or `Agents/`). Within each location the loader collects three filename shapes: (1) `*.agent.md` with a non-empty prefix (e.g. `report.agent.md`); (2) `*.claude.md` with a non-empty prefix (e.g. `report.claude.md`), which is normalized to `*.agent.md` internally; (3) bare `agent.md` or `CLAUDE.md` (case-insensitive), which are aliases for `main.agent.md` internally (producing slug `main`). All suffix matching (`.agent.md`, `.claude.md`) is case-insensitive. Only the singular `.agent.md` and `.claude.md` suffixes are recognised; `*.agents.md` (plural) is **not** a supported pattern and files with that suffix are silently ignored by the loader. Files from all locations are combined and sorted by path for deterministic ordering. Each file is parsed as YAML front matter plus markdown body. When substitution is enabled, front matter string values are normalized through `resolve_env_vars_in_data()` and the markdown body through `substitute_env_vars_in_text()`. The loader stamps `source_file` with the real on-disk path, sets `is_main` when the normalized filename is `main.agent.md` (regardless of location), and stores the markdown body in `AgentSpec.instructions`. Because `agent.md` and `CLAUDE.md` are aliases for `main.agent.md`, they produce the same slug and must not coexist anywhere in the same app — both derive slug `main`, slug uniqueness is enforced app-wide and step 6 (`_fail_on_duplicate_slugs()`) will reject such a configuration.
+  - **Notes:** the loader searches for agent markdown files in two locations: the app root and an optional `agents/` folder (`{app_root}/agents/`). The folder name is case-insensitive (`agents/` or `Agents/`). Within each location it collects prefixed `*.agent.md` and `*.claude.md` files plus bare `agent.md` or `CLAUDE.md` aliases. All matching is case-insensitive. Prefixed aliases normalize to `*.agent.md` internally, and their non-empty prefix determines identity. Files from all locations are combined and sorted by path for deterministic ordering. Each file is parsed as YAML front matter plus markdown body. When substitution is enabled, front matter string values are normalized through `resolve_env_vars_in_data()` and the markdown body through `substitute_env_vars_in_text()`. The loader stamps `source_file` with the real on-disk path, sets `is_main` when the normalized filename is `main.agent.md` (regardless of location), and stores the markdown body in `AgentSpec.instructions`. Any filenames that derive the same slug, including collisions across suffixes or locations, are rejected app-wide in step 6 (`_fail_on_duplicate_slugs()`).
 
 4. **Discover runtime inventories from disk**
-   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_project_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
+  - **Implemented by:** `src/azure_functions_agents/app.py:_compose_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_project_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
    - **Input:** `app_root: Path`
    - **Output:** normalized runtime tool descriptors, MCP server/skill inventories, and explicit workflow Activity targets; authored functions are not invoked
    - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. Tools discovery records ordinary callable/schema metadata and explicit `@workflow_tool` opt-ins; filtering happens later. MCP discovery applies `resolve_env_vars_in_data()` and preserves warnings, skipped entries, and `failed_loads` reporting. A `url` is required; optional `type` must be `"http"` or `"streamable-http"`. Other transports (`stdio`, `sse`, etc.) are skipped with warnings. Descriptors contain static headers and auth declarations, never SDK wrappers or live tokens. Skill discovery checks `SKILL.md` presence without reading content, searches through two child levels and stops at each root, and records canonical paths with directory-slug identities. SDKs own metadata validation and duplicate selection; distinct same-slug candidates are retained. `data-driven-workflows` remains reserved for runtime-owned workflow guidance.
@@ -221,7 +228,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`, `src/azure_functions_agents/workflows/integration.py:validate_workflow_agent_trigger()`
    - **Input:** each `ResolvedAgent`, discovered MCP server names as `list[str]`, discovered skill names as `list[str]`, and whether the agent is referenced as a subagent (from stage 6)
    - **Output:** the same validated `ResolvedAgent` (or an exception that skips registration for that agent)
-   - **Notes:** validation checks that each directly invokable agent defines a trigger or enables at least one built-in endpoint, rejects unsupported trigger decorators, and validates capability references. A referenced internal specialist may remain endpoint-less. Workflow enablement is independent: any agent may set `workflows.enabled: true`; if it declares a trigger, that trigger must support workflow startup.
+  - **Notes:** validation rejects unsupported trigger decorators and validates capability references. An endpoint-less agent is valid as an inert catalog entry. Workflow enablement is independent: any agent may set `workflows.enabled: true`; if it declares a trigger, that trigger must support workflow startup.
 
 8. **Build per-agent capabilities**
    - **Implemented by:** `src/azure_functions_agents/registration/capabilities.py:build_capabilities()`, `validate_subagent_tool_names()`
@@ -236,20 +243,20 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Notes:** the handler and Agent catalogs answer what exists app-wide. They do not grant a workflow-enabled agent access. Each workflow-enabled agent receives a separate `WorkflowPlanPolicy` derived from its filtered workflow tools and independent `workflows.subagents` grants. This closes side-effect-free pass 1.
 
 10. **Create the Azure Functions app container**
-    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`
+    - **Implemented by:** `src/azure_functions_agents/app.py:_compose_function_app()`
     - **Input:** startup defaults such as `http_auth_level=func.AuthLevel.FUNCTION`
-    - **Output:** `azure.functions.FunctionApp` (a Durable Functions `DFApp` when at least one workflow-agent policy exists, otherwise a plain `FunctionApp`)
-    - **Notes:** only one app object is created. When policies exist, the complete handler/Agent catalogs and workflow-agent policies are captured by one app-level Durable registration before agent registration begins. Ordinary apps without workflow-enabled agents retain the lower-overhead plain `FunctionApp`.
+    - **Output:** `HostedSkillApp`, still an instance of its selected Azure Functions SDK base
+    - **Notes:** only one app object is created. It captures the complete Agent catalog and frozen harness for later decorator selection. When policies exist, the complete handler/Agent catalogs and workflow-agent policies are captured by one app-level Durable registration before agent registration begins.
 
 11. **Register triggers and built-in endpoints (pass 2)**
-    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/registration/triggers.py:register_agent()`, `src/azure_functions_agents/registration/endpoints.py:register_builtin_endpoints()`, `src/azure_functions_agents/registration/_handlers.py`
+    - **Implemented by:** `src/azure_functions_agents/app.py:_compose_function_app()`, `src/azure_functions_agents/registration/triggers.py:register_agent()`, `src/azure_functions_agents/registration/endpoints.py:register_builtin_endpoints()`, `src/azure_functions_agents/registration/_handlers.py`
     - **Input:** `FunctionApp`, `ResolvedAgent`, `AgentCapabilities`, and the frozen `AgentCatalog`
     - **Output:** the same `FunctionApp`, now decorated with trigger bindings, HTTP routes, SSE streaming routes, and/or MCP endpoints
     - **Notes:** agents go through `register_agent()` when they have a trigger and `register_builtin_endpoints()` when endpoints are enabled. Each lookup uses the agent slug's workflow-agent policy. Eligible trigger/chat API/MCP surfaces receive workflow guidance, agent-scoped tools, and a Durable client binding; debug UI alone is not a starter. For these direct workflow-enabled roles, registration creates a shallow capability copy that adds the packaged `data-driven-workflows` skill even when project `skills` are disabled. The immutable catalog retains project-only skill paths, so ordinary delegated and Workflow Sub Agent leaf roles never inherit workflow-authoring guidance. Workflow-disabled handlers retain their original signatures.
 
 ### Where the registration stage hands off to execution
 
-Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit local Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
+Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit local Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Event calls carry approved skills, the full ownership catalog, display and execution-surface telemetry, and omitted-versus-explicit session state. `run_agent_events()` converts the shared SSE vocabulary to typed events for hosted skills. Explicit close or cancellation propagates through each adapter via `aclosing`; callers that break public async iteration early must close it for deterministic release. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
 
 `config/merge.py` recursively combines global and per-agent portable
 `agent_configuration` fields, using authored `null` values to clear inherited
@@ -323,6 +330,20 @@ without an adapter object, and the app binding caches the cheap runner under a
 guard. Binding clones reuse immutable construction inputs but receive fresh
 runner/resource cells. Pre-registration qualification therefore requires no SDK
 import or native/provider acquisition and no additional strategy layer.
+
+`runner.run_agent_stream()` is the only layer that serializes neutral event
+payloads as SSE, and `runner.run_agent_events()` adapts that vocabulary to
+`AgentStreamEvent` values for hosted-skill callers.
+
+Tool authoring remains the runtime surface:
+
+- runtime `@tool(...)` declarations stay supported;
+- a `tools/*.py` module may still contribute its first public local function;
+- raw SDK tools and SDK-specific decorators are ignored with a warning;
+- runtime `@tool` accepts only `name`, `description`, `schema`, and
+  `approval_mode`; extra keyword arguments are logged once and ignored; and
+- the runtime does not accommodate harness-specific callable signatures such as
+  `FunctionInvocationContext`.
 
 MCP and skills keep their current authored inputs. `mcp.json` remains remote
 HTTP/streamable-HTTP plus existing per-agent filters. Skill discovery remains
@@ -545,7 +566,7 @@ path, the scheduler discards recorded wave outcomes and restores the wave.
 
 ### Registration paths in practice
 
-- **Endpoint-only or internal agent (no trigger):** `create_function_app()` skips `register_agent()` whenever an agent has no `trigger`. If built-in endpoints are enabled, `register_builtin_endpoints()` can still expose the chat UI, REST, SSE, and MCP surfaces for interactive use. An agent with *neither* a trigger *nor* built-in endpoints is valid only when another agent references it through `subagents` or `workflows.subagents` (stage 7's relaxation). It is then reachable only in the corresponding internal role: a `delegate_<slug>` tool, a workflow `sub_agent` node, or both.
+- **Endpoint-only or internal agent (no trigger):** app composition skips `register_agent()` whenever an agent has no `trigger`. If built-in endpoints are enabled, `register_builtin_endpoints()` can still expose the chat UI, REST, SSE, and MCP surfaces. An agent with neither a trigger nor built-in endpoints remains a fully validated inert catalog entry and registers no Function. Application code can select it later with `@app.hosted_skill`, while `subagents` and `workflows.subagents` can still make it reachable in their independent internal roles.
 - **HTTP agent:** `registration/triggers.py` routes `http_trigger` to `make_http_agent_handler()`, which enforces the trigger's inbound `auth` policy (via the shared `_auth` module, identical to built-in endpoints — the route `AuthLevel` for key/anonymous modes and the in-app Easy Auth `x-ms-client-principal` check for `entra`), validates JSON input, and optionally validates the model's JSON-shaped response before replying. The registered function name is the agent's identity slug, already guaranteed unique at stage 6 — a colliding sanitized stem is a startup error, not an auto-suffixed name.
 - **Built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which uses the native-contract-first, adapter-based trigger serializer (`registration/_trigger_serialization.py`) to turn public binding data into JSON before sending the prompt to `runner.run_agent()`.
 - **Connector trigger:** `connector_trigger` uses the Azure Functions Python `app.connector_trigger(...)` decorator when available, falling back to the equivalent generic `connectorTrigger` binding on older Azure Functions packages. It then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path.
@@ -686,8 +707,8 @@ These are the main "passport" objects that move through the pipeline:
   Activity handler inventory plus immutable per-agent authorization policies.
   Built once after `AgentCatalog`; consumed by one-time Durable registration and
   agent-specific endpoint/trigger integration.
-- `azure.functions.FunctionApp` — the final Azure Functions app object created in `src/azure_functions_agents/app.py:create_function_app()` and returned to the host after registration completes.
-  - **Created by:** `app.py:create_function_app()`
+- `azure.functions.FunctionApp` — the final Azure Functions app object created in `src/azure_functions_agents/app.py:_compose_function_app()` and returned to the host after registration completes.
+  - **Created by:** `app.py:_compose_function_app()`, entered publicly through `create_function_app()` or `HostedSkillFunctionApp()`
   - **Consumed by:** Azure Functions itself after the host imports the module and inspects the registered bindings
 
 ### Type hand-off summary
@@ -700,7 +721,7 @@ catalog + workflow-agent policy catalog --choose/register--> `FunctionApp` or `D
 
 At invocation time, the runtime continues with:
 
-`ResolvedAgent` + immutable `AgentCapabilities` + `AgentCatalog` + request/trigger payload --handler--> public runner shim --cached `AgentRunner`--> selected backend runner --neutral `HarnessRequest`--> execution adapter --> model response
+`ResolvedAgent` + immutable `AgentCapabilities` + `AgentCatalog` + request/trigger payload --handler--> public runner shim --cached `AgentRunner`--> selected required backend (+ optional event capability) --neutral `HarnessRequest`--> execution adapter --> model result or neutral events --> optional SSE adapter
 
 The MAF adapter owns provider-specific client construction and supports
 delegation/workflow roles.
@@ -725,7 +746,7 @@ The runtime retains portable model, provider, endpoint, and authentication
 settings. `harness/_provider_config.py` resolves the selected provider and model
 without importing or constructing an SDK client; each selected harness owns its
 client construction and credential acquisition. Custom chat-client injection
-through `ClientManager` is not a supported public extension point.
+is not a supported public extension point.
 
 ### Custom tools
 

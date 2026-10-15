@@ -14,16 +14,30 @@ The most common entry points are:
 
 __version__ = "0.1.0b16"
 
+from ._agent_validation import validate_session_id
 from ._function_tool import tool, workflow_tool
-from .app import create_function_app
+from ._hosted_skill_app import HostedSkillDFApp
+from .app import (
+    HostedSkillApp,
+    HostedSkillFunctionApp,
+    create_function_app,
+)
 from .config.paths import resolve_config_dir, set_app_root
 from .harness._harness_lifecycle import _shutdown_harnesses
+from .hosted_skill_binding import HostedSkill
+from .response_contract import HostedSkillResponseError
 from .runner import (
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
     AgentResult,
     run_agent,
     run_agent_stream,
+)
+from .streaming_events import (
+    AgentStreamEvent,
+    AgentStreamEventKind,
+    HostedSkillEvent,
+    HostedSkillEventKind,
 )
 from .system_tools.sandbox import create_sandbox_tools
 from .system_tools.web_request import create_web_request_tools
@@ -48,6 +62,15 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
+    "AgentStreamEvent",
+    "AgentStreamEventKind",
+    "HostedSkill",
+    "HostedSkillApp",
+    "HostedSkillDFApp",
+    "HostedSkillEvent",
+    "HostedSkillEventKind",
+    "HostedSkillFunctionApp",
+    "HostedSkillResponseError",
     "WorkflowRetryBackoff",
     "WorkflowRetryPolicy",
     "WorkflowRetryableError",
@@ -64,5 +87,6 @@ __all__ = [
     "set_app_root",
     "shutdown_runtime",
     "tool",
+    "validate_session_id",
     "workflow_tool",
 ]

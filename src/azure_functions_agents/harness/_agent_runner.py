@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from .._agent_run_diagnostics import AgentExecutionSurface
 from .._tool_descriptor import ToolInput
 from ..config import ResolvedAgent, SubagentRef
 from ..config.schema import AgentConfiguration
@@ -43,6 +44,9 @@ class AgentRunner(Protocol):
 
     @property
     def validate_agent(self) -> Callable[[ResolvedAgent, AgentCapabilities], None] | None: ...
+
+    @property
+    def validate_hosted_skill(self) -> Callable[[ResolvedAgent], None] | None: ...
 
     async def run_agent(
         self,
@@ -101,6 +105,7 @@ class AgentRunner(Protocol):
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
         session_state: HarnessSessionState | None = None,
+        execution_surface: AgentExecutionSurface = AgentExecutionSurface.RUNNER_API,
     ) -> AsyncGenerator[str]: ...
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory: ...
@@ -114,7 +119,6 @@ class AgentRunner(Protocol):
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str: ...
-
 
 def get_agent_runner(harness: AppHarness) -> AgentRunner:
     """Construct one resource-free runner per immutable app binding."""

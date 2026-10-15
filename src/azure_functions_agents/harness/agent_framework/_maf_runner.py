@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
+from ..._agent_run_diagnostics import AgentExecutionSurface
 from ..._tool_descriptor import ToolInput
 from ...config import ResolvedAgent, SubagentRef
 from ...config.schema import AgentConfiguration
@@ -18,6 +19,7 @@ from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .._agent_runner import AgentFunctionTool
 from .._harness_binding import AppHarness, HarnessSessionState, SessionHistory
+from .._provider_config import resolve_inference_target
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
@@ -32,6 +34,10 @@ class MafRunner:
     include_raw_tool_calls_in_sensitive_logs = True
     session_history_unavailable_message = None
     validate_agent: Callable[[ResolvedAgent, AgentCapabilities], None] | None = None
+
+    @staticmethod
+    def validate_hosted_skill(resolved: ResolvedAgent) -> None:
+        resolve_inference_target(resolved.model)
 
     def __init__(self, harness: AppHarness) -> None:
         self._harness = harness
@@ -141,6 +147,7 @@ class MafRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_state: HarnessSessionState | None = None,
+        execution_surface: AgentExecutionSurface = AgentExecutionSurface.RUNNER_API,
     ) -> AsyncGenerator[str]:
         from . import _maf_execution
 
@@ -184,6 +191,7 @@ class MafRunner:
             catalog=catalog,
             workflow_policy=workflow_policy,
             session_state=session_state,
+            execution_surface=execution_surface,
         )
 
     async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
