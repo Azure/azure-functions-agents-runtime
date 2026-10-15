@@ -815,17 +815,15 @@ async def run_stream(
     with start_span(
         agent_run_span_name(agent_name=agent_name),
         lifecycle_stage=LifecycleStage.AGENT_RUN,
-        attributes={
-            **agent_run_attributes_for_harness(
-                harness,
-                agent_name=agent_name,
-                display_name=display_name,
-                trigger_type="stream",
-                session_id=resolved_id,
-                model=model,
-            ),
-            "af.agent.execution_surface": execution_surface,
-        },
+        attributes=agent_run_attributes_for_harness(
+            harness,
+            agent_name=agent_name,
+            display_name=display_name,
+            trigger_type="stream",
+            session_id=resolved_id,
+            model=model,
+            execution_surface=execution_surface,
+        ),
     ) as span:
         ordinary_tool_error_count = 0
         try:

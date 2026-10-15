@@ -374,17 +374,15 @@ def _register_http_chat(
             agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=auto_record_exceptions_for_harness(harness),
-            attributes={
-                **agent_run_attributes_for_harness(
-                    harness,
-                    agent_name=resolved.slug,
-                    display_name=resolved.name,
-                    trigger_type="builtin_chat",
-                    session_id=resolved_session_id,
-                    model=resolved.model,
-                ),
-                "af.agent.execution_surface": AgentExecutionSurface.BUILTIN_ENDPOINT,
-            },
+            attributes=agent_run_attributes_for_harness(
+                harness,
+                agent_name=resolved.slug,
+                display_name=resolved.name,
+                trigger_type="builtin_chat",
+                session_id=resolved_session_id,
+                model=resolved.model,
+                execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
+            ),
         ) as span:
             try:
                 body = await req.json()
@@ -614,17 +612,15 @@ def _register_mcp_endpoint(
             agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             record_exception=auto_record_exceptions_for_harness(harness),
-            attributes={
-                **agent_run_attributes_for_harness(
-                    harness,
-                    agent_name=resolved.slug,
-                    display_name=resolved.name,
-                    trigger_type="builtin_mcp",
-                    session_id=None,
-                    model=resolved.model,
-                ),
-                "af.agent.execution_surface": AgentExecutionSurface.BUILTIN_ENDPOINT,
-            },
+            attributes=agent_run_attributes_for_harness(
+                harness,
+                agent_name=resolved.slug,
+                display_name=resolved.name,
+                trigger_type="builtin_mcp",
+                session_id=None,
+                model=resolved.model,
+                execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
+            ),
         ) as span:
             session_id: str | None = None
             resolved_session_id: str | None = None

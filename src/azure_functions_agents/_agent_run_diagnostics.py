@@ -11,7 +11,7 @@ from ._observability import LifecycleStage, RuntimeSpan, start_span
 
 
 class AgentExecutionSurface(StrEnum):
-    """Runtime-owned surfaces that invoke an agent outside front-matter triggers."""
+    """Invocation origins tracked separately from front-matter trigger types."""
 
     RUNNER_API = "runner_api"
     BUILTIN_ENDPOINT = "builtin_endpoint"

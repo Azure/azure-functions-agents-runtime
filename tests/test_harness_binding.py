@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from azure_functions_agents._agent_run_diagnostics import AgentExecutionSurface
 from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.harness import _harness_binding as binding
 from azure_functions_agents.harness._provider_config import ProviderKind
@@ -56,6 +57,23 @@ def test_invalid_flag_is_explicit_and_does_not_echo_value(value):
 
 def test_provider_kind_is_sdk_neutral():
     assert binding.ProviderKind is ProviderKind
+
+
+def test_agent_run_attributes_include_execution_surface(binding_root):
+    harness = binding.AppHarness(binding.HarnessKind.MAF, binding_root)
+
+    attributes = binding.agent_run_attributes_for_harness(
+        harness,
+        agent_name="internal",
+        display_name="Internal",
+        trigger_type=None,
+        session_id="session-one",
+        model="model-one",
+        execution_surface=AgentExecutionSurface.HOSTED_SKILL_BINDING,
+    )
+
+    assert attributes["af.agent.harness"] == "maf"
+    assert attributes["af.agent.execution_surface"] == "hosted_skill_binding"
 
 
 def test_app_binding_is_frozen_and_identity_distinct(binding_root):

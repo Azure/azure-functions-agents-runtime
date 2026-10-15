@@ -303,17 +303,15 @@ class CopilotRunner:
                 agent_run_span_name(agent_name=agent_name),
                 lifecycle_stage=LifecycleStage.AGENT_RUN,
                 record_exception=False,
-                attributes={
-                    **agent_run_attributes_for_harness(
-                        self._harness,
-                        agent_name=agent_name,
-                        display_name=display_name,
-                        trigger_type="stream",
-                        session_id=resolved_id,
-                        model=model,
-                    ),
-                    "af.agent.execution_surface": execution_surface,
-                },
+                attributes=agent_run_attributes_for_harness(
+                    self._harness,
+                    agent_name=agent_name,
+                    display_name=display_name,
+                    trigger_type="stream",
+                    session_id=resolved_id,
+                    model=model,
+                    execution_surface=execution_surface,
+                ),
             ) as span:
                 execution = asyncio.create_task(execute())
                 try:
