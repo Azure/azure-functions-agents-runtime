@@ -366,6 +366,41 @@ def _drain(host: _HostProcess) -> None:
             host.lines.append(item)
 
 
+def _stop_host(host: _HostProcess) -> None:
+    _terminate(host.proc)
+    host.reader.join(timeout=5)
+    _drain(host)
+
+
+def _start_with_retry(
+    func_exe: str,
+    app_dir: Path,
+    *,
+    port: int,
+    env: Mapping[str, str] | None,
+    timeout: float,
+    ready_grace: float,
+) -> tuple[_HostProcess, bool, bool, str]:
+    """Retry one marker-free startup timeout for cold Core Tools initialization."""
+    for attempt in range(2):
+        host = _spawn(func_exe, app_dir, port=port, env=env)
+        try:
+            ready, failed, reason = _await_ready(
+                host,
+                timeout=timeout,
+                ready_grace=ready_grace,
+            )
+        except BaseException:
+            _stop_host(host)
+            raise
+        timed_out = not ready and not failed and reason.startswith("timed out after ")
+        if not timed_out or attempt == 1:
+            return host, ready, failed, reason
+        _stop_host(host)
+
+    raise AssertionError("startup retry loop did not return")
+
+
 def start_and_verify(
     app_dir: Path,
     *,
@@ -386,14 +421,15 @@ def start_and_verify(
     if func_exe is None:
         return FuncStartResult(False, "`func` executable not found on PATH", "")
 
-    host = _spawn(func_exe, app_dir, port=_free_port(), env=env)
-    try:
-        ready, failed, reason = _await_ready(host, timeout=timeout, ready_grace=ready_grace)
-    finally:
-        _terminate(host.proc)
-        host.reader.join(timeout=5)
-
-    _drain(host)
+    host, ready, failed, reason = _start_with_retry(
+        func_exe,
+        app_dir,
+        port=_free_port(),
+        env=env,
+        timeout=timeout,
+        ready_grace=ready_grace,
+    )
+    _stop_host(host)
 
     return FuncStartResult(
         started=ready and not failed,
@@ -425,18 +461,21 @@ def running_host(
         raise RuntimeError("`func` executable not found on PATH")
 
     chosen_port = port if port is not None else _free_port()
-    host = _spawn(func_exe, app_dir, port=chosen_port, env=env)
+    host, ready, failed, reason = _start_with_retry(
+        func_exe,
+        app_dir,
+        port=chosen_port,
+        env=env,
+        timeout=timeout,
+        ready_grace=ready_grace,
+    )
+    if not ready or failed:
+        _stop_host(host)
+        raise RuntimeError(
+            f"host for {app_dir.name} failed to start ({reason}):\n{''.join(host.lines)}"
+        )
+
     try:
-        ready, failed, reason = _await_ready(host, timeout=timeout, ready_grace=ready_grace)
-        if not ready or failed:
-            _terminate(host.proc)
-            host.reader.join(timeout=5)
-            _drain(host)
-            raise RuntimeError(
-                f"host for {app_dir.name} failed to start ({reason}):\n{''.join(host.lines)}"
-            )
         yield HostHandle(base_url=f"http://localhost:{chosen_port}", port=chosen_port, _host=host)
     finally:
-        _terminate(host.proc)
-        host.reader.join(timeout=5)
-        _drain(host)
+        _stop_host(host)

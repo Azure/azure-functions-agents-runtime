@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
+from .._agent_run_diagnostics import AgentExecutionSurface
 from .._logger import logger
 from .._observability import TelemetryAttributeValue
 from .._observability import (
@@ -126,9 +127,10 @@ def agent_run_attributes_for_harness(
     trigger_type: str | None,
     session_id: str | None,
     model: str | None,
+    execution_surface: AgentExecutionSurface | None = None,
 ) -> dict[str, TelemetryAttributeValue]:
     """Return runtime-owned invocation attributes for the selected harness."""
-    return common_agent_run_attributes(
+    attributes = common_agent_run_attributes(
         agent_name=agent_name,
         display_name=display_name,
         trigger_type=trigger_type,
@@ -136,6 +138,8 @@ def agent_run_attributes_for_harness(
         model=model,
         harness=harness.name.value,
     )
+    attributes["af.agent.execution_surface"] = execution_surface
+    return attributes
 
 
 def auto_record_exceptions_for_harness(harness: AppHarness) -> bool:

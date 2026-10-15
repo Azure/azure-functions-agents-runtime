@@ -10,7 +10,11 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger
-from azure_functions_agents._slug import _is_single_agent_file
+from azure_functions_agents._slug import (
+    _agent_file_suffix,
+    _is_single_agent_file,
+    _prefixed_agent_file_suffix,
+)
 from azure_functions_agents.config.env import (
     _to_bool,
     resolve_env_vars_in_data,
@@ -28,11 +32,17 @@ _FRONTMATTER_ACTION_ITEMS = (
 type _ConfigDocument = dict[str, object]
 
 
+def record_agent_file_discovery(*, suffix: str) -> None:
+    from azure_functions_agents._observability import record_agent_file_discovery as record
+
+    record(suffix=suffix)
+
+
 def _collect_agent_files(directory: Path) -> list[Path]:
     """Collect all agent markdown files from a directory in a single pass.
 
-    Returns bare agent.md / CLAUDE.md single-agent aliases and prefixed
-    *.agent.md / *.claude.md files.  Skips dotfiles.
+    Returns bare agent.md / CLAUDE.md single-agent aliases and recognized
+    prefixed agent files. Skips dotfiles.
 
     Collecting all shapes in one pass ensures case-sensitive filesystems can
     surface duplicate bare aliases (e.g. agent.md + Agent.md) for the
@@ -44,13 +54,11 @@ def _collect_agent_files(directory: Path) -> list[Path]:
             continue
         if md_file.name.startswith("."):
             continue  # skip hidden/dotfiles (iterdir() unlike glob doesn't exclude them)
-        lower_name = md_file.name.lower()
-        # _is_single_agent_file covers bare "agent.md"/"claude.md".  These do NOT
-        # satisfy endswith(".agent.md"/".claude.md") because the dot-prefixed suffix
-        # (9/10 chars) is longer than the bare name (8/9 chars), so both branches
-        # are needed.
-        if _is_single_agent_file(md_file.name) or lower_name.endswith((".agent.md", ".claude.md")):
-            agent_files.append(md_file)
+        suffix = _agent_file_suffix(md_file.name)
+        if suffix is None:
+            continue
+        record_agent_file_discovery(suffix=suffix.value)
+        agent_files.append(md_file)
     return agent_files
 
 
@@ -59,8 +67,8 @@ def _normalize_agent_filename(source_file: Path) -> Path:
     
     - Bare agent.md and CLAUDE.md (case-insensitive) become default.agent.md
       internally, generating function name 'default'.
-    - Files matching *.claude.md (e.g., report.claude.md) become *.agent.md
-      (e.g., report.agent.md), preserving the prefix for function naming.
+        - Recognized prefixed aliases become *.agent.md internally, preserving the
+            prefix for identity and function naming.
     """
     filename = source_file.name
     lower_filename = filename.lower()
@@ -69,15 +77,9 @@ def _normalize_agent_filename(source_file: Path) -> Path:
     if _is_single_agent_file(filename):
         return source_file.with_name("main.agent.md")
     
-    # Handle *.claude.md pattern (e.g., report.claude.md → report.agent.md)
-    if lower_filename.endswith(".claude.md"):
-        # Preserve the prefix, just change .claude.md to .agent.md
-        prefix = filename[:-len(".claude.md")]
-        return source_file.with_name(f"{prefix}.agent.md")
-
-    # Normalize mixed-case *.agent.md suffix (e.g., report.AGENT.md → report.agent.md)
-    if lower_filename.endswith(".agent.md") and not filename.endswith(".agent.md"):
-        prefix = filename[:-len(".agent.md")]
+    suffix = _prefixed_agent_file_suffix(lower_filename)
+    if suffix is not None and (suffix != ".agent.md" or not filename.endswith(suffix)):
+        prefix = filename[:-len(suffix)]
         return source_file.with_name(f"{prefix}.agent.md")
 
     return source_file
@@ -258,23 +260,24 @@ def _resolve_agents_dir(app_root: Path) -> Path | None:
 
 
 def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
-    """Read every *.agent.md and *.claude.md in app_root and agents/ folder, return AgentSpec values.
+    """Read recognized agent markdown files from app_root and agents/.
 
     Searches for agent markdown files in these locations:
-    1. Top-level: ``{app_root}/*.agent.md`` and ``{app_root}/*.claude.md`` (case-insensitive)
+    1. Top-level prefixed files: ``*.agent.md`` and ``*.claude.md``
+       (case-insensitive)
     2. Top-level single-agent: ``{app_root}/agent.md`` or ``{app_root}/CLAUDE.md`` (case-insensitive)
-    3. Agents folder: ``{app_root}/agents/*.agent.md`` and ``{app_root}/agents/*.claude.md`` (case-insensitive)
+    3. Agents folder prefixed files with any recognized suffix
     4. Agents folder single-agent: ``{app_root}/agents/agent.md`` or ``{app_root}/agents/CLAUDE.md``
 
     Single-agent files (agent.md and CLAUDE.md, case-insensitive) are internally
     normalized to default.agent.md for function name generation, producing 'default'
     as the function name.
     
-    Files matching *.claude.md pattern are normalized to *.agent.md, preserving the
-    prefix for function naming (e.g., report.claude.md → report.agent.md → 'report').
+    Prefixed aliases are normalized to *.agent.md internally, preserving the
+    prefix for function naming.
     
-    Suffix matching (.agent.md and .claude.md) is case-insensitive, supporting files
-    like report.AGENT.md or summary.CLAUDE.md.
+    Suffix matching is case-insensitive, supporting files like report.AGENT.md
+    or summary.CLAUDE.md.
 
     Files from all locations are combined and sorted by path for deterministic
     ordering. This allows customers to organize agents in a dedicated folder

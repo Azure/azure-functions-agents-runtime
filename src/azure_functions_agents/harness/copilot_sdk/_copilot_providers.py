@@ -1,4 +1,4 @@
-"""Frozen Copilot SDK provider configuration for the local preview."""
+"""Frozen Copilot SDK provider configuration for the Copilot preview."""
 
 from __future__ import annotations
 

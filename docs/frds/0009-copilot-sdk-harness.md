@@ -317,8 +317,7 @@ Current supported direction:
 
 - same authoring/config surfaces as MAF;
 - once-per-app preview selection;
-- direct-role execution with neutral runtime tool/MCP/skill descriptors and
-  user-supplied tools;
+- direct-role execution with runtime tool/MCP/skill descriptors and user-supplied tools;
 - SDK-owned session files behind SessionFs; and
 - no silent weakening of policy or validation.
 
@@ -442,7 +441,6 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | --- | --- | --- | --- | --- | --- |
 | 30 | Hosted worker/storage contract amendment | keep local-only/single-worker FRD guard / mirror the existing MAF storage and process-local concurrency contract | Remove the local-only and single-worker FRD restriction. Keep MAF as the default harness, preserve the existing storage-selection and no-fallback-on-configured-error contract, keep the existing registered surfaces enabled, and describe same-session overlap across workers/instances as the same process-local coordination limit already present on the MAF path rather than as a Copilot-only carve-out. | Human (larohra) | 2026-10-14 |
 | 31 | Copilot ignored reasoning/output settings | keep rejecting Copilot reasoning/output-limit overrides / warn and ignore the settings | Keep other unsupported-capability checks unchanged, but treat `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`, `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY`, and `agent_configuration.max_output_tokens` as warned no-op settings on the Copilot path. Copilot keeps SDK/provider defaults for reasoning behavior, and `max_output_tokens` is not enforced because the pinned SDK/runtime still lacks a verified provider generation-cap mapping. | Human (larohra) | 2026-10-15 |
-
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |

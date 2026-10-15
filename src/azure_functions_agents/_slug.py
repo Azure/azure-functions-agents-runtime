@@ -8,9 +8,42 @@ package (which imports ``config`` and would otherwise create a cycle).
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 from pathlib import Path
 
 from ._logger import logger
+
+
+class AgentFileSuffix(StrEnum):
+    """Recognized agent-markdown suffixes."""
+
+    AGENT = ".agent.md"
+    CLAUDE = ".claude.md"
+
+
+_PREFIXED_AGENT_FILE_SUFFIXES = (
+    AgentFileSuffix.AGENT,
+    AgentFileSuffix.CLAUDE,
+)
+
+
+def _prefixed_agent_file_suffix(filename: str) -> AgentFileSuffix | None:
+    """Return the recognized case-insensitive suffix for a prefixed agent file."""
+    lower_name = filename.lower()
+    return next(
+        (suffix for suffix in _PREFIXED_AGENT_FILE_SUFFIXES if lower_name.endswith(suffix)),
+        None,
+    )
+
+
+def _agent_file_suffix(filename: str) -> AgentFileSuffix | None:
+    """Classify bare and prefixed agent-markdown filenames by suffix family."""
+    lower_name = filename.lower()
+    if lower_name == "agent.md":
+        return AgentFileSuffix.AGENT
+    if lower_name == "claude.md":
+        return AgentFileSuffix.CLAUDE
+    return _prefixed_agent_file_suffix(lower_name)
 
 
 def _safe_function_name(raw_name: str) -> str:
@@ -65,14 +98,9 @@ def _function_name_from_source(
     if lower_name in ("agent.md", "claude.md"):
         return "main"
 
-    # *.claude.md → strip the suffix to get the prefix
-    if lower_name.endswith(".claude.md"):
-        prefix = source_name[: -len(".claude.md")]
-        return _safe_function_name(prefix)
-
-    # *.agent.md (case-insensitive suffix)
-    if lower_name.endswith(".agent.md"):
-        prefix = source_name[: -len(".agent.md")]
+    suffix = _prefixed_agent_file_suffix(source_name)
+    if suffix is not None:
+        prefix = source_name[: -len(suffix)]
         return _safe_function_name(prefix)
 
     # Fallback: use the stem

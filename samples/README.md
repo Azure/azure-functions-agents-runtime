@@ -17,6 +17,9 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [workflow-subagents-preview](workflow-subagents-preview/) | Queue | ✅ workflow-safe | | | ✅ | | |
 | [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
 
+[`hybrid-hosted-skill`](hybrid-hosted-skill/) is a local-first sample where an
+ordinary HTTP Function calls an inert markdown agent through `skill.run()`.
+
 [`per-agent-workflows`](per-agent-workflows/) is the Engineering Operations Hub:
 two non-main workflow-enabled agents share one Durable engine while retaining
 separate policies. Run it locally with Azurite and use either agent's browser
@@ -92,11 +95,11 @@ The Microsoft Agent Framework supports Microsoft Foundry, Azure OpenAI, and Open
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars |
 | --- | --- | --- |
-| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` (uses `DefaultAzureCredential`) |
+| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`; optional `FOUNDRY_MODEL` (uses `DefaultAzureCredential`; runtime fallback: `gpt-4o-mini`) |
 | Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential` unless an API key is set) |
 | OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` |
 
-For Foundry, set `FOUNDRY_PROJECT_ENDPOINT` to your project endpoint and `FOUNDRY_MODEL` to your model deployment name (for example, `gpt-5.4`). Authentication uses `DefaultAzureCredential` — run `az login` locally.
+For Foundry, set `FOUNDRY_PROJECT_ENDPOINT` to your project endpoint. Set `FOUNDRY_MODEL` to a model deployment name (for example, `gpt-5.4`) to override the runtime's `gpt-4o-mini` fallback. Authentication uses `DefaultAzureCredential` — run `az login` locally.
 
 OpenAI and Azure OpenAI remain supported alternatives. If you switch providers, update `AZURE_FUNCTIONS_AGENTS_PROVIDER` and the provider-specific settings in `local.settings.json`; if `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
 

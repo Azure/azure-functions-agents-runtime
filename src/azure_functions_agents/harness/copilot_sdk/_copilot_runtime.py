@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
     from ._copilot_runner import CopilotRunner
 
-
 SDK_DISTRIBUTION = "github-copilot-sdk"
 PROVIDER_ENV = EnvVar.PROVIDER
 
@@ -81,7 +80,6 @@ def select_copilot_harness(root: Path) -> AppHarness:
             session_storage=route,
         ),
     )
-
 _START_TIMEOUT_SECONDS = 30
 _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 

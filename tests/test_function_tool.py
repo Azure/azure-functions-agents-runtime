@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 from pydantic import BaseModel, field_validator
 
+from azure_functions_agents._agent_run_diagnostics import AgentExecutionSurface
 from azure_functions_agents._function_tool import (
     get_workflow_tool_handler,
     get_workflow_tool_metadata,
@@ -330,7 +331,14 @@ async def test_maf_adapter_uses_skill_descriptor_paths(
     }
     if streaming:
         events = [
-            event async for event in _maf_execution.run_stream(harness, request, display_name=None, **options)
+            event
+            async for event in _maf_execution.run_stream(
+                harness,
+                request,
+                display_name=None,
+                execution_surface=AgentExecutionSurface.RUNNER_API,
+                **options,
+            )
         ]
         assert len(events) == 1
         assert "captured source paths" in events[0]
