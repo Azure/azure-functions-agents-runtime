@@ -29,8 +29,7 @@ from ._copilot_capabilities import (
     permission_handler,
 )
 from ._copilot_observability import CopilotEventTelemetry
-from ._copilot_preview import CopilotPreviewError
-from ._copilot_runtime import CopilotRuntime, get_runtime
+from ._copilot_runtime import CopilotPreviewError, CopilotRuntime, get_runtime
 from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
 from ._copilot_session_local import LocalSessionFileBackend

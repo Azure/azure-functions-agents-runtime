@@ -24,7 +24,7 @@ from azure_functions_agents.harness._harness_binding import (
     UnsupportedCapabilityError,
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution, _maf_tools
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import prepare_tools
+from azure_functions_agents.harness.copilot_sdk._copilot_capabilities import prepare_tools
 
 
 def test_ordinary_authoring_never_constructs_maf_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
