@@ -10,7 +10,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._logger import logger
+from ..._observability import (
+    ATTR_TOOL_OUTCOME,
+    FaultDomain,
+    SpanOutcome,
+    capture_current_context,
+    current_span,
+)
 from ..._skill_policy import SkillPolicy
+from ..._tool_descriptor import ToolDescriptor
 from .. import _harness_execution
 from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
 from .._provider_config import InferenceTarget
@@ -20,6 +28,7 @@ from ._copilot_capabilities import (
     mcp_configuration,
     permission_handler,
 )
+from ._copilot_observability import CopilotEventTelemetry
 from ._copilot_preview import CopilotPreviewError
 from ._copilot_runtime import CopilotRuntime, get_runtime
 from ._copilot_session_fs import open_session_fs
@@ -45,7 +54,6 @@ if TYPE_CHECKING:
     from copilot.session_events import SessionEvent as CopilotSessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
-    from ..._tool_descriptor import ToolDescriptor
     from ...runner import AgentResult
     from ._copilot_providers import ProviderTokenSource
     from ._copilot_session_fs import CopilotSessionFs
@@ -73,6 +81,9 @@ class _SessionOptions(TypedDict):
 
 
 type _EventSink = Callable[[StreamEvent], None]
+
+_SAFE_CUSTOM_TOOL_FAILURE_MESSAGE = "Custom tool failed or returned unsupported content."
+_SAFE_CUSTOM_TOOL_FAILURE = f'{{"error":"{_SAFE_CUSTOM_TOOL_FAILURE_MESSAGE}"}}'
 
 
 def _emit_event(event_sink: _EventSink | None, event: StreamEvent | None) -> None:
@@ -117,7 +128,7 @@ class _ExecutionLifecycle:
 
     @classmethod
     def create(
-        cls, harness: AppHarness, owner: CopilotRuntime, request: HarnessRequest
+        cls, owner: CopilotRuntime, request: HarnessRequest
     ) -> _ExecutionLifecycle:
         leaf = request.execution_role != "primary"
         if leaf and not request.new_session:
@@ -131,7 +142,7 @@ class _ExecutionLifecycle:
             copilot_id=copilot_id,
             session_storage=StorageRoute(owner.native_root / "ephemeral")
             if leaf
-            else harness.session_storage,
+            else owner._runner.session_storage,
             session_storage_id=copilot_id if leaf else request.session_id,
             leaf=leaf,
         )
@@ -165,32 +176,39 @@ class _ExecutionLifecycle:
         return CopilotPreviewError("Copilot request exceeded its deadline.")
 
 
-def _tool(
-    function: ToolDescriptor,
-    calls: CopilotToolCalls,
-    event_sink: _EventSink | None = None,
-) -> Tool:
+def _tool(function: ToolDescriptor, calls: CopilotToolCalls, event_sink: _EventSink | None = None) -> Tool:
     from copilot.tools import Tool, ToolResult
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
-        calls.start_custom(invocation)
+        claimed = calls.start_custom(invocation)
         start_event = calls.start_event(invocation.tool_call_id)
         _emit_event(event_sink, start_event)
-        try:
-            result = await function.invoke(
-                arguments=invocation.arguments,
-                tool_call_id=invocation.tool_call_id,
-            )
-            text = tool_result_text(result)
-        except Exception:
-            logger.warning("Copilot custom tool failed: tool=%s", function.name)
-            text = '{"error":"Custom tool failed or returned unsupported content."}'
-            calls.complete_custom(invocation.tool_call_id, text, success=False)
+        with calls.custom_span(invocation, claimed=claimed) as span:
+            try:
+                result = await function.invoke(
+                    arguments=invocation.arguments,
+                    tool_call_id=invocation.tool_call_id,
+                )
+                text = tool_result_text(result)
+            except asyncio.CancelledError:
+                span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.CANCELLED)
+                raise
+            except Exception as exc:
+                logger.warning("Copilot custom tool failed: tool=%s", function.name)
+                text = _SAFE_CUSTOM_TOOL_FAILURE
+                span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.ERROR)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.APP,
+                    infer_error_type=True,
+                )
+                calls.complete_custom(invocation.tool_call_id, text, success=False)
+                _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
+                return ToolResult(text_result_for_llm=text, result_type="failure")
+            span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.SUCCESS)
+            calls.complete_custom(invocation.tool_call_id, text, success=True)
             _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
-            return ToolResult(text_result_for_llm=text, result_type="failure")
-        calls.complete_custom(invocation.tool_call_id, text, success=True)
-        _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
-        return ToolResult(text_result_for_llm=text, result_type="success")
+            return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
         name=function.name,
@@ -203,20 +221,19 @@ def _tool(
 
 
 def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
-    if harness.provider is None:
-        raise CopilotPreviewError("Copilot preview has no valid provider target.")
+    provider = get_runtime(harness)._runner.provider
     try:
-        return harness.provider.sdk_config(model, tokens)
+        return provider.sdk_config(model, tokens)
     except CopilotPreviewError:
         raise
     except Exception:
         logger.error(
             "Copilot provider setup failed: provider=%s authentication=%s; "
             "underlying details were not logged.",
-            harness.provider.kind,
-            harness.provider.auth_label,
+            provider.kind,
+            provider.auth_label,
         )
-        raise CopilotPreviewError(harness.provider.setup_diagnostic()) from None
+        raise CopilotPreviewError(provider.setup_diagnostic()) from None
 
 
 async def _abort(session: CopilotSession) -> None:
@@ -316,7 +333,7 @@ async def _acquire_client(owner: CopilotRuntime, deadline: float) -> CopilotClie
 
 
 async def _verify_tool_catalog(
-    session: CopilotSession, functions: tuple[ToolDescriptor, ...]
+    session: CopilotSession, functions: list[Tool]
 ) -> None:
     metadata = await session.rpc.tools.get_current_metadata()
     if metadata.tools is None:
@@ -430,6 +447,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         AssistantMessageDeltaData,
         AssistantReasoningDeltaData,
         AssistantUsageData,
+        SkillInvokedData,
         ToolExecutionCompleteData,
         ToolExecutionStartData,
     )
@@ -437,8 +455,16 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from ...runner import AgentResult
 
     owner = get_runtime(harness)
-    lifecycle = _ExecutionLifecycle.create(harness, owner, request)
-    calls = CopilotToolCalls()
+    lifecycle = _ExecutionLifecycle.create(owner, request)
+    run_span = current_span()
+    calls = CopilotToolCalls(
+        parent_context=capture_current_context(),
+        run_span=run_span,
+        custom_tool_names=tuple(function.name for function in request.tools),
+        agent_name=request.agent_slug,
+        session_id=request.session_id,
+    )
+    telemetry = CopilotEventTelemetry(run_span)
     messages: list[str] = []
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -446,7 +472,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         agent_name=request.agent_slug,
         execution_role=request.execution_role,
         inference_target=InferenceTarget(
-            harness.provider.kind if harness.provider is not None else None,
+            owner._runner.provider.kind,
             request.model,
         ),
     )
@@ -465,17 +491,28 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             case AssistantMessageData(content=content, parent_tool_call_id=None) if content:
                 messages.append(content)
             case AssistantUsageData(input_tokens=used_input, output_tokens=used_output):
+                telemetry.observe_usage(event.id, event.data)
                 if used_input is not None:
                     input_tokens = (input_tokens or 0) + used_input
                 if used_output is not None:
                     output_tokens = (output_tokens or 0) + used_output
+            case SkillInvokedData(name=name):
+                telemetry.observe_skill(name)
             case ToolExecutionStartData() as started:
-                calls.start_native(started)
+                calls.start_native(
+                    started,
+                    event_id=event.id,
+                    timestamp=event.timestamp,
+                )
                 if not calls.is_custom(started.tool_call_id):
                     start_event = calls.start_event(started.tool_call_id)
                     _emit_event(request.event_sink, start_event)
             case ToolExecutionCompleteData() as completed:
-                calls.complete_native(completed)
+                calls.complete_native(
+                    completed,
+                    event_id=event.id,
+                    timestamp=event.timestamp,
+                )
                 if not calls.is_custom(completed.tool_call_id):
                     start_event = calls.start_event(
                         completed.tool_call_id, synthesize_arguments=True
@@ -483,6 +520,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     _emit_event(request.event_sink, start_event)
                     _emit_event(request.event_sink, calls.end_event(completed.tool_call_id))
 
+    sdk_tools = [_tool(function, calls, request.event_sink) for function in request.tools]
     token_source = _RequestTokenSource(owner)
     try:
         provider = _provider(harness, token_source, request.model)
@@ -516,7 +554,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 client = await _acquire_client(owner, request.deadline)
                 options = _SessionOptions(
                     model=request.model,
-                    tools=[_tool(function, calls, request.event_sink) for function in request.tools],
+                    tools=sdk_tools,
                     available_tools=available_tools(request),
                     system_message=SystemMessageReplaceConfig(
                         mode="replace", content=request.instructions or ""
@@ -548,14 +586,14 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     session.disconnect, "Copilot native session could not be disconnected."
                 ):
                     if not request.mcp_servers and not request.skills:
-                        await _verify_tool_catalog(session, request.tools)
+                        await _verify_tool_catalog(session, sdk_tools)
                     _emit_event(
                         request.event_sink,
                         SessionEvent(type="session", session_id=request.session_id),
                     )
                     logger.info(
                         "Copilot request target: provider=%s model=%s",
-                        harness.provider.kind if harness.provider is not None else None,
+                        owner._runner.provider.kind,
                         request.model,
                     )
                     content = await _run_session_turn(
@@ -592,3 +630,5 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             "Copilot preview failed. Check the SDK runtime, provider authentication, and "
             "session storage. No fallback was attempted."
         ) from None
+    finally:
+        calls.finish_telemetry()

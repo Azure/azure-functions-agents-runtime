@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from functools import partial
 from pathlib import Path
 
 
@@ -19,6 +20,7 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
         _copilot_session_fs as fs,
     )
     from azure_functions_agents.harness.copilot_sdk._copilot_providers import OpenAIProvider
+    from azure_functions_agents.harness.copilot_sdk._copilot_runner import CopilotRunner
     from azure_functions_agents.harness.copilot_sdk._copilot_runtime import get_runtime
     from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import resolve_route
 
@@ -38,9 +40,17 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
 
     app_root = session_dir / "app"
     app_root.mkdir(parents=True, exist_ok=True)
+    route = resolve_route(app_root)
     harness = AppHarness(
-        HarnessKind.COPILOT, app_root, storage_root, "offline-model", OpenAIProvider("offline"),
-        session_storage=resolve_route(app_root),
+        HarnessKind.COPILOT,
+        app_root,
+        partial(
+            CopilotRunner,
+            storage_root=storage_root,
+            default_model="offline-model",
+            provider=OpenAIProvider("offline"),
+            session_storage=route,
+        ),
     )
     owner = get_runtime(harness)
     native_id = _copilot._copilot_session_id("agent", "restore")
@@ -54,7 +64,7 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
     session = None
     try:
         storage = await fs.open_session_fs(
-            harness.session_storage, "agent", "restore",
+            route, "agent", "restore",
             workspace_path=str(owner.workspace),
             deadline=asyncio.get_running_loop().time() + 120,
         )

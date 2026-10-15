@@ -715,6 +715,8 @@ class _RecordingTask:
     def __init__(self, result: Any = None) -> None:
         self._result = result
         self.is_complete = True
+        self._parent = None
+        self._parents: dict[int, Any] = {}
 
     @property
     def result(self) -> Any:

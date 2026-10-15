@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -15,15 +16,25 @@ from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
-from .._observability import FaultDomain, LifecycleStage, start_span
+from .._observability import (
+    ATTR_AGENT_OUTCOME,
+    FaultDomain,
+    LifecycleStage,
+    SpanOutcome,
+    agent_run_span_name,
+    set_agent_session_attribute,
+    start_span,
+)
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ..harness._agent_runner import get_agent_runner
 from ..harness._harness_binding import (
     AppHarness,
-    HarnessKind,
     HarnessSessionState,
+    SessionHistoryUnavailableError,
+    agent_run_attributes_for_harness,
+    auto_record_exceptions_for_harness,
     bind_harness,
     get_harness,
 )
@@ -329,45 +340,46 @@ def _register_http_chat(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
+    harness = bind_harness(resolved, capabilities)
+
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
         supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(
+                auth_error.message,
+                status_code=auth_error.status_code,
+                headers=(
+                    {_SESSION_ID_HEADER: supplied_session_id}
+                    if supplied_session_id is not None
+                    else None
+                ),
+            )
         resolved_session_id = _resolve_builtin_endpoints_session_id(
             supplied_session_id
         )
         session_state = HarnessSessionState(caller_supplied=supplied_session_id is not None)
-        failure_headers = _session_id_response_headers(
-            resolved_session_id,
-            caller_supplied=supplied_session_id is not None,
-            state=session_state,
-        )
         # This endpoint calls `run_agent` directly rather than going through
         # `_handlers.py`'s trigger-registered handlers, so — unlike a
         # user-defined `trigger:` agent — nothing upstream opens an
-        # `agent.run {name}` span for it. Opened here so this built-in
+        # runtime invocation span for it. Opened here so this built-in
         # surface gets the same run-level span/attributes (including B3's
         # `af.agent.tool_error_count`, which folds in delegate errors) that
         # `make_agent_handler`/`make_http_agent_handler` already provide.
         with start_span(
-            f"agent.run {resolved.slug}",
+            agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "builtin_chat",
-                "af.agent.session_id": resolved_session_id,
-                "af.agent.model": resolved.model,
-            },
+            record_exception=auto_record_exceptions_for_harness(harness),
+            attributes=agent_run_attributes_for_harness(
+                harness,
+                agent_name=resolved.slug,
+                display_name=resolved.name,
+                trigger_type="builtin_chat",
+                session_id=resolved_session_id,
+                model=resolved.model,
+            ),
         ) as span:
             try:
-                auth_error = authorize_entra_request(req.headers.get, auth)
-                if auth_error is not None:
-                    span.set_attribute("af.agent.outcome", "error")
-                    span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
-                    return _json_error(
-                        auth_error.message,
-                        status_code=auth_error.status_code,
-                        headers=failure_headers,
-                    )
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
                 result = await _run_builtin_agent(
@@ -384,7 +396,7 @@ def _register_http_chat(
                     _session_state=session_state,
                 )
                 _set_run_result_attributes(span, result)
-                span.set_attribute("af.agent.outcome", "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
                 return Response(
                     json.dumps(
                         {
@@ -406,8 +418,15 @@ def _register_http_chat(
                     ),
                 )
             except SessionStorageError as exc:
-                span.set_attribute("af.agent.outcome", "error")
-                span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
+                if auto_record_exceptions_for_harness(harness):
+                    span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
+                else:
+                    span.record_exception(
+                        exc,
+                        fault_domain=FaultDomain.UNKNOWN,
+                        infer_error_type=True,
+                    )
                 return _json_error(
                     str(exc),
                     status_code=exc.status_code,
@@ -418,7 +437,7 @@ def _register_http_chat(
                     ),
                 )
             except ValueError as exc:
-                span.set_attribute("af.agent.outcome", "error")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)
                 return _json_error(
                     str(exc),
@@ -429,9 +448,17 @@ def _register_http_chat(
                         state=session_state,
                     ),
                 )
+            except asyncio.CancelledError:
+                if not auto_record_exceptions_for_harness(harness):
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
+                raise
             except Exception as exc:
-                span.set_attribute("af.agent.outcome", "error")
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.UNKNOWN,
+                    infer_error_type=not auto_record_exceptions_for_harness(harness),
+                )
                 error_msg = _format_exception_message(exc)
                 logger.error(
                     "Built-in chat API error: source_file=%s error=%s",
@@ -569,20 +596,25 @@ def _register_mcp_endpoint(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
+    harness = bind_harness(resolved, capabilities)
+
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         # Same rationale as `handle_chat` above: this built-in MCP surface
         # calls `run_agent` directly, so nothing upstream opens an
-        # `agent.run {name}` span for it — open one here to get the same
+        # runtime invocation span for it — open one here to get the same
         # run-level attributes (including B3's `af.agent.tool_error_count`).
         with start_span(
-            f"agent.run {resolved.slug}",
+            agent_run_span_name(agent_name=resolved.slug),
             lifecycle_stage=LifecycleStage.AGENT_RUN,
-            attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
-                "af.agent.trigger_type": "builtin_mcp",
-                "af.agent.model": resolved.model,
-            },
+            record_exception=auto_record_exceptions_for_harness(harness),
+            attributes=agent_run_attributes_for_harness(
+                harness,
+                agent_name=resolved.slug,
+                display_name=resolved.name,
+                trigger_type="builtin_mcp",
+                session_id=None,
+                model=resolved.model,
+            ),
         ) as span:
             session_id: str | None = None
             resolved_session_id: str | None = None
@@ -596,13 +628,16 @@ def _register_mcp_endpoint(
                 session_state = HarnessSessionState(caller_supplied=session_id is not None)
                 prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
                 if not isinstance(prompt, str) or not prompt.strip():
-                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
                     span.set_error("Missing 'prompt'", fault_domain=FaultDomain.APP)
                     return json.dumps(
                         {"error": "Missing 'prompt'", "session_id": session_id}
                     )
 
-                span.set_attribute("af.agent.session_id", session_id)
+                set_agent_session_attribute(
+                    span,
+                    session_id=session_id,
+                )
                 resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
                 result = await _run_builtin_agent(
                     prompt.strip(),
@@ -623,9 +658,12 @@ def _register_mcp_endpoint(
                 # with it (N1) instead of leaving the pre-call `None` in place,
                 # which otherwise left this attribute permanently unset for
                 # every caller-omitted-session-id turn.
-                span.set_attribute("af.agent.session_id", resolved_session_id)
+                set_agent_session_attribute(
+                    span,
+                    session_id=resolved_session_id,
+                )
                 _set_run_result_attributes(span, result)
-                span.set_attribute("af.agent.outcome", "success")
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
                 return json.dumps(
                     {
                         "session_id": (
@@ -638,9 +676,17 @@ def _register_mcp_endpoint(
                         "tool_calls": result.tool_calls,
                     }
                 )
+            except asyncio.CancelledError:
+                if not auto_record_exceptions_for_harness(harness):
+                    span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
+                raise
             except Exception as exc:
-                span.set_attribute("af.agent.outcome", "error")
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
+                span.record_exception(
+                    exc,
+                    fault_domain=FaultDomain.UNKNOWN,
+                    infer_error_type=not auto_record_exceptions_for_harness(harness),
+                )
                 error_msg = _format_exception_message(exc)
                 logger.error(
                     "Built-in MCP error: source_file=%s error=%s",
@@ -797,12 +843,8 @@ def _register_history_endpoint(
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
-        if selected_harness.name is HarnessKind.COPILOT:
-            return _json_error(
-                "Copilot preview does not support transcript replay. Native state is separate "
-                "from MAF history.",
-                status_code=501,
-            )
+        if message := get_agent_runner(selected_harness).session_history_unavailable_message:
+            return _json_error(message, status_code=501)
         session_id = _request_header_value(req, _SESSION_ID_HEADER) or ""
         if not session_id:
             return Response(
@@ -821,6 +863,8 @@ def _register_history_endpoint(
             history = await get_agent_runner(selected_harness).get_session_history(
                 slug, session_id
             )
+        except SessionHistoryUnavailableError as exc:
+            return _json_error(str(exc), status_code=exc.status_code)
         except Exception:
             logger.exception("history endpoint failed")
             return Response(
