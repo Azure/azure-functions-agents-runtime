@@ -8,13 +8,11 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MethodType
-from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 import azure_functions_agents as _package
-
-from ._logger import logger
 
 type ApprovalMode = Literal["always_require", "never_require"]
 type ToolCallable = Callable[..., Any]
@@ -43,7 +41,7 @@ def _parameter_type_matches(value: Any, kind: str) -> bool:
 def _validate_json_arguments(
     name: str, values: dict[str, Any], schema: dict[str, Any]
 ) -> None:
-    """Preserve MAF's top-level checks without enforcing extra JSON Schema keywords."""
+    """Preserve top-level schema checks without enforcing extra JSON Schema keywords."""
     missing = {
         key for key in schema.get("required", ()) if isinstance(key, str)
     } - values.keys()
@@ -119,6 +117,8 @@ def _function_hints(func: ToolCallable) -> dict[str, Any]:
             parameter.name: parameter.annotation
             for parameter in inspect.signature(func).parameters.values()
         }
+
+
 def _input_model(name: str, func: ToolCallable) -> type[BaseModel]:
     signature = inspect.signature(func)
     hints = _function_hints(func)
@@ -212,26 +212,13 @@ class ToolDescriptor:
         return self
 
 
-def is_harness_object(candidate: object) -> bool:
-    """Recognize SDK-owned values without inspecting their attributes."""
-    return any(
-        base.__module__.split(".", 1)[0] in {"agent_framework", "copilot"}
-        for base in type(candidate).__mro__
-    )
-
-
-def warn_unsupported_tool() -> None:
-    logger.warning(
-        "Ignoring unsupported custom tool; use the runtime @tool decorator "
-        "or a local public function in tools/."
-    )
+def tool_name(candidate: ToolInput) -> str:
+    """Read public tool metadata without interpreting the implementation."""
+    name = getattr(candidate, "name", None) or getattr(candidate, "__name__", None)
+    if name is None and callable(candidate):
+        name = type(candidate).__name__
+    return str(name or "")
 
 
 def describe_tools(candidates: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
-    tools: list[ToolDescriptor] = []
-    for candidate in candidates:
-        if issubclass(type(candidate), ToolDescriptor):
-            tools.append(cast(ToolDescriptor, candidate))
-        else:
-            warn_unsupported_tool()
-    return tuple(tools)
+    return tuple(candidate for candidate in candidates if isinstance(candidate, ToolDescriptor))

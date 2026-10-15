@@ -43,7 +43,11 @@ class _NonCallableDictionaryResult:
             self.text = "looks successful"
 
 
-@pytest.mark.parametrize("parser", [FunctionTool.parse_result, tool_result_text], ids=["maf", "copilot"])
+@pytest.mark.parametrize(
+    "parser",
+    [FunctionTool.parse_result, tool_result_text],
+    ids=["maf", "copilot"],
+)
 @pytest.mark.parametrize("to_dict", [None, 42], ids=["none", "integer"])
 @pytest.mark.parametrize("with_text", [False, True], ids=["without-text", "with-text"])
 def test_noncallable_to_dict_preserves_conversion_failure(parser, to_dict, with_text):
@@ -57,14 +61,24 @@ def test_noncallable_to_dict_preserves_conversion_failure(parser, to_dict, with_
 @pytest.mark.parametrize(
     "value",
     [
-        None, "text", 1, True, float("nan"), float("inf"), float("-inf"),
-        {"values": [float("nan"), float("inf")]}, date(2026, 10, 6),
-        _MappingResult(), _TextResult(), _NonTextResult(),
+        None,
+        "text",
+        1,
+        True,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        {"values": [float("nan"), float("inf")]},
+        date(2026, 10, 6),
+        _MappingResult(),
+        _TextResult(),
+        _NonTextResult(),
         _ModelResult(observed_on=date(2026, 10, 6)),
         [_TextResult(), {"nested": _MappingResult()}],
         {"nested": _ModelResult(observed_on=date(2026, 10, 6))},
         (_MappingResult(), _TextResult()),
-        _StringResult("original text"), [_StringResult("nested")],
+        _StringResult("original text"),
+        [_StringResult("nested")],
     ],
 )
 async def test_shared_ordinary_conversion_matches_actual_maf_invocation(value):
@@ -74,15 +88,6 @@ async def test_shared_ordinary_conversion_matches_actual_maf_invocation(value):
     assert tool_result_text(value) == parsed[0].text
 
 
-def test_adapter_can_reject_nested_unsupported_values_before_conversion():
-    forbidden = _MappingResult()
-    seen = []
-
-    def validate(value):
-        seen.append(value)
-        if value is forbidden:
-            raise TypeError("unsupported result")
-
-    with pytest.raises(TypeError, match="unsupported result"):
-        tool_result_text({"nested": forbidden}, validate_result=validate)
-    assert seen == [{"nested": forbidden}, forbidden]
+def test_nested_values_attempt_their_actual_conversion():
+    value = {"nested": _MappingResult()}
+    assert tool_result_text(value) == '{"nested": {"value": 1, "observed_on": "2026-10-06"}}'

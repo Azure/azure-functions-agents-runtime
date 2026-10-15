@@ -676,14 +676,15 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools use the runtime's `@tool` or local public functions in
-`tools/*.py`. Discovery selects the first candidate per module, preferring
-runtime `@tool` descriptors. Raw `FunctionTool`, SDK decorators/objects, and
-undecorated programmatic functions outside discovery are ignored with a
-sanitized warning. Runtime `@tool` accepts only its portable arguments
-(`name`, `description`, `schema`, and `approval_mode`); unexpected keyword
-arguments are warned and ignored instead of being enforced or forwarded. For
-example, `max_invocations` is ignored in both harnesses.
+Normal custom tools use the runtime's `@tool`, a native SDK tool, or local
+public functions in `tools/*.py`. Discovery selects one tool per module:
+runtime `@tool` descriptors first, then named tool objects with public
+`name`/`description`, then the first local public function. Classes, imported
+functions, unrelated globals, and workflow-only declarations are not exposed as
+fallback tools, and discovery never invokes authored functions. Runtime `@tool`
+accepts only `name`, `description`, `schema`, and `approval_mode`; unexpected
+keyword arguments raise the normal Python `TypeError`. Use authored SDK objects
+directly for native options such as `max_invocations`.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. This does not enable workflow roles

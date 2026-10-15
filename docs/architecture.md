@@ -55,7 +55,7 @@ authorization independent of file order.
 A few boundaries are worth calling out explicitly:
 
 - **Discovery is read-only.** These modules inspect the project tree and return inventories; they do not decide what any one agent is allowed to use or create SDK clients, live tokens, or MCP connections.
-- **Capabilities are harness-neutral.** Ordinary tools, MCP servers, and skills use immutable SDK-free descriptors. Registration filters them; the selected execution adapter constructs SDK objects. Raw SDK tools are ignored, and runtime `@tool` accepts only the portable runtime surface.
+- **Capabilities are harness-neutral.** Ordinary tools, MCP servers, and skills are discovered and filtered before any SDK object is created. Runtime descriptors stay SDK-free, while authored native tools and callables may pass through unchanged until the selected adapter validates or wraps them.
 - **Translation is type-driven.** The loader and merge layers convert loose YAML/markdown input into `AgentSpec`, `GlobalConfig`, and then `ResolvedAgent`.
 - **Composition is two-pass and side-effect-free until pass 2.** `app.py` builds
   the slug index and validates references, then
@@ -128,9 +128,9 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/workflows/native_retry.py` | Maps the persisted retry policy onto Durable Python 2.x `RetryPolicy`, raises the private marker that asks Durable to retry a sanitized outcome, and decodes that outcome back out of an exhausted `TaskFailedError`. | `create_durable_retry_policy()`, `raise_for_durable_retry()`, `decode_durable_retry_failure()` |
 | `azure_functions_agents/workflows/registry.py` | Defines immutable workflow handler entries/catalogs; production app composition passes this complete catalog explicitly rather than using the compatibility singleton allowlist as authorization. | `WorkflowHandlerCatalog`, `build_handler_catalog()` |
 | `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans and policies, including the data-driven `when` predicate, bounded `for_each`, plan-authored retry, timeout, and continuation, and per-field decorator precedence. Start-time validation freezes the effective execution policy into orchestration input. Continuation stays plan-only. List/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowTaskExecution`, `WorkflowCondition`, `validate_plan()`, `resolve_workflow_task_execution()`, `build_workflow_tools()` |
-| `azure_functions_agents/_tool_descriptor.py` | Frozen SDK-free tool name, description, callable, Pydantic input model, execution policy, and workflow metadata. Returns a fresh JSON schema and ordinary Python invocation values. | `ToolDescriptor`, `parameters()`, `invoke(arguments, tool_call_id)` |
-| `azure_functions_agents/harness/copilot_sdk/_tool_result.py` | Ordinary Python result conversion used by the Copilot adapter and kept behaviorally aligned with MAF's default text formatting, while rich SDK result policy stays adapter-owned. | `tool_result_text()` |
-| `azure_functions_agents/_function_tool.py` | Runtime `@tool` authoring produces neutral descriptors from the portable runtime surface only; `@workflow_tool` retains Activity metadata in either decorator order. Unsupported extra `@tool` keywords are warned and ignored, never passed through. | `tool()`, `workflow_tool()` |
+| `azure_functions_agents/_tool_descriptor.py` | Frozen runtime tool schema, callable, execution policy, and workflow metadata, plus a shared public-name reader for opaque authored inputs. Runtime descriptors return fresh schemas and preserve Pydantic/top-level JSON argument behavior. | `ToolDescriptor`, `parameters()`, `invoke(arguments, tool_call_id)`, `tool_name()` |
+| `azure_functions_agents/harness/copilot_sdk/_tool_result.py` | Python result conversion aligned with MAF's ordinary text formatting. Attempts `model_dump()`, `to_dict()`, `.text`, and ordinary JSON/string conversion without classifying SDK origins; real conversion failures propagate. | `tool_result_text()` |
+| `azure_functions_agents/_function_tool.py` | SDK-free convenience `@tool` with an explicit Python signature; `@workflow_tool` retains Activity metadata in either decorator order and accepts authored callables. No origin allowlist, keyword stripping, or SDK snapshots. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `integrations/vally-executor-azure-functions/` | Private, path-loadable Vally 0.16.0 executor for the existing synchronous chat endpoint. Owns target authentication, isolated sessions, hard deadlines, response checking and trajectory conversion, not graders, scoring or reports. Python runtime modules do not import Vally contracts. | `AzureFunctionsAgentExecutor`, `registerExecutors()` |
 | `azure_functions_agents/_observability.py` | Harness-neutral OpenTelemetry exporter/configuration and conventions: when the optional `[monitor]` extra is installed, configures Azure Monitor export; provides `af.*` span/attribute helpers, the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session and delegate-call metrics, and third-party log-noise control. MAF instrumentation is selected and initialized by the MAF adapter only. | `configure_observability()`, `start_span()`, `current_span()`, `FaultDomain`, `LifecycleStage`, `record_delegate_call()` |
@@ -201,7 +201,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 4. **Discover runtime inventories from disk**
    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_project_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
    - **Input:** `app_root: Path`
-   - **Output:** neutral runtime tool, MCP server, and skill inventories, plus explicit workflow Activity targets; raw SDK tools are ignored
+   - **Output:** runtime descriptors and opaque authored tools, MCP server/skill inventories, and explicit workflow Activity targets; authored functions are not invoked
    - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. Tools discovery records ordinary callable/schema metadata and explicit `@workflow_tool` opt-ins; filtering happens later. MCP discovery applies `resolve_env_vars_in_data()` and preserves warnings, skipped entries, and `failed_loads` reporting. A `url` is required; optional `type` must be `"http"` or `"streamable-http"`. Other transports (`stdio`, `sse`, etc.) are skipped with warnings. Descriptors contain static headers and auth declarations, never SDK wrappers or live tokens. Skill discovery checks `SKILL.md` presence without reading content, searches through two child levels and stops at each root, and records canonical paths with directory-slug identities. SDKs own metadata validation and duplicate selection; distinct same-slug candidates are retained. `data-driven-workflows` remains reserved for runtime-owned workflow guidance.
 
 5. **Compose a per-agent runtime view**
@@ -298,20 +298,23 @@ and no fallback from Copilot back to MAF after selection. Legacy `runtime:`
 front matter remains ignored.
 
 The runtime keeps discovery, merge, validation, and registration SDK-neutral.
-`HarnessRequest` carries immutable tool, MCP, and approved-skill descriptors;
-the selected adapter constructs SDK objects at the execution boundary. MAF and
+`HarnessRequest` carries runtime tool, MCP, and approved-skill descriptors plus
+opaque authored tool inputs; the selected runner constructs SDK objects at
+execution. MAF and
 Copilot therefore share authoring and policy inputs but not SDK-specific
 construction, auth timing, or result translation.
 
-Tool authoring remains the runtime surface:
+Tool authoring is user-owned:
 
 - runtime `@tool(...)` declarations stay supported;
-- a `tools/*.py` module may still contribute its first public local function;
-- raw SDK tools and SDK-specific decorators are ignored with a warning;
+- a `tools/*.py` module contributes its first named tool, preferring runtime
+  descriptors, or its first public local function;
+- native SDK tools and direct programmatic callables are retained;
 - runtime `@tool` accepts only `name`, `description`, `schema`, and
-  `approval_mode`; extra keyword arguments are logged once and ignored; and
-- the runtime does not accommodate harness-specific callable signatures such as
-  `FunctionInvocationContext`.
+  `approval_mode`; unknown keywords raise ordinary Python errors rather than
+  being silently stripped; and
+- compatibility is determined by the selected SDK and execution, not a
+  portable-tool allowlist. The host adds no cross-SDK invocation-context shim.
 
 MCP and skills keep their current authored inputs. `mcp.json` remains remote
 HTTP/streamable-HTTP plus existing per-agent filters. Skill discovery remains
@@ -718,7 +721,14 @@ through `ClientManager` is not a supported public extension point.
 
 ### Custom tools
 
-To add project-specific tools, use the runtime's `@tool` decorator or put ordinary local public functions in `tools/`. Discovery selects the first candidate per module, preferring runtime `@tool` descriptors over plain functions. Imported functions and workflow-only functions are not plain-function candidates. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_project_tools()` (with `discover_user_tools()` kept as the normal-tool API), and the decorator is in `src/azure_functions_agents/_function_tool.py:tool()`. Sync/async invocation and Pydantic validation remain authoring contracts; selected adapters map them to MAF or Copilot tools.
+To add project-specific tools, use the runtime's `@tool`, a native SDK tool, or
+an ordinary local public function in `tools/`. Discovery selects one tool per
+module: first a runtime descriptor, then a named tool object with public
+`name`/`description` metadata, then the first local public function. Classes,
+unrelated globals, imported functions, and workflow-only declarations are not
+exposed as fallback tools. Discovery never invokes authored functions.
+Programmatic runner inputs retain supplied objects and callables without
+requiring a runtime decorator.
 
 Supplied JSON parameter schemas retain MAF's top-level required-field,
 additional-property, enum, and primitive-type checks, not full JSON Schema
@@ -727,24 +737,17 @@ The lightweight checks and callable receive the same Python-mode normalized
 arguments, preserving MAF's acceptance/rejection of coerced values.
 Ordinary tool results preserve recursive list/dict conversion, Pydantic
 `model_dump()`, custom `to_dict()`, and string `.text` values through the shared
-result helper. MAF's SDK owns its rich result wrapping; Copilot rejects unsupported
-harness objects before mapping ordinary text to its SDK result.
+result helper. MAF's SDK owns its rich result wrapping; Copilot preserves native
+SDK `ToolResult` values and maps ordinary Python results to SDK text results at
+the adapter boundary.
 
-Raw `FunctionTool`, SDK decorators/objects, and undecorated programmatic functions
-outside discovery are ignored with the same sanitized warning in either harness.
-Discovery, registration factories, and runner inputs never unwrap SDK attributes
-or retain raw objects as registered tools. Runtime-generated system, delegate,
-and workflow tools remain trusted descriptors.
-
-Runtime `@tool` accepts only the portable runtime surface (`name`,
-`description`, `schema`, and `approval_mode`). Unsupported extra keyword
-arguments are logged once by name and then ignored; for example,
-`max_invocations` is not enforced in any harness. The runtime does not preserve
-any harness-specific passthrough or invocation context shim. Each selected
-wrapper owns its own SDK state; there is no host
-snapshot registry or cross-wrapper identity/counter guarantee. Copilot rejects
-unsupported approval policies before effects. The shared request factory does
-not import Copilot qualification logic.
+The runtime convenience `@tool` has an explicit signature (`name`,
+`description`, `schema`, and `approval_mode`). Use authored SDK
+objects/decorators for native options such as `max_invocations`; those options
+and native state remain intact. Unknown convenience-decorator keywords raise the
+normal Python `TypeError`. Runtime schema checks, capability filters, reserved
+host names, authentication, and runtime-generated system/delegate/workflow
+tools remain descriptor-owned.
 
 These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools, the `web_request` tool, MCP tools, and (when declared) `delegate_<slug>` tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
 

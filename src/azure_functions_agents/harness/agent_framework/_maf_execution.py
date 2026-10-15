@@ -15,7 +15,7 @@ from azure_functions_agents import runner as _runner
 from ..._agent_identity import agent_id
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
-from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ..._tool_descriptor import ToolInput
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
 from ...config.paths import get_app_root
@@ -41,9 +41,7 @@ if TYPE_CHECKING:
         AgentResponseUpdate,
         AgentSession,
         Content,
-        FunctionTool,
         HistoryProvider,
-        MCPStreamableHTTPTool,
         Message,
         ResponseStream,
         RoleLiteral,
@@ -56,7 +54,7 @@ if TYPE_CHECKING:
 
     from ...workflows.schema import WorkflowPlanPolicy
 type AgentFunctionTool = ToolInput
-type AgentTool = FunctionTool | MCPStreamableHTTPTool
+type AgentTool = Any
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
 type _FunctionArguments = str | Mapping[str, Any] | None
 type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
@@ -272,9 +270,9 @@ def assemble_agent_inputs(
 ) -> tuple[list[AgentTool], str | None]:
     root = app_root or get_app_root()
     descriptors = [
-        *describe_tools(discover_user_tools(root).tools if tools is None else tools),
-        *describe_tools(sandbox_tools or ()),
-        *describe_tools(web_request_tools or ()),
+        *(discover_user_tools(root).tools if tools is None else tools),
+        *(sandbox_tools or ()),
+        *(web_request_tools or ()),
     ]
     if workflow_enabled:
         from ...workflows.tools import build_workflow_tools
@@ -299,7 +297,7 @@ def assemble_agent_inputs(
 
         resolved_tools.extend(build_maf_mcp_tools(servers))
     if delegate_tools:
-        resolved_tools.extend(build_maf_tools(describe_tools(delegate_tools)))
+        resolved_tools.extend(build_maf_tools(delegate_tools))
     effective = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:
         effective = (effective or "") + system_addendum
@@ -310,7 +308,7 @@ def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
     agent_instructions: str | None,
-    tools: Sequence[AgentTool | ToolDescriptor],
+    tools: Sequence[ToolInput],
     skill_paths: Sequence[Path] | None,
     agent_name: str | None,
     history_provider: HistoryProvider | None,
@@ -319,10 +317,7 @@ def _build_role_agent(
     """Build one conservatively configured MAF harness agent for any role."""
     from agent_framework import SkillsProvider, create_harness_agent
 
-    adapted_tools = [
-        build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
-        for candidate in tools
-    ]
+    adapted_tools = build_maf_tools(tools)
     skills_provider = (
         SkillsProvider.from_paths(
             list(skill_paths),
@@ -478,7 +473,7 @@ async def _build_agent_session(
     history_agent_slug = _runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
     history_provider = _build_history_provider(history_agent_slug)
 
-    delegate_tools: list[ToolDescriptor] | None = None
+    delegate_tools: Sequence[ToolInput] | None = None
     delegate_error_tracker: _runner._DelegateErrorTracker | None = None
     if subagents:
         effective_deadline = (

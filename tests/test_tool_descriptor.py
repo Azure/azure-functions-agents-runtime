@@ -13,37 +13,26 @@ from pydantic import BaseModel, Field, create_model
 
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
-from azure_functions_agents.harness.agent_framework._maf_tools import (
-    build_maf_tools,
-)
+from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 
 
-def test_unsupported_programmatic_tools_are_ignored_without_inspection(caplog):
+def test_programmatic_authored_tools_are_retained_without_inspection():
     from agent_framework import FunctionTool
 
-    from azure_functions_agents._tool_descriptor import describe_tools
     from azure_functions_agents.registration.capabilities import AgentCapabilities
 
     class Opaque:
         def __getattribute__(self, name):
-            raise AssertionError("Unsupported tool attributes must not be inspected")
+            raise AssertionError("Registration must not inspect SDK state")
 
-        def __call__(self, **kwargs):
-            raise AssertionError("Unsupported tool must not execute")
+    def authored(value: str) -> str:
+        raise AssertionError("Registration must not execute authored code")
 
-    @tool
-    def allowed() -> str:
-        return "ok"
+    native = FunctionTool(name="native", func=authored)
+    candidates = (native, authored, Opaque())
+    capabilities = AgentCapabilities.create(filtered_user_tools=candidates)
 
-    def undecorated() -> str:
-        return "ignored"
-
-    candidates = [FunctionTool(name="private-sentinel", func=undecorated), Opaque(), undecorated]
-    assert describe_tools(candidates) == ()
-    assert describe_tools([*candidates, allowed]) == (allowed,)
-    assert AgentCapabilities.create(filtered_user_tools=candidates).filtered_user_tools == ()
-    assert "Ignoring unsupported custom tool" in caplog.text
-    assert "private-sentinel" not in caplog.text
+    assert capabilities.filtered_user_tools == candidates
 
 
 class _Choice(Enum):
@@ -113,13 +102,16 @@ async def test_supplied_string_schema_keeps_maf_no_coercion_semantics(annotation
 
     echo.__annotations__ = {"value": annotation}
     schema = {
-            "properties": {
-                "value": {"type": "string", "format": "date" if annotation is date else "uuid"}
-            },
-            "required": ["value"],
-        }
+        "properties": {
+            "value": {"type": "string", "format": "date" if annotation is date else "uuid"}
+        },
+        "required": ["value"],
+    }
     descriptor = ToolDescriptor.create(
-        name="echo", description="Echo", func=echo, parameters=schema,
+        name="echo",
+        description="Echo",
+        func=echo,
+        parameters=schema,
     )
     native = FunctionTool(name="echo", description="Echo", func=echo, input_model=schema)
     await native.invoke(arguments={"value": value})
@@ -185,11 +177,16 @@ async def test_maf_schema_acceptance_is_preserved_at_neutral_invocation(rule, va
         return "accepted"
 
     schema = {
-            "type": "object", "properties": {"value": rule},
-            "required": ["value"], "additionalProperties": False,
-        }
+        "type": "object",
+        "properties": {"value": rule},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
     descriptor = ToolDescriptor.create(
-        name="echo", description="Echo", func=echo, parameters=schema,
+        name="echo",
+        description="Echo",
+        func=echo,
+        parameters=schema,
     )
     native = FunctionTool(name="echo", description="Echo", func=echo, input_model=schema)
     result = await native.invoke(arguments={"value": value})
@@ -204,14 +201,17 @@ async def test_maf_schema_acceptance_is_preserved_at_neutral_invocation(rule, va
     [{}, {"value": "1"}, {"value": True}, {"value": 1, "extra": 2}, {"value": 3}],
 )
 async def test_maf_top_level_rejections_match_neutral_invocation(arguments):
-
     calls = []
     schema = {
-            "properties": {"value": {"type": "integer", "enum": [1, 2]}},
-            "required": ["value"], "additionalProperties": False,
-        }
+        "properties": {"value": {"type": "integer", "enum": [1, 2]}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
     descriptor = ToolDescriptor.create(
-        name="echo", description="Echo", func=lambda value: calls.append(value), parameters=schema,
+        name="echo",
+        description="Echo",
+        func=lambda value: calls.append(value),
+        parameters=schema,
     )
     native = build_maf_tools([descriptor])[0]
     with pytest.raises(TypeError):
@@ -223,9 +223,7 @@ async def test_maf_top_level_rejections_match_neutral_invocation(arguments):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_enum_python_values_match_actual_maf_backend(
-    asynchronous: bool,
-) -> None:
+async def test_enum_python_values_match_actual_maf_backend(asynchronous: bool) -> None:
     calls: list[_Choice] = []
 
     def synchronous(choice: _Choice) -> dict[str, _Choice]:
@@ -275,7 +273,10 @@ def test_descriptor_schema_is_an_independent_frozen_snapshot() -> None:
         "required": ["value"],
     }
     descriptor = ToolDescriptor.create(
-        name="sample", description="Sample", func=lambda value: value, parameters=schema
+        name="sample",
+        description="Sample",
+        func=lambda value: value,
+        parameters=schema,
     )
     schema["properties"]["value"]["type"] = "string"
     exported = descriptor.parameters()
@@ -398,14 +399,8 @@ def test_sdk_imports_stay_in_named_adapter_and_legacy_boundaries() -> None:
                 if import_call and isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                     modules = [argument.value]
             for module in modules:
-                if (
-                    module.startswith("agent_framework")
-                    and path.parent != maf_package
-                ):
+                if module.startswith("agent_framework") and path.parent != maf_package:
                     violations.append(f"{path.relative_to(source)}:{node.lineno}: {module}")
-                if (
-                    (module == "copilot" or module.startswith("copilot."))
-                    and path.parent != copilot_package
-                ):
+                if (module == "copilot" or module.startswith("copilot.")) and path.parent != copilot_package:
                     violations.append(f"{path.relative_to(source)}:{node.lineno}: {module}")
     assert violations == []

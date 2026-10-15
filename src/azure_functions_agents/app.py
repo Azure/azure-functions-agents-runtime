@@ -15,7 +15,7 @@ from ._agent_identity import agent_id
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
-from ._tool_descriptor import ToolDescriptor
+from ._tool_descriptor import ToolInput, tool_name
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -47,20 +47,15 @@ from .workflows.integration import (
 )
 
 
-def _tool_name(tool: object) -> str:
-    name = getattr(tool, "name", "") or ""
-    return str(name)
-
-
 def _serialize_capabilities_for_log(
     *,
-    user_tools: Sequence[ToolDescriptor] | None,
+    user_tools: Sequence[ToolInput] | None,
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path],
     skill_name_by_path: dict[str, str],
 ) -> dict[str, list[str]]:
     return {
-        "user_tools": sorted(tool.name for tool in (user_tools or ())),
+        "user_tools": sorted(tool_name(tool) for tool in (user_tools or ())),
         "mcp_servers": sorted(server.name for server in (mcp_tools or ())),
         "skills": sorted(
             skill_name_by_path.get(str(path.resolve()), path.name) for path in skill_paths
@@ -139,7 +134,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     skill_names = list(skills)
     mcp_names = list(mcp_tools)
     skill_name_by_path = {str(path.resolve()): name for name, path in skills.items()}
-    discovered_user_tool_names = sorted(_tool_name(tool) for tool in user_tools)
+    discovered_user_tool_names = sorted(tool_name(tool) for tool in user_tools)
 
     logger.info(
         "discovery_summary: mcp_servers=%s skills=%s user_tools=%s",

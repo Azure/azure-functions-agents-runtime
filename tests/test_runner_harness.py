@@ -55,8 +55,8 @@ def test_agent_result_preserves_existing_positional_argument_order() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
-async def test_both_bound_runners_ignore_unsupported_values_before_execution(
-    kind, monkeypatch, caplog,
+async def test_both_bound_runners_retain_authored_inputs_without_eager_invocation(
+    kind, monkeypatch,
 ):
     from agent_framework import FunctionTool
 
@@ -65,8 +65,8 @@ async def test_both_bound_runners_ignore_unsupported_values_before_execution(
     calls = []
 
     def undecorated() -> str:
-        calls.append("unsupported")
-        return "ignored"
+        calls.append("executed")
+        return "authored"
 
     @tool
     def authored() -> str:
@@ -78,16 +78,15 @@ async def test_both_bound_runners_ignore_unsupported_values_before_execution(
     backend = maf if kind is HarnessKind.MAF else _copilot_execution
     monkeypatch.setattr(backend, "run", invoke)
     result = await runner.run_agent(
-        "fixture", tools=[raw, undecorated, authored], mcp_tools=[],
-        sandbox_tools=[raw, undecorated], web_request_tools=[raw, undecorated],
+        "fixture",
+        tools=[raw, undecorated, authored],
+        mcp_tools=[],
         _harness=harness,
     )
     assert result.content == "captured"
     request = invoke.call_args.args[1]
-    assert request.tools == (authored,)
+    assert request.tools == (raw, undecorated, authored)
     assert calls == []
-    assert "Ignoring unsupported custom tool" in caplog.text
-    assert "private-raw-name" not in caplog.text
 
 
 @pytest.mark.asyncio
