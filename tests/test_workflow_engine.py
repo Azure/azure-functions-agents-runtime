@@ -667,6 +667,7 @@ class _Task:
         self.is_complete = True
         self.cancelled = False
         self._parent = None
+        self._parents: dict[int, Any] = {}
 
     @property
     def result(self) -> Any:
