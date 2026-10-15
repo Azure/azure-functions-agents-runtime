@@ -8,7 +8,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._function_tool import WorkflowTool
+from .._function_tool import WorkflowTool, normalize_tool
 from .._logger import logger
 from .._slug import delegate_tool_name
 from .._tool_descriptor import ToolDescriptor, ToolInput, tool_name
@@ -30,7 +30,7 @@ SANDBOX_TOOL_NAME = "execute_python"
 class AgentCapabilities:
     """Resolved capability bundle for one agent — passed through to the runner."""
 
-    filtered_user_tools: tuple[ToolInput, ...] | None = None
+    filtered_user_tools: tuple[ToolDescriptor, ...] | None = None
     filtered_workflow_tools: tuple[WorkflowTool, ...] = ()
     filtered_mcp_tools: tuple[MCPServerDescriptor, ...] | None = None
     enabled_skill_paths: tuple[Path, ...] = ()
@@ -58,7 +58,8 @@ class AgentCapabilities:
         catalog = _merge_skill_descriptors(skill_catalog, approved)
         return cls(
             filtered_user_tools=(
-                None if filtered_user_tools is None else tuple(filtered_user_tools)
+                None if filtered_user_tools is None
+                else tuple(map(normalize_tool, filtered_user_tools))
             ),
             filtered_workflow_tools=tuple(filtered_workflow_tools),
             filtered_mcp_tools=(

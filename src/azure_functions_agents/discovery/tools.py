@@ -13,19 +13,20 @@ from .._function_tool import (
     WorkflowTool,
     get_workflow_tool_handler,
     get_workflow_tool_metadata,
+    normalize_tool,
     tool,
 )
 from .._logger import logger
-from .._tool_descriptor import ToolDescriptor, ToolInput, tool_description, tool_name
+from .._tool_descriptor import ToolDescriptor, tool_description, tool_name
 
-type _CachedProjectTools = tuple[tuple[ToolInput, ...], tuple[WorkflowTool, ...]]
+type _CachedProjectTools = tuple[tuple[ToolDescriptor, ...], tuple[WorkflowTool, ...]]
 
 
 @dataclass(frozen=True)
 class ProjectTools:
     """Tool inventories discovered from ``tools/``."""
 
-    user_tools: list[ToolInput]
+    user_tools: list[ToolDescriptor]
     workflow_tools: list[WorkflowTool]
     failed_loads: list[tuple[str, str]]
 
@@ -37,7 +38,7 @@ _DISCOVERED_TOOLS_CACHE: dict[Path, _CachedProjectTools] = {}
 class ToolDiscoveryResult:
     """Result of user tool discovery including successes and failures."""
 
-    tools: list[ToolInput]
+    tools: list[ToolDescriptor]
     failed_loads: list[tuple[str, str]]  # [(filename, error_message), ...]
 
 
@@ -127,7 +128,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
     if cached_tools is not None:
         return _copy_cached(cached_tools)
 
-    tools: list[ToolInput] = []
+    tools: list[ToolDescriptor] = []
     workflow_tools: list[WorkflowTool] = []
     failed_loads: list[tuple[str, str]] = []
     project_src_dir = str(resolved_root)
@@ -172,7 +173,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
                 and not inspect.ismodule(obj)
             ]
 
-            picked: ToolInput | None = None
+            picked: ToolDescriptor | None = None
             for name, obj in members:
                 workflow_candidate = _workflow_tool_from_member(module_name, name, obj)
                 if workflow_candidate is not None:
@@ -191,7 +192,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
                         and isinstance(getattr(obj, "description", None), str)
                         and not _is_workflow_marked(obj)
                     ):
-                        picked = obj
+                        picked = normalize_tool(obj)
                         logger.debug("Loaded authored tool %s", tool_name(obj))
                         break
 

@@ -8,6 +8,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..._function_tool import normalize_tool
 from ..._tool_descriptor import ToolDescriptor, ToolInput, tool_name
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
@@ -92,12 +93,12 @@ def validate_configuration(configuration: AgentConfiguration) -> None:
     )
 
 
-def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolInput, ...]:
-    """Retain authored inputs while preserving runtime-owned approval policy."""
-    prepared = tuple(tools)
+def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
+    """Check normalized tools against Copilot's approval and naming limits."""
+    prepared = tuple(map(normalize_tool, tools))
     names: set[str] = set()
     for function in prepared:
-        if isinstance(function, ToolDescriptor) and function.policy.approval_mode != "never_require":
+        if function.policy.approval_mode != "never_require":
             raise UnsupportedCapabilityError(
                 "Copilot preview supports ordinary runtime @tool declarations only when "
                 'approval_mode="never_require".'

@@ -6,9 +6,9 @@ import inspect
 from collections.abc import Sequence
 from typing import Any
 
-from agent_framework import FunctionTool, ToolTypes
+from agent_framework import FunctionTool
 
-from ..._tool_descriptor import ToolCallable, ToolDescriptor, ToolInput
+from ..._tool_descriptor import ToolCallable, ToolDescriptor
 
 
 def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
@@ -30,18 +30,15 @@ def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
     return synchronous
 
 
-def build_maf_tools(candidates: Sequence[ToolInput]) -> list[ToolTypes | ToolCallable]:
-    """Adapt runtime descriptors and leave authored inputs to MAF."""
-    tools: list[ToolTypes | ToolCallable] = []
-    for candidate in candidates:
-        if isinstance(candidate, ToolDescriptor):
-            tools.append(FunctionTool(
-                name=candidate.name,
-                description=candidate.description,
-                func=_maf_callable(candidate),
-                input_model=candidate.input_model or candidate.parameters(),
-                approval_mode=candidate.policy.approval_mode,
-            ))
-        else:
-            tools.append(candidate)
-    return tools
+def build_maf_tools(candidates: Sequence[ToolDescriptor]) -> list[FunctionTool]:
+    """Adapt normalized runtime declarations into MAF tools."""
+    return [
+        FunctionTool(
+            name=candidate.name,
+            description=candidate.description,
+            func=_maf_callable(candidate),
+            input_model=candidate.input_model or candidate.parameters(),
+            approval_mode=candidate.policy.approval_mode,
+        )
+        for candidate in candidates
+    ]

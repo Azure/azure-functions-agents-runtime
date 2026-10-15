@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
-from ._function_tool import tool
+from ._function_tool import normalize_tool, tool
 from ._logger import logger
 from ._observability import (
     FaultDomain,
@@ -336,7 +336,7 @@ def _request(
         session_id=validated_id or uuid.uuid4().hex,
         new_session=validated_id is None or session_is_new,
         model=model or harness.default_model or "",
-        tools=authored_tools,
+        tools=tuple(normalize_tool(candidate) for candidate in authored_tools),
         mcp_servers=servers,
         skills=approved,
         skill_catalog=_merge_skill_descriptors(discovered, approved),

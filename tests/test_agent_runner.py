@@ -28,6 +28,56 @@ from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copi
 from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_facade_normalizes_all_tool_sources_before_backend_entry(streaming):
+    def lookup(value: int) -> int:
+        return value
+
+    backend = SimpleNamespace(run_agent=AsyncMock(return_value=runner.AgentResult("s", "ok")))
+    seen = {}
+
+    def stream(prompt, **kwargs):
+        seen.update(kwargs)
+
+        async def chunks():
+            yield "ok"
+
+        return chunks()
+
+    backend.run_agent_stream = stream
+    facade = _agent_runner.AgentRunner(backend)
+    kwargs = {"tools": [lookup], "sandbox_tools": [lookup], "web_request_tools": [lookup]}
+    if streaming:
+        assert [chunk async for chunk in facade.run_agent_stream("p", **kwargs)] == ["ok"]
+    else:
+        await facade.run_agent("p", **kwargs)
+        seen = backend.run_agent.call_args.kwargs
+    for key in kwargs:
+        [descriptor] = seen[key]
+        assert isinstance(descriptor, ToolDescriptor)
+        assert descriptor.func is lookup
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["delegate", "workflow_subagent"])
+async def test_facade_normalizes_leaf_tools_before_backend_entry(role):
+    def lookup(value: int) -> int:
+        return value
+
+    capabilities = AgentCapabilities(filtered_user_tools=(lookup,))
+    backend = SimpleNamespace(run_leaf_agent_task=AsyncMock(return_value="ok"))
+    facade = _agent_runner.AgentRunner(backend)
+    assert await facade.run_leaf_agent_task(
+        SimpleNamespace(), capabilities, "p", timeout=1, execution_role=role,
+    ) == "ok"
+    approved = backend.run_leaf_agent_task.call_args.args[1]
+    [descriptor] = approved.filtered_user_tools
+    assert isinstance(descriptor, ToolDescriptor)
+    assert descriptor.func is lookup
+    assert capabilities.filtered_user_tools == (lookup,)
+
+
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 def test_history_availability_is_owned_by_selected_backend(kind, tmp_path):
     selected = _agent_runner.get_agent_runner(AppHarness(kind, tmp_path))

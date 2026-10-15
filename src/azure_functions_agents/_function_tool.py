@@ -13,6 +13,7 @@ import azure_functions_agents as _package
 from ._tool_descriptor import (
     ApprovalMode,
     ToolDescriptor,
+    ToolInput,
     ToolPolicy,
     WorkflowTool,
     WorkflowToolMetadata,
@@ -149,6 +150,15 @@ def tool(
     if func is not None:
         return decorator(func)
     return decorator
+
+
+def normalize_tool(candidate: ToolInput) -> ToolDescriptor:
+    """Normalize an authored callable into the shared runtime contract."""
+    if isinstance(candidate, ToolDescriptor):
+        return candidate
+    if not callable(candidate):
+        raise TypeError(f"Tool '{tool_name(candidate)}' must be callable.")
+    return tool(candidate)
 
 
 @overload

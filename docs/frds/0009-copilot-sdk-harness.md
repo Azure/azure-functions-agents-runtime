@@ -90,9 +90,8 @@ Copilot fails. Standalone runner calls use the same resolution boundary.
 
 ### 4.2 SDK-neutral capability boundary
 
-Discovery and registration emit immutable SDK-free capability descriptors,
-while preserving user-authored native tool objects and callables until the
-selected adapter boundary:
+Discovery and registration emit immutable SDK-free capability descriptors.
+Authored callables use shared runtime normalization before either adapter:
 
 | Descriptor | Required contents | Excluded from the descriptor |
 | --- | --- | --- |
@@ -110,7 +109,7 @@ Direct, streaming, and leaf execution share that binding. Public helper
 signatures, deadline timing, SSE error boundaries, and cleanup guarantees stay
 unchanged.
 
-`HarnessRequest` carries these descriptors, opaque authored tool inputs, and
+`HarnessRequest` carries these descriptors and
 scalar execution settings. It does not carry MAF or Copilot SDK session/client
 types.
 
@@ -132,13 +131,14 @@ Tool authoring remains user-owned:
 - A `tools/*.py` module contributes its first named tool, preferring runtime
   descriptors, then named authored objects with public `name`/`description`,
   then the first local public function.
-- Authored inputs and direct programmatic callables are retained until execution.
+- Authored functions and callable instances become runtime tool descriptors
+  before either harness adapts them. Existing descriptors retain their identity.
 
 Runtime `@tool` has an explicit Python signature with only `name`,
 `description`, `schema`, and `approval_mode`. Unknown convenience-decorator
 keywords raise ordinary Python `TypeError`s rather than being stripped or
-forwarded. The Copilot adapter invokes each definition as a Python callable and
-converts its return value to text.
+forwarded. Both adapters receive the same runtime tool contract. Each adapter
+owns SDK construction and result translation.
 
 The runtime does not recognize or adapt harness-specific callable signatures
 such as `FunctionInvocationContext`. If normal schema generation or SDK
@@ -358,7 +358,7 @@ still govern the feature.
 | 2 | Runtime containment model | public plug-in framework / internal harness boundary | Keep public authoring and runner surfaces stable; move SDK-specific execution, auth timing, and persistence behind internal adapters only. | Human (larohra) | 2026-09-28 |
 | 3 | Capability contract | harness objects in discovery/registration / SDK-neutral descriptors | Use immutable tool, MCP, and skill descriptors through discovery, merge, validation, registration, and `HarnessRequest`; map them only at the selected adapter boundary. | Human (larohra) | 2026-10-01 |
 | 4 | Skill ownership | host metadata/catalog / SDK-owned loading and advertising | Discovery is path-only. The host does not parse `SKILL.md` or maintain a manual catalog; SDKs own metadata validation, advertising, and instruction loading. | Human (larohra) | 2026-10-06 |
-| 5 | Tool authoring surface | raw SDK tools / broad `@tool(**kwargs)` passthrough / runtime-owned portable surface | Support runtime `@tool` plus the existing first-public-function fallback from `tools/`, retain authored native SDK tools and callables, keep only `name`, `description`, `schema`, and `approval_mode` on the convenience decorator, and let unknown keywords raise normal Python `TypeError`. | Human (larohra) | 2026-10-06 |
+| 5 | Tool authoring surface | raw SDK tools / broad `@tool(**kwargs)` passthrough / runtime-owned portable surface | Support runtime `@tool` plus the existing first-public-function fallback from `tools/`, keep only `name`, `description`, `schema`, and `approval_mode` on the convenience decorator, and let unknown keywords raise normal Python `TypeError`. | Human (larohra) | 2026-10-06 |
 | 6 | Harness-specific callable compatibility | hidden callable shims / explicit rejection | Do not accommodate `FunctionInvocationContext` or similar harness-specific signatures. Normal schema generation and SDK validation remain authoritative. | Human (larohra) | 2026-10-06 |
 | 7 | MCP and helper auth boundary | host-managed parity layer / adapter-owned session auth | Preserve existing MCP authoring and filters. Materialize bearer auth at Copilot create/resume between turns, not mid-turn; scoped helper permissions remain ownership-based and default-deny outside approved roots. | Human (larohra) | 2026-10-02 |
 | 8 | Persistence boundary | host session protocol / thin SessionFs adapter | Reuse existing storage settings, use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, and keep contents/continuation/compaction/recovery fully SDK-owned. | Human (larohra) | 2026-10-02 |
@@ -375,6 +375,7 @@ still govern the feature.
 | 19 | Failed-turn session IDs | echo generated ID on any failure / echo only resumable generated IDs | Always return caller-supplied IDs; return generated IDs only when the runtime confirms the session is resumable, consistently across HTTP, chat, and SSE surfaces. | Human (larohra) | 2026-10-07 |
 | 20 | Public shutdown API | keep manager-specific name / use neutral runtime name | Remove `shutdown_client_manager()` and expose `shutdown_runtime()` for acquired harness-owned resources. | Human (larohra) | 2026-10-07 |
 | 21 | Copilot tool execution | SDK-object passthrough / Python callable adaptation | Invoke each tool as a Python callable and convert its return value to text. | Human (larohra) | 2026-10-14 |
+| 22 | Harness-independent tool authoring | per-harness authored-input handling / shared callable normalization | Normalize all authored callables into runtime tool descriptors before harness adaptation, without guarantees to preserve native SDK tool objects. | Human (larohra) | 2026-10-15 |
 
 ## 6. Feature-level acceptance and test plan
 

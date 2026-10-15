@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 from .._logger import logger
-from .._tool_descriptor import ToolInput
+from .._tool_descriptor import ToolDescriptor
 from ..config.env import EnvVar, raw_env_value
 from ..config.paths import get_app_root
 from ..discovery.mcp import MCPServerDescriptor
@@ -87,7 +87,7 @@ class HarnessRequest:
     session_id: str
     new_session: bool
     model: str
-    tools: tuple[ToolInput, ...]
+    tools: tuple[ToolDescriptor, ...]
     max_output_tokens: int | None
     deadline: float
     mcp_servers: tuple[MCPServerDescriptor, ...] = ()

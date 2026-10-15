@@ -188,23 +188,25 @@ def test_build_capabilities_filters_user_tools_by_exclude_name() -> None:
     assert [t.name for t in capabilities.filtered_user_tools] == ["keep"]
 
 
-@pytest.mark.parametrize("kind", ["maf", "copilot", "function"])
+@pytest.mark.parametrize("kind", ["descriptor", "callable", "function"])
 def test_authored_tools_keep_name_filters_and_delegate_collision_checks(kind):
-    from agent_framework import FunctionTool
-    from copilot.tools import Tool, ToolResult
+    from azure_functions_agents._function_tool import normalize_tool
 
     def delegate_leaf(value: str) -> str:
         return value
 
+    class Lookup:
+        name = "delegate_leaf"
+        description = "Delegate lookup."
+
+        def __call__(self, value: str) -> str:
+            return value
+
     authored = (
-        FunctionTool(name="delegate_leaf", func=delegate_leaf)
-        if kind == "maf"
-        else Tool(
-            name="delegate_leaf",
-            description="Native",
-            handler=lambda invocation: ToolResult(text_result_for_llm="ok"),
-        )
-        if kind == "copilot"
+        normalize_tool(delegate_leaf)
+        if kind == "descriptor"
+        else Lookup()
+        if kind == "callable"
         else delegate_leaf
     )
     resolved = _resolved(subagents=[SubagentRef(agent="leaf")])
@@ -214,7 +216,9 @@ def test_authored_tools_keep_name_filters_and_delegate_collision_checks(kind):
         discovered_mcp_tools={},
         discovered_skills={},
     )
-    assert capabilities.filtered_user_tools == (authored,)
+    [descriptor] = capabilities.filtered_user_tools
+    assert descriptor.name == "delegate_leaf"
+    assert descriptor.func is (authored.func if kind == "descriptor" else authored)
     with pytest.raises(ValueError, match="collides"):
         validate_subagent_tool_names(resolved, capabilities)
 

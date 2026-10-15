@@ -8,6 +8,7 @@ def test_maf_instrumentation_is_configured_once_per_bound_harness(
     monkeypatch, tmp_path
 ) -> None:  # type: ignore[no-untyped-def]
     calls: list[bool] = []
+    monkeypatch.setattr(maf_obs, "_configured_harnesses", set())
     monkeypatch.setattr(maf_obs, "_capture_sensitive_data", lambda: True)
     monkeypatch.setattr(
         maf_obs,

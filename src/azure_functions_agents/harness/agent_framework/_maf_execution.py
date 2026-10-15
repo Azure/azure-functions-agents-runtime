@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 from azure_functions_agents import runner as _runner
 
 from ..._agent_identity import agent_id
+from ..._function_tool import normalize_tool
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolInput
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
         ResponseStream,
         RoleLiteral,
         SupportsChatGetResponse,
+        ToolTypes,
         UsageDetails,
     )
     from azure.durable_functions import DurableFunctionsClient
@@ -54,7 +56,7 @@ if TYPE_CHECKING:
 
     from ...workflows.schema import WorkflowPlanPolicy
 type AgentFunctionTool = ToolInput
-type AgentTool = Any
+type AgentTool = ToolTypes
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
 type _FunctionArguments = str | Mapping[str, Any] | None
 type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
@@ -286,7 +288,9 @@ def assemble_agent_inputs(
                 policy=workflow_policy,
             )
         )
-    resolved_tools: list[AgentTool] = list(build_maf_tools(descriptors))
+    resolved_tools: list[AgentTool] = list(
+        build_maf_tools(tuple(map(normalize_tool, descriptors)))
+    )
     servers = (
         tuple(discover_mcp_servers(root).servers.values())
         if mcp_tools is None
@@ -297,7 +301,7 @@ def assemble_agent_inputs(
 
         resolved_tools.extend(build_maf_mcp_tools(servers))
     if delegate_tools:
-        resolved_tools.extend(build_maf_tools(delegate_tools))
+        resolved_tools.extend(build_maf_tools(tuple(map(normalize_tool, delegate_tools))))
     effective = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:
         effective = (effective or "") + system_addendum
@@ -308,7 +312,7 @@ def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
     agent_instructions: str | None,
-    tools: Sequence[ToolInput],
+    tools: Sequence[AgentTool],
     skill_paths: Sequence[Path] | None,
     agent_name: str | None,
     history_provider: HistoryProvider | None,
@@ -317,7 +321,6 @@ def _build_role_agent(
     """Build one conservatively configured MAF harness agent for any role."""
     from agent_framework import SkillsProvider, create_harness_agent
 
-    adapted_tools = build_maf_tools(tools)
     skills_provider = (
         SkillsProvider.from_paths(
             list(skill_paths),
@@ -337,7 +340,7 @@ def _build_role_agent(
             name=maf_agent_name,
             harness_instructions="",
             agent_instructions=agent_instructions,
-            tools=adapted_tools,
+            tools=list(tools),
             history_provider=history_provider,
             skills_provider=skills_provider,
             disable_tool_auto_approval=True,

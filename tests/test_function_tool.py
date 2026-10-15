@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator
 from azure_functions_agents._function_tool import (
     get_workflow_tool_handler,
     get_workflow_tool_metadata,
+    normalize_tool,
     tool,
     workflow_tool,
 )
@@ -112,10 +113,9 @@ async def test_maf_adapter_does_not_add_an_extra_pydantic_validation_pass() -> N
     assert effects == ["ok"]
 
 
-def test_raw_maf_tools_retain_their_sdk_model_and_identity() -> None:
-    raw = _maf_tools.FunctionTool(name="raw", func=lambda value: value)
-    assert _maf_tools.build_maf_tools((raw,)) == [raw]
-    assert prepare_tools((raw,)) == (raw,)
+def test_normalizing_a_runtime_descriptor_preserves_identity() -> None:
+    descriptor = tool(lambda value: value)
+    assert normalize_tool(descriptor) is descriptor
 
 
 @pytest.mark.asyncio
@@ -127,13 +127,14 @@ async def test_runtime_tool_has_matching_schema_invocation_and_text_across_harne
 
     effects: list[tuple[int, str]] = []
 
-    @tool(name="lookup", description="Look up items.")
     def lookup(count: int, label: str = "default") -> dict[str, object]:
+        """Look up items."""
         effects.append((count, label))
         return {"count": count, "label": label}
 
-    [maf_tool] = _maf_tools.build_maf_tools((lookup,))
-    copilot_tool = _tool(lookup, CopilotToolCalls())
+    descriptor = normalize_tool(lookup)
+    [maf_tool] = _maf_tools.build_maf_tools((descriptor,))
+    copilot_tool = _tool(descriptor, CopilotToolCalls())
     assert copilot_tool.name == maf_tool.name == "lookup"
     assert copilot_tool.description == maf_tool.description == "Look up items."
     assert copilot_tool.parameters == maf_tool.parameters()
@@ -166,21 +167,6 @@ async def test_runtime_helper_does_not_silently_strip_unknown_keywords(
     with pytest.raises(TypeError, match=expected):
         tool(lambda value: value, **args)
     assert not caplog.records
-
-
-@pytest.mark.asyncio
-async def test_raw_maf_subclass_preserves_native_invocation_limits() -> None:
-    class CustomTool(_maf_tools.FunctionTool):
-        pass
-
-    from agent_framework.exceptions import ToolException
-
-    raw = CustomTool(name="custom", func=lambda value: value, max_invocations=1)
-    [selected] = _maf_tools.build_maf_tools((raw,))
-    assert selected is raw
-    assert await selected.invoke(arguments={"value": "ok"}, skip_parsing=True) == "ok"
-    with pytest.raises(ToolException, match="maximum invocation"):
-        await selected.invoke(arguments={"value": "again"}, skip_parsing=True)
 
 
 @pytest.mark.asyncio
@@ -284,24 +270,6 @@ async def test_authored_options_materialize_the_live_bound_descriptor(asynchrono
     [fresh] = _maf_tools.build_maf_tools((first_bound,))
     assert fresh is not first
     assert await fresh.invoke(arguments={"value": "fresh"}, skip_parsing=True) == "A:fresh"
-
-
-@pytest.mark.asyncio
-async def test_native_sdk_options_are_not_stripped_or_snapshotted() -> None:
-    native = _maf_tools.FunctionTool(
-        name="native",
-        func=lambda value: value,
-        max_invocations=2,
-        max_invocation_exceptions=1,
-        additional_properties={"authored": True},
-    )
-
-    [selected] = _maf_tools.build_maf_tools((native,))
-    assert selected is native
-    assert prepare_tools((native,)) == (native,)
-    assert selected.max_invocations == 2
-    assert selected.max_invocation_exceptions == 1
-    assert selected.additional_properties == {"authored": True}
 
 
 @pytest.mark.asyncio

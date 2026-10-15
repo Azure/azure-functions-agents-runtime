@@ -683,8 +683,9 @@ runtime `@tool` descriptors first, then named tool objects with public
 functions, unrelated globals, and workflow-only declarations are not exposed as
 fallback tools, and discovery never invokes authored functions. Runtime `@tool`
 accepts only `name`, `description`, `schema`, and `approval_mode`; unexpected
-keyword arguments raise the normal Python `TypeError`. The Copilot adapter
-invokes tools as Python callables and converts their return values to text.
+keyword arguments raise the normal Python `TypeError`. Authored functions and
+callable instances become runtime tool descriptors before either harness adapts
+them. Both use the same tool names, descriptions, and input schemas.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. This does not enable workflow roles

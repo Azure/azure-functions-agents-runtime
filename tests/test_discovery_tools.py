@@ -30,21 +30,27 @@ def _tool_names(tools: list[ToolDescriptor]) -> list[str]:
     return sorted(tool_obj.name for tool_obj in tools)
 
 
-def test_authored_native_tools_are_discovered_in_a_fresh_process():
+def test_authored_callables_are_normalized_in_a_fresh_process():
     root = Path(__file__).parent / "fixtures" / "config_scenarios" / "25_user_authored_tools"
     script = """
 import sys
 from pathlib import Path
 from azure_functions_agents.discovery.tools import discover_project_tools
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 
 assert "agent_framework" not in sys.modules
 assert "copilot" not in sys.modules
 result = discover_project_tools(Path(sys.argv[1]))
 assert result.failed_loads == [], result.failed_loads
 assert sorted(tool.name for tool in result.user_tools) == [
-    "callable_lookup", "maf_lookup", "plain_lookup"
+    "async_lookup", "callable_lookup", "plain_lookup"
 ]
 assert result.workflow_tools == []
+assert all(
+    isinstance(candidate, ToolDescriptor)
+    for candidate in result.user_tools
+)
+assert "agent_framework" not in sys.modules
 assert "copilot" not in sys.modules
 """
     result = subprocess.run(
@@ -182,7 +188,7 @@ def test_discovery_records_neutral_metadata_without_maf_construction(
     assert descriptor.parameters()["properties"]["value"]["type"] == "integer"
 
 
-def test_native_maf_tools_are_retained_in_discovery(tmp_path: Path) -> None:
+def test_incompatible_callable_is_reported_as_a_discovery_failure(tmp_path: Path, caplog) -> None:
     _write_tool_file(
         tmp_path,
         "legacy",
@@ -195,19 +201,23 @@ def test_native_maf_tools_are_retained_in_discovery(tmp_path: Path) -> None:
         lookup = ExtendedTool(name="legacy_lookup", func=lambda value: value)
         """,
     )
-    [native] = discover_project_tools(tmp_path).user_tools
-    assert native.name == "legacy_lookup"
-    assert native.__class__.__name__ == "ExtendedTool"
+    discovered = discover_project_tools(tmp_path)
+    assert discovered.user_tools == []
+    assert len(discovered.failed_loads) == 1
+    filename, error = discovered.failed_loads[0]
+    assert filename == "legacy.py"
+    assert error.startswith("ValueError: no signature found")
+    assert "Failed to load tool from legacy.py" in caplog.text
 
 
-def test_workflow_member_accepts_an_explicitly_marked_native_callable() -> None:
-    from agent_framework import FunctionTool
+def test_workflow_member_accepts_an_explicitly_marked_callable() -> None:
+    class Lookup:
+        def __call__(self, args):
+            return args["value"]
 
-    raw = workflow_tool(name="native_activity")(
-        FunctionTool(name="native", func=lambda args: args["value"])
-    )
-    declared = _workflow_tool_from_member(__name__, "native", raw)
-    assert declared.name == "native_activity"
+    raw = workflow_tool(name="lookup_activity")(Lookup())
+    declared = _workflow_tool_from_member(__name__, "lookup", raw)
+    assert declared.name == "lookup_activity"
     assert declared.handler is raw
     assert declared.handler({"value": "ok"}) == "ok"
 
@@ -251,7 +261,7 @@ def test_discovery_does_not_expose_unrelated_globals_or_imported_functions(tmp_p
 
 
 @pytest.mark.parametrize("copilot", [False, True])
-def test_runtime_and_native_authoring_scenario(copilot, monkeypatch) -> None:
+def test_runtime_and_callable_authoring_scenario(copilot, monkeypatch) -> None:
     from azure_functions_agents.app import create_function_app
     from azure_functions_agents.config.loader import load_agent_specs, load_global_config
     from azure_functions_agents.config.merge import compose
@@ -268,8 +278,8 @@ def test_runtime_and_native_authoring_scenario(copilot, monkeypatch) -> None:
     assert discovered.failed_loads == []
     assert sorted(tool.name for tool in discovered.user_tools) == [
         "authored",
+        "callable_constructed",
         "first_local",
-        "raw_constructed",
     ]
     assert sorted(item.name for item in discovered.workflow_tools) == ["authored", "workflow_only"]
     resolved = compose(
@@ -287,8 +297,8 @@ def test_runtime_and_native_authoring_scenario(copilot, monkeypatch) -> None:
     )
     assert sorted(tool.name for tool in capabilities.filtered_user_tools) == [
         "authored",
+        "callable_constructed",
         "first_local",
-        "raw_constructed",
     ]
     assert create_function_app(root).get_functions()
 

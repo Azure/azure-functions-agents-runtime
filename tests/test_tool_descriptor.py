@@ -16,23 +16,26 @@ from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 
 
-def test_programmatic_authored_tools_are_retained_without_inspection():
-    from agent_framework import FunctionTool
-
+def test_programmatic_authored_tools_are_normalized_without_invocation():
     from azure_functions_agents.registration.capabilities import AgentCapabilities
 
-    class Opaque:
-        def __getattribute__(self, name):
-            raise AssertionError("Registration must not inspect SDK state")
+    class Lookup:
+        name = "lookup"
+        description = "Look up a value."
+
+        def __call__(self, value: str) -> str:
+            raise AssertionError("Registration must not execute authored code")
 
     def authored(value: str) -> str:
         raise AssertionError("Registration must not execute authored code")
 
-    native = FunctionTool(name="native", func=authored)
-    candidates = (native, authored, Opaque())
+    lookup = Lookup()
+    candidates = (authored, lookup)
     capabilities = AgentCapabilities.create(filtered_user_tools=candidates)
 
-    assert capabilities.filtered_user_tools == candidates
+    assert all(isinstance(candidate, ToolDescriptor) for candidate in capabilities.filtered_user_tools)
+    assert tuple(candidate.func for candidate in capabilities.filtered_user_tools) == candidates
+    assert capabilities.filtered_user_tools[1].description == lookup.description
 
 
 class _Choice(Enum):

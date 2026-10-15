@@ -255,9 +255,9 @@ class _RecordingChatClient(ChatMiddlewareLayer, BaseChatClient):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("authored_kind", ["native", "function", "callable"])
+@pytest.mark.parametrize("authored_kind", ["descriptor", "function", "callable"])
 async def test_real_maf_loop_executes_user_owned_tools(authored_kind, monkeypatch, tmp_path):
-    from agent_framework import FunctionTool
+    from azure_functions_agents._function_tool import tool
 
     effects = []
 
@@ -273,8 +273,8 @@ async def test_real_maf_loop_executes_user_owned_tools(authored_kind, monkeypatc
             return lookup(value)
 
     authored = (
-        FunctionTool(name="lookup", description="Native lookup", func=lookup)
-        if authored_kind == "native"
+        tool(lookup)
+        if authored_kind == "descriptor"
         else lookup if authored_kind == "function"
         else Lookup()
     )
