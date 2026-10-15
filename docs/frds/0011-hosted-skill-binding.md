@@ -289,6 +289,11 @@ the sandbox module continues to own those shared resources while each method cal
 owns only its bound tool closure and stream lifecycle. The outer HostedSkill span
 owns the one-shot `display_name` and
 `execution_surface="hosted_skill_binding"` telemetry.
+The shared runtime logger also emits content-free `INFO` records when a binding is
+successfully defined and when `run()` or consumed `stream()` execution begins.
+Both records carry `execution_surface=hosted_skill_binding`; execution records
+also carry `mode=run|stream` so backend log aggregation can distinguish definition
+from usage without requiring span export.
 
 If `response_example` or `response_schema` is configured, HostedSkill prepends
 the same response-format instructions used by HTTP handlers and validates the

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
@@ -169,6 +170,7 @@ async def test_run_forwards_catalog_values_with_one_session_identity(
 async def test_run_records_hosted_skill_span_and_result_attributes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     skill, _ = _make_skill(tmp_path)
     spans = _install_start_span_capture(monkeypatch)
@@ -182,9 +184,14 @@ async def test_run_records_hosted_skill_span_and_result_attributes(
 
     monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
 
-    await skill.run("Prepare order", session_id="session-one")
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        await skill.run("Prepare order", session_id="session-one")
 
     [span] = spans
+    assert (
+        "HostedSkill binding executed: execution_surface=hosted_skill_binding "
+        "agent_name=internal mode=run"
+    ) in caplog.messages
     assert span.attributes["af.agent.name"] == "internal"
     assert span.attributes["af.agent.execution_surface"] == "hosted_skill_binding"
     assert span.attributes["af.agent.session_id"] == "session-one"
@@ -497,6 +504,7 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     tmp_path: Path,
     session_id: str | None,
     harness_kind: HarnessKind,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     skill, capabilities = _make_skill(tmp_path, harness_kind=harness_kind)
     captured: dict[str, Any] = {}
@@ -522,9 +530,14 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     monkeypatch.setattr(hosted_skill_module, "build_sandbox_tools_for_session", build_sandbox)
     monkeypatch.setattr(hosted_skill_module, "run_agent_events", events)
 
-    output = [event async for event in skill.stream("Prepare order", session_id=session_id)]
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        output = [event async for event in skill.stream("Prepare order", session_id=session_id)]
 
     assert captured["sandbox"] == captured["runner"] == output[0].session_id
+    assert (
+        "HostedSkill binding executed: execution_surface=hosted_skill_binding "
+        "agent_name=internal mode=stream"
+    ) in caplog.messages
     assert captured["execution_surface"] == "hosted_skill_binding"
     assert captured["session_is_new"] is (session_id is None)
     assert captured["display_name"] == "Internal"

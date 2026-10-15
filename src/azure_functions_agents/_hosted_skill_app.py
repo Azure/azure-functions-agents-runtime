@@ -11,6 +11,8 @@ from typing import Any, TypeVar, cast, get_type_hints
 import azure.durable_functions as df
 import azure.functions as func
 
+from ._agent_run_diagnostics import AgentExecutionSurface
+from ._logger import logger
 from .harness._harness_binding import AppHarness, UnsupportedCapabilityError
 from .hosted_skill_binding import HostedSkill
 from .registration.catalog import AgentCatalog, CatalogEntry
@@ -140,6 +142,14 @@ class _HostedSkillAppMixin:
 
             source_signature = inspect.signature(handler)
             visible_signature = _worker_signature(handler, arg_name)
+            logger.info(
+                "HostedSkill binding defined: execution_surface=%s "
+                "agent_name=%s handler=%s arg_name=%s",
+                AgentExecutionSurface.HOSTED_SKILL_BINDING,
+                entry.resolved.slug,
+                handler.__name__,
+                arg_name,
+            )
 
             @functools.wraps(handler)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:

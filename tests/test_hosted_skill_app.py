@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, get_type_hints
@@ -84,15 +85,22 @@ def _app(
 async def test_decorator_hides_parameter_and_injects_fresh_facades(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     app, validated_models = _app(monkeypatch, tmp_path)
 
-    @app.route(route="orders")
-    @app.hosted_skill(arg_name="skill", agent_name="internal")
-    async def handler(req: func.HttpRequest, skill: HostedSkill) -> HostedSkill:
-        return skill
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+
+        @app.route(route="orders")
+        @app.hosted_skill(arg_name="skill", agent_name="internal")
+        async def handler(req: func.HttpRequest, skill: HostedSkill) -> HostedSkill:
+            return skill
 
     assert validated_models == ["model-one"]
+    assert (
+        "HostedSkill binding defined: execution_surface=hosted_skill_binding "
+        "agent_name=internal handler=handler arg_name=skill"
+    ) in caplog.messages
     functions = app.get_functions()
     assert [function.get_function_name() for function in functions] == ["handler"]
     registered_handler = functions[0].get_user_function()

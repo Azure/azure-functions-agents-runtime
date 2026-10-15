@@ -12,6 +12,7 @@ from ._agent_run_diagnostics import (
     start_agent_run_span,
 )
 from ._agent_validation import validate_prompt, validate_session_id
+from ._logger import logger
 from ._observability import FaultDomain, current_span
 from .harness._harness_binding import AppHarness
 from .registration.catalog import CatalogEntry
@@ -53,6 +54,11 @@ class HostedSkill:
         effective_prompt = self._effective_prompt(validate_prompt(prompt))
         resolved_session_id, is_new_session = _resolve_session_id(session_id)
         response_error: HostedSkillResponseError | None = None
+        logger.info(
+            "HostedSkill binding executed: execution_surface=%s agent_name=%s mode=run",
+            AgentExecutionSurface.HOSTED_SKILL_BINDING,
+            resolved.slug,
+        )
         with start_agent_run_span(
             resolved.slug,
             display_name=resolved.name,
@@ -110,6 +116,11 @@ class HostedSkill:
         capabilities = self._entry.capabilities
         effective_prompt = self._effective_prompt(validate_prompt(prompt))
         resolved_session_id, is_new_session = _resolve_session_id(session_id)
+        logger.info(
+            "HostedSkill binding executed: execution_surface=%s agent_name=%s mode=stream",
+            AgentExecutionSurface.HOSTED_SKILL_BINDING,
+            resolved.slug,
+        )
         events = run_agent_events(
             effective_prompt,
             instructions=resolved.instructions,
