@@ -5,15 +5,32 @@ from dataclasses import FrozenInstanceError
 from datetime import date
 from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, get_args
 from uuid import UUID
 
 import pytest
 from pydantic import BaseModel, Field, create_model
 
 from azure_functions_agents._function_tool import tool
-from azure_functions_agents._tool_descriptor import ToolDescriptor
+from azure_functions_agents._tool_descriptor import (
+    ALWAYS_REQUIRE,
+    NEVER_REQUIRE,
+    ApprovalMode,
+    ToolDescriptor,
+    ToolPolicy,
+)
 from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
+
+
+def test_approval_constants_preserve_the_literal_string_contract():
+    assert {ALWAYS_REQUIRE, NEVER_REQUIRE} == set(get_args(ApprovalMode.__value__))
+    assert ALWAYS_REQUIRE == "always_require"
+    assert NEVER_REQUIRE == "never_require"
+    assert ToolPolicy().approval_mode == NEVER_REQUIRE
+    for mode in (ALWAYS_REQUIRE, NEVER_REQUIRE):
+        descriptor = tool(lambda: "ok", approval_mode=mode)
+        assert descriptor.policy.approval_mode == mode
+        assert build_maf_tools([descriptor])[0].approval_mode == mode
 
 
 def test_programmatic_authored_tools_are_normalized_without_invocation():

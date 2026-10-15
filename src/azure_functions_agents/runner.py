@@ -23,7 +23,7 @@ from ._observability import (
 )
 from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
-from ._tool_descriptor import ToolDescriptor, ToolInput
+from ._tool_descriptor import NEVER_REQUIRE, ToolDescriptor, ToolInput
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
@@ -220,7 +220,7 @@ def _build_delegate_tool(
         name=delegate_tool_name(slug),
         description=ref.when or resolved.description,
         schema=_DelegateTaskParams,
-        approval_mode="never_require",
+        approval_mode=NEVER_REQUIRE,
     )
     async def delegate(params: _DelegateTaskParams) -> str:
         task = params.task

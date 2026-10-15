@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import azure_functions_agents as _package
 
 from ._tool_descriptor import (
+    NEVER_REQUIRE,
     ApprovalMode,
     ToolDescriptor,
     ToolInput,
@@ -141,7 +142,7 @@ def tool(
             func=wrapped,
             input_model=input_model,
             policy=ToolPolicy(
-                approval_mode=approval_mode or "never_require",
+                approval_mode=approval_mode or NEVER_REQUIRE,
             ),
             workflow_metadata=get_workflow_tool_metadata(inner),
         )

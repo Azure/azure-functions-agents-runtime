@@ -8,13 +8,15 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MethodType
-from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Final, Literal, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 import azure_functions_agents as _package
 
 type ApprovalMode = Literal["always_require", "never_require"]
+ALWAYS_REQUIRE: Final[ApprovalMode] = "always_require"
+NEVER_REQUIRE: Final[ApprovalMode] = "never_require"
 type ToolCallable = Callable[..., Any]
 type ToolInput = object
 
@@ -95,7 +97,7 @@ class WorkflowTool:
 class ToolPolicy:
     """Harness-neutral authoring policy."""
 
-    approval_mode: ApprovalMode = "never_require"
+    approval_mode: ApprovalMode = NEVER_REQUIRE
 
 
 def _parameter_annotation(annotation: Any) -> Any:

@@ -73,6 +73,10 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   runtime identity or member access. Use frozensets or mappings when membership
   or value lookup is the runtime operation. Consumers reuse these symbols rather
   than redeclaring raw strings.
+- For literal-typed domains that retain a public string API, define typed named
+  constants alongside the `Literal` alias and reuse them in runtime defaults,
+  comparisons, and SDK calls. Tool approval modes use `ALWAYS_REQUIRE` and
+  `NEVER_REQUIRE` from `_tool_descriptor.py`; do not repeat their string values.
 
 ## Documentation and logging
 
