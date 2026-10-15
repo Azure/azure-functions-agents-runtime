@@ -169,6 +169,21 @@ async def test_runtime_decorators_accept_authored_callable_objects() -> None:
     assert await descriptor.invoke(arguments={"value": "item"}) == "found:item"
 
 
+@pytest.mark.parametrize("description", [None, "Explicit description"])
+def test_callable_description_uses_public_metadata_before_docstring(description):
+    class Lookup:
+        """Docstring fallback."""
+
+        name = "lookup"
+        description = "Authored description"
+
+        def __call__(self, value: str) -> str:
+            return value
+
+    descriptor = tool(Lookup(), description=description)
+    assert descriptor.description == (description or "Authored description")
+
+
 def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> None:
     descriptor = tool(lambda value: value, name="approval", approval_mode="always_require")
     [wrapped] = _maf_tools.build_maf_tools((descriptor,))

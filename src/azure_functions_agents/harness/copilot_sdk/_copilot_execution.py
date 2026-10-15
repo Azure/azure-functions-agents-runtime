@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager, nullcontext
@@ -178,62 +177,37 @@ def _tool(
 ) -> Tool:
     from copilot.tools import Tool, ToolResult
 
-    if isinstance(function, Tool):
-        native = function
-    else:
-        descriptor = (
-            function if isinstance(function, ToolDescriptor) else tool(cast(ToolCallable, function))
-        )
-
-        async def invoke_descriptor(invocation: ToolInvocation) -> ToolResult:
-            result = await descriptor.invoke(
-                arguments=invocation.arguments,
-                tool_call_id=invocation.tool_call_id,
-            )
-            return (
-                result
-                if isinstance(result, ToolResult)
-                else ToolResult(text_result_for_llm=tool_result_text(result), result_type="success")
-            )
-
-        native = Tool(
-            name=descriptor.name,
-            description=descriptor.description,
-            parameters=descriptor.parameters(),
-            handler=invoke_descriptor,
-            skip_permission=True,
-            defer="never",
-        )
-
-    handler = native.handler
-    if handler is None:
-        return native
+    descriptor = (
+        function if isinstance(function, ToolDescriptor) else tool(cast(ToolCallable, function))
+    )
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
         calls.start_custom(invocation)
         start_event = calls.start_event(invocation.tool_call_id)
         _emit_event(event_sink, start_event)
         try:
-            result = handler(invocation)
-            if inspect.isawaitable(result):
-                result = await result
+            result = await descriptor.invoke(
+                arguments=invocation.arguments,
+                tool_call_id=invocation.tool_call_id,
+            )
+            text = tool_result_text(result)
         except Exception:
-            logger.warning("Copilot custom tool failed: tool=%s", native.name)
+            logger.warning("Copilot custom tool failed: tool=%s", descriptor.name)
             calls.complete_custom(invocation.tool_call_id, _SAFE_CUSTOM_TOOL_FAILURE, success=False)
             _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
             return ToolResult(text_result_for_llm=_SAFE_CUSTOM_TOOL_FAILURE, result_type="failure")
-        success = result.result_type == "success"
-        calls.complete_custom(
-            invocation.tool_call_id,
-            result.text_result_for_llm,
-            success=success,
-        )
+        calls.complete_custom(invocation.tool_call_id, text, success=True)
         _emit_event(event_sink, calls.end_event(invocation.tool_call_id))
-        return result
+        return ToolResult(text_result_for_llm=text, result_type="success")
 
-    from dataclasses import replace
-
-    return replace(native, handler=invoke)
+    return Tool(
+        name=descriptor.name,
+        description=descriptor.description,
+        parameters=descriptor.parameters(),
+        handler=invoke,
+        skip_permission=True,
+        defer="never",
+    )
 
 
 def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:

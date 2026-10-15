@@ -737,9 +737,8 @@ The lightweight checks and callable receive the same Python-mode normalized
 arguments, preserving MAF's acceptance/rejection of coerced values.
 Ordinary tool results preserve recursive list/dict conversion, Pydantic
 `model_dump()`, custom `to_dict()`, and string `.text` values through the shared
-result helper. MAF's SDK owns its rich result wrapping; Copilot preserves native
-SDK `ToolResult` values and maps ordinary Python results to SDK text results at
-the adapter boundary.
+result helper. MAF's SDK owns its result wrapping. The Copilot adapter invokes
+each tool as a Python callable and converts its return value to text.
 
 The runtime convenience `@tool` has an explicit signature (`name`,
 `description`, `schema`, and `approval_mode`). Use authored SDK

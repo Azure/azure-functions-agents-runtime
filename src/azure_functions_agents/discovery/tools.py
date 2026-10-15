@@ -16,7 +16,7 @@ from .._function_tool import (
     tool,
 )
 from .._logger import logger
-from .._tool_descriptor import ToolDescriptor, ToolInput, tool_name
+from .._tool_descriptor import ToolDescriptor, ToolInput, tool_description, tool_name
 
 type _CachedProjectTools = tuple[tuple[ToolInput, ...], tuple[WorkflowTool, ...]]
 
@@ -98,7 +98,7 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
         metadata = get_workflow_tool_metadata(obj)
         handler = obj
         default_tool_name = tool_name(obj) or name
-        default_description = (obj.__doc__ or "").strip()
+        default_description = tool_description(obj)
     else:
         return None
 

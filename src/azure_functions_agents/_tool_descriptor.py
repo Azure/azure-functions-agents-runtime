@@ -110,8 +110,9 @@ def _parameter_annotation(annotation: Any) -> Any:
 
 
 def _function_hints(func: ToolCallable) -> dict[str, Any]:
+    target = func if inspect.isroutine(func) or inspect.isclass(func) else type(func).__call__
     try:
-        return get_type_hints(func, include_extras=True)
+        return get_type_hints(target, include_extras=True)
     except (NameError, TypeError):
         return {
             parameter.name: parameter.annotation
@@ -218,6 +219,13 @@ def tool_name(candidate: ToolInput) -> str:
     if name is None and callable(candidate):
         name = type(candidate).__name__
     return str(name or "")
+
+
+def tool_description(candidate: ToolInput) -> str:
+    description = getattr(candidate, "description", None)
+    return (
+        description if isinstance(description, str) and description else candidate.__doc__ or ""
+    ).strip()
 
 
 def describe_tools(candidates: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:

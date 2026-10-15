@@ -132,13 +132,13 @@ Tool authoring remains user-owned:
 - A `tools/*.py` module contributes its first named tool, preferring runtime
   descriptors, then named authored objects with public `name`/`description`,
   then the first local public function.
-- Native SDK tools and direct programmatic callables are retained.
+- Authored inputs and direct programmatic callables are retained until execution.
 
 Runtime `@tool` has an explicit Python signature with only `name`,
 `description`, `schema`, and `approval_mode`. Unknown convenience-decorator
 keywords raise ordinary Python `TypeError`s rather than being stripped or
-forwarded. Native SDK options such as `max_invocations` remain owned by the
-authored SDK object or decorator.
+forwarded. The Copilot adapter invokes each definition as a Python callable and
+converts its return value to text.
 
 The runtime does not recognize or adapt harness-specific callable signatures
 such as `FunctionInvocationContext`. If normal schema generation or SDK
@@ -374,6 +374,7 @@ still govern the feature.
 | 18 | Legacy compaction field | honor field / warn and ignore | Remove the MAF-specific field from the public contract, warn when legacy global or per-agent config contains it, and use MAF's native model-aware default. | Human (larohra) | 2026-10-07 |
 | 19 | Failed-turn session IDs | echo generated ID on any failure / echo only resumable generated IDs | Always return caller-supplied IDs; return generated IDs only when the runtime confirms the session is resumable, consistently across HTTP, chat, and SSE surfaces. | Human (larohra) | 2026-10-07 |
 | 20 | Public shutdown API | keep manager-specific name / use neutral runtime name | Remove `shutdown_client_manager()` and expose `shutdown_runtime()` for acquired harness-owned resources. | Human (larohra) | 2026-10-07 |
+| 21 | Copilot tool execution | SDK-object passthrough / Python callable adaptation | Invoke each tool as a Python callable and convert its return value to text. | Human (larohra) | 2026-10-14 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -381,7 +382,7 @@ still govern the feature.
 | --- | --- |
 | Harness selection | Resolve once per app, propagate to handlers/delegates/workflows, and reject invalid selector values without fallback. |
 | Neutral capability boundary | Prove discovery/registration outputs and `HarnessRequest` contain only immutable SDK-free descriptors; enforce import boundaries so MAF imports stay in MAF adapters and Copilot imports stay in Copilot adapters. |
-| Tool authoring | Cover runtime `@tool`, first-public-function fallback, authored native SDK tools/callables, native result handling, ordinary `TypeError` on unknown convenience-decorator kwargs, and explicit failure for unsupported callable signatures. |
+| Tool authoring | Cover runtime `@tool`, first-public-function fallback, authored callables, ordinary result conversion, ordinary `TypeError` on unknown convenience-decorator kwargs, and explicit failure for unsupported callable signatures. |
 | Skills | Cover depth-2 path discovery, basename exclusions, path-only discovery, ownership for overlapping roots, and the absence of host `SKILL.md` parsing or manual catalog generation. |
 | MCP/auth/helpers | Cover existing per-agent/per-server filters, blank-scope normalization, generated bearer precedence, native MCP/helper event accounting, and scoped helper permission denials. |
 | Persistence | Exercise SessionFs read/write/append/stat/list/mkdir/remove/rename behavior on local and Blob backends, selected-harness-only initialization, and shared `agent_id` path routing. |

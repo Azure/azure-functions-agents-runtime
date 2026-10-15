@@ -42,9 +42,10 @@ assert "copilot" not in sys.modules
 result = discover_project_tools(Path(sys.argv[1]))
 assert result.failed_loads == [], result.failed_loads
 assert sorted(tool.name for tool in result.user_tools) == [
-    "callable_lookup", "copilot_lookup", "maf_lookup"
+    "callable_lookup", "maf_lookup", "plain_lookup"
 ]
 assert result.workflow_tools == []
+assert "copilot" not in sys.modules
 """
     result = subprocess.run(
         [sys.executable, "-c", script, str(root)], capture_output=True, text=True, timeout=30
@@ -209,6 +210,22 @@ def test_workflow_member_accepts_an_explicitly_marked_native_callable() -> None:
     assert declared.name == "native_activity"
     assert declared.handler is raw
     assert declared.handler({"value": "ok"}) == "ok"
+
+
+@pytest.mark.parametrize("description", [None, "Explicit activity description"])
+def test_workflow_callable_description_preserves_public_metadata(description):
+    class Lookup:
+        """Docstring fallback."""
+
+        name = "lookup"
+        description = "Authored description"
+
+        def __call__(self, args: dict[str, object]) -> object:
+            return args
+
+    authored = workflow_tool(description=description)(Lookup())
+    declared = _workflow_tool_from_member(__name__, "lookup", authored)
+    assert declared.description == (description or "Authored description")
 
 
 def test_discovery_does_not_expose_unrelated_globals_or_imported_functions(tmp_path: Path) -> None:

@@ -41,6 +41,19 @@ class _Choice(Enum):
 
 
 @pytest.mark.asyncio
+async def test_callable_instance_resolves_postponed_module_annotations():
+    class Lookup:
+        name = "lookup"
+
+        def __call__(self, choice: _Choice) -> str:
+            return choice.value
+
+    descriptor = tool(Lookup())
+    assert descriptor.parameters()["$defs"]["_Choice"]["enum"] == ["first", "second"]
+    assert await descriptor.invoke(arguments={"choice": "first"}) == "first"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("annotation", "value", "accepted"),
     [

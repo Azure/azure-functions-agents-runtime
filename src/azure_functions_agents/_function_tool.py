@@ -16,6 +16,7 @@ from ._tool_descriptor import (
     ToolPolicy,
     WorkflowTool,
     WorkflowToolMetadata,
+    tool_description,
     tool_name,
 )
 
@@ -135,7 +136,7 @@ def tool(
             input_model = schema
         descriptor = ToolDescriptor.create(
             name=name or tool_name(inner),
-            description=(description or inner.__doc__ or "").strip(),
+            description=(description or tool_description(inner)).strip(),
             func=wrapped,
             input_model=input_model,
             policy=ToolPolicy(

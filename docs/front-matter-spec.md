@@ -676,15 +676,15 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools use the runtime's `@tool`, a native SDK tool, or local
-public functions in `tools/*.py`. Discovery selects one tool per module:
+Normal custom tools use the runtime's `@tool` or Python callables in
+`tools/*.py`. Discovery selects one tool per module:
 runtime `@tool` descriptors first, then named tool objects with public
 `name`/`description`, then the first local public function. Classes, imported
 functions, unrelated globals, and workflow-only declarations are not exposed as
 fallback tools, and discovery never invokes authored functions. Runtime `@tool`
 accepts only `name`, `description`, `schema`, and `approval_mode`; unexpected
-keyword arguments raise the normal Python `TypeError`. Use authored SDK objects
-directly for native options such as `max_invocations`.
+keyword arguments raise the normal Python `TypeError`. The Copilot adapter
+invokes tools as Python callables and converts their return values to text.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. This does not enable workflow roles
