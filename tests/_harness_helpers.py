@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from azure_functions_agents.harness._agent_runner import get_agent_runner
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
@@ -11,14 +11,13 @@ from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     OpenAIProvider,
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_runner import CopilotRunner
-from azure_functions_agents.harness.copilot_sdk._copilot_runtime import (
-    ReasoningEffortSetting,
-    ReasoningSummarySetting,
-)
 from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     StorageRoute,
     resolve_route,
 )
+
+if TYPE_CHECKING:
+    from copilot.session import ReasoningEffort, ReasoningSummary
 
 
 def make_copilot_harness(
@@ -27,8 +26,8 @@ def make_copilot_harness(
     storage_root: Path | None = None,
     default_model: str = "gpt-4.1-mini",
     provider: CopilotProvider | None = None,
-    reasoning_effort: ReasoningEffortSetting | None = None,
-    reasoning_summary: ReasoningSummarySetting | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    reasoning_summary: ReasoningSummary | None = None,
     session_storage: StorageRoute | None = None,
 ) -> AppHarness:
     return AppHarness(

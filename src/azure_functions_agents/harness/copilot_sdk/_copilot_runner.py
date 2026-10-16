@@ -51,15 +51,12 @@ from . import _copilot_capabilities
 
 if TYPE_CHECKING:
     from azure.durable_functions import DurableFunctionsClient
+    from copilot.session import ReasoningEffort, ReasoningSummary
 
     from ...runner import AgentResult
     from ...workflows.schema import WorkflowPlanPolicy
     from ._copilot_providers import CopilotProvider
-    from ._copilot_runtime import (
-        CopilotRuntime,
-        ReasoningEffortSetting,
-        ReasoningSummarySetting,
-    )
+    from ._copilot_runtime import CopilotRuntime
     from ._copilot_session_identity import StorageRoute
 
 
@@ -116,8 +113,8 @@ class CopilotRunner:
         storage_root: Path,
         default_model: str,
         provider: CopilotProvider,
-        reasoning_effort: ReasoningEffortSetting | None,
-        reasoning_summary: ReasoningSummarySetting | None,
+        reasoning_effort: ReasoningEffort | None,
+        reasoning_summary: ReasoningSummary | None,
         session_storage: StorageRoute,
     ) -> None:
         self._harness = harness

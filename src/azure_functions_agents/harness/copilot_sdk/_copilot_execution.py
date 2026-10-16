@@ -46,6 +46,8 @@ if TYPE_CHECKING:
         PermissionRequestResult,
         ProviderConfig,
         ProviderTokenArgs,
+        ReasoningEffort,
+        ReasoningSummary,
         SystemMessageConfig,
         ToolSearchConfig,
     )
@@ -55,10 +57,6 @@ if TYPE_CHECKING:
 
     from ...runner import AgentResult
     from ._copilot_providers import ProviderTokenSource
-    from ._copilot_runtime import (
-        ReasoningEffortSetting,
-        ReasoningSummarySetting,
-    )
     from ._copilot_session_fs import CopilotSessionFs
 
 
@@ -321,8 +319,8 @@ async def _open_session(
     *,
     new_session: bool,
     options: _SessionOptions,
-    reasoning_effort: ReasoningEffortSetting | None,
-    reasoning_summary: ReasoningSummarySetting | None,
+    reasoning_effort: ReasoningEffort | None,
+    reasoning_summary: ReasoningSummary | None,
     on_permission_request: Callable[
         [PermissionRequest, PermissionInvocation], PermissionRequestResult
     ],

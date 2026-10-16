@@ -34,6 +34,12 @@ class ProviderTokenSource(Protocol):
         """Return a request-scoped bearer-token callback."""
 
 
+def _provider_output_limit(max_output_tokens: int | None) -> ProviderConfig:
+    if max_output_tokens is None:
+        return {}
+    return {"max_output_tokens": max_output_tokens}
+
+
 def _validated_https_endpoint(
     env_name: EnvVar,
     *,
@@ -167,17 +173,15 @@ class OpenAIProvider(CopilotProvider):
         async def token(_args: ProviderTokenArgs) -> str:
             return self.api_key
 
-        provider = ProviderConfig(
+        return ProviderConfig(
             type=_PROVIDER_WIRE_OPENAI,
             wire_api=_WIRE_API_RESPONSES,
             base_url=_OPENAI_BASE_URL,
             model_id=model,
             wire_model=model,
             bearer_token_provider=token,
+            **_provider_output_limit(max_output_tokens),
         )
-        if max_output_tokens is not None:
-            provider["max_output_tokens"] = max_output_tokens
-        return provider
 
 
 @dataclass(frozen=True)
@@ -217,26 +221,25 @@ class AzureOpenAIProvider(CopilotProvider):
     ) -> ProviderConfig:
         from copilot.session import ProviderConfig
 
-        provider = ProviderConfig(
+        optional: ProviderConfig = _provider_output_limit(max_output_tokens)
+        if self.api_version is not None:
+            optional["azure"] = {"api_version": self.api_version}
+        if self.api_key:
+            optional["api_key"] = self.api_key
+        else:
+            optional["bearer_token_provider"] = tokens.bearer_token_provider(
+                _AZURE_OPENAI_SCOPE,
+                "Copilot Azure OpenAI could not acquire an Entra token. "
+                "Check the approved Azure credential configuration and deployment access.",
+            )
+        return ProviderConfig(
             type=_PROVIDER_WIRE_AZURE,
             wire_api=_WIRE_API_RESPONSES,
             base_url=self.endpoint,
             model_id=model,
             wire_model=model,
+            **optional,
         )
-        if self.api_version is not None:
-            provider["azure"] = {"api_version": self.api_version}
-        if self.api_key:
-            provider["api_key"] = self.api_key
-        else:
-            provider["bearer_token_provider"] = tokens.bearer_token_provider(
-                _AZURE_OPENAI_SCOPE,
-                "Copilot Azure OpenAI could not acquire an Entra token. "
-                "Check the approved Azure credential configuration and deployment access.",
-            )
-        if max_output_tokens is not None:
-            provider["max_output_tokens"] = max_output_tokens
-        return provider
 
 
 @dataclass(frozen=True)
@@ -268,7 +271,7 @@ class FoundryProvider(CopilotProvider):
     ) -> ProviderConfig:
         from copilot.session import ProviderConfig
 
-        provider = ProviderConfig(
+        return ProviderConfig(
             type=_PROVIDER_WIRE_OPENAI,
             wire_api=_WIRE_API_RESPONSES,
             base_url=f"{self.endpoint}{_FOUNDRY_OPENAI_V1_SUFFIX}",
@@ -279,10 +282,8 @@ class FoundryProvider(CopilotProvider):
                 "Copilot Foundry preview could not acquire an Entra token. "
                 "Check the approved Azure credential configuration and project access.",
             ),
+            **_provider_output_limit(max_output_tokens),
         )
-        if max_output_tokens is not None:
-            provider["max_output_tokens"] = max_output_tokens
-        return provider
 
 
 _PROVIDERS: dict[ProviderKind, type[CopilotProvider]] = {

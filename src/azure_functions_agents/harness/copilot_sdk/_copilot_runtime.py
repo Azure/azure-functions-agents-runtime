@@ -31,9 +31,6 @@ else:
     type ReasoningEffort = str
     type ReasoningSummary = str
 
-type ReasoningEffortSetting = ReasoningEffort
-type ReasoningSummarySetting = ReasoningSummary
-
 SDK_DISTRIBUTION = "github-copilot-sdk"
 PROVIDER_ENV = EnvVar.PROVIDER
 
@@ -97,9 +94,9 @@ def _validate_reasoning_setting(
     return value
 
 
-def _reasoning_effort_from_environment() -> ReasoningEffortSetting | None:
+def _reasoning_effort_from_environment() -> ReasoningEffort | None:
     return cast(
-        ReasoningEffortSetting | None,
+        ReasoningEffort | None,
         _validate_reasoning_setting(
             EnvVar.REASONING_EFFORT,
             allowed=_reasoning_effort_values,
@@ -107,9 +104,9 @@ def _reasoning_effort_from_environment() -> ReasoningEffortSetting | None:
     )
 
 
-def _reasoning_summary_from_environment() -> ReasoningSummarySetting | None:
+def _reasoning_summary_from_environment() -> ReasoningSummary | None:
     return cast(
-        ReasoningSummarySetting | None,
+        ReasoningSummary | None,
         _validate_reasoning_setting(
             EnvVar.REASONING_SUMMARY,
             allowed=_reasoning_summary_values,
