@@ -1587,8 +1587,8 @@
 				"</workflow-notification>"
 			));
 			const reminder = batch.length === 1
-				? "Call `get_workflow_status` to retrieve the final result."
-				: "Call `get_workflow_status` for each `<workflow-id>` to retrieve the final result(s).";
+				? "Call `fhs_get_workflow_status` to retrieve the final result."
+				: "Call `fhs_get_workflow_status` for each `<workflow-id>` to retrieve the final result(s).";
 			return envelopes.join("\n") + "\n\n" + reminder;
 		}
 

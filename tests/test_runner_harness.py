@@ -388,6 +388,34 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
     assert resolved_disabled == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+async def test_direct_runner_skips_authored_tool_discovery_without_active_runtime_tools(
+    kind: HarnessKind, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness_for(kind)
+    seen: dict[str, Any] = {}
+
+    class _Runner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            seen["prompt"] = prompt
+            seen["kwargs"] = kwargs
+            return runner.AgentResult("session", "captured")
+
+    def fail_discovery(_root: Path) -> Any:
+        raise AssertionError("discover_user_tools should stay lazy when no runtime tools are active")
+
+    monkeypatch.setattr(runner, "discover_user_tools", fail_discovery)
+    monkeypatch.setattr(runner, "get_harness", lambda: harness)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _Runner())
+
+    result = await runner.run_agent("fixture", tools=None, mcp_tools=[], _harness=harness)
+
+    assert result.content == "captured"
+    assert seen["prompt"] == "fixture"
+    assert seen["kwargs"]["tools"] is None
+
+
 # ---------------------------------------------------------------------------
 # Minimal fake Agent
 # ---------------------------------------------------------------------------

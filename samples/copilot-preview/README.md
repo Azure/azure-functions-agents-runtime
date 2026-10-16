@@ -4,7 +4,7 @@ This **default-off** Functions sample exercises Copilot HTTP chat and
 the authored `/preview` HTTP route with `make_receipt` and `web_request`
 (limited to `example.com`). The SDK owns sessions and their opaque files;
 the host supplies filesystem callbacks backed by local files or Blob.
-Run locally with one worker only. ACA `execute_python` is disabled in the
+Run locally with one worker only. ACA `fhs_execute_python` is disabled in the
 checked-in configuration.
 
 Requires Python 3.13/3.14, Azure Functions Core Tools 4, and `uv`. Model calls

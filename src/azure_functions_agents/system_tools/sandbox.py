@@ -1,7 +1,7 @@
 """
-ACA Dynamic Sessions sandbox — execute_python tool.
+ACA Dynamic Sessions sandbox — fhs_execute_python tool.
 
-Provides an ``execute_python`` tool backed by Azure Container Apps dynamic
+Provides an ``fhs_execute_python`` tool backed by Azure Container Apps dynamic
 sessions (code-interpreter pools). Configured via the
 ``dynamic_sessions_code_interpreter`` system tool configuration.
 
@@ -37,6 +37,7 @@ from .._observability import (
     record_sandbox_execution,
     start_span,
 )
+from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
@@ -319,7 +320,7 @@ def create_sandbox_tools(
     *,
     fallback_session_id: str | None = None,
 ) -> list[ToolDescriptor]:
-    """Create an ``execute_python`` tool bound to a specific ACA session pool.
+    """Create an ``fhs_execute_python`` tool bound to a specific ACA session pool.
 
     Parameters
     ----------
@@ -329,7 +330,7 @@ def create_sandbox_tools(
         managed identity for the session pool.
     fallback_session_id:
         Used as the ACA session identifier so the REPL state persists across
-        ``execute_python`` calls within the same conversation. The runner
+        ``fhs_execute_python`` calls within the same conversation. The runner
         passes the resolved agent-runtime session id here. When omitted, a
         fresh GUID is generated so independent invocations do not share a
         sandbox.
@@ -379,7 +380,7 @@ def create_sandbox_tools(
     )
 
     @tool(
-        name="execute_python",
+        name=FHS_EXECUTE_PYTHON_TOOL_NAME,
         description=_EXECUTE_PYTHON_DESCRIPTION,
         schema=ExecutePythonParams,
     )
@@ -447,7 +448,7 @@ def create_sandbox_tools(
                 record_sandbox_execution(error=has_error)
                 if has_error:
                     span.set_error(
-                        "execute_python produced stderr", fault_domain=FaultDomain.SANDBOX
+                        "fhs_execute_python produced stderr", fault_domain=FaultDomain.SANDBOX
                     )
                     logger.warning(
                         "dynamic_sessions_code_interpreter: ACA session %s returned stderr "
@@ -472,7 +473,7 @@ def create_sandbox_tools(
                 )
                 return json.dumps({"error": error_msg})
 
-    logger.info("dynamic_sessions_code_interpreter: execute_python tool created")
+    logger.info("dynamic_sessions_code_interpreter: fhs_execute_python tool created")
     return [execute_python]
 
 

@@ -10,6 +10,10 @@ import pytest
 from pydantic import ValidationError
 
 from azure_functions_agents._function_tool import tool, workflow_tool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_EXECUTE_PYTHON_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.discovery.tools import (
     _workflow_tool_from_member,
@@ -248,19 +252,48 @@ def test_runtime_only_authoring_scenario(copilot, monkeypatch, caplog) -> None:
         monkeypatch.delenv(name, raising=False)
     discovered = discover_project_tools(root)
     assert discovered.failed_loads == []
-    assert _tool_names(discovered.user_tools) == ["authored", "first_local"]
-    assert sorted(item.name for item in discovered.workflow_tools) == ["authored", "workflow_only"]
+    assert _tool_names(discovered.user_tools) == [
+        "authored",
+        "execute_python",
+        "first_local",
+        "start_workflow",
+    ]
+    assert sorted(item.name for item in discovered.workflow_tools) == [
+        "authored",
+        "start_workflow",
+        "workflow_only",
+    ]
     resolved = compose(
         load_agent_specs(root)[0], load_global_config(root),
         discovered_mcp_names=[], discovered_skill_names=[],
     )
+    assert resolved.sandbox_config is not None
+    assert resolved.sandbox_config.endpoint == "https://eastus.dynamicsessions.io"
+    assert resolved.workflows is not None
+    assert resolved.workflows.enabled is True
+    assert resolved.workflows.exclude == (FHS_START_WORKFLOW_TOOL_NAME,)
+    assert resolved.tool_filter.exclude == [FHS_EXECUTE_PYTHON_TOOL_NAME]
     capabilities = build_capabilities(
         resolved, discovered_user_tools=discovered.user_tools,
         discovered_workflow_tools=discovered.workflow_tools,
         discovered_mcp_tools={}, discovered_skills={},
     )
-    assert _tool_names(list(capabilities.filtered_user_tools)) == ["authored", "first_local"]
-    assert create_function_app(root).get_functions()
+    assert _tool_names(list(capabilities.filtered_user_tools)) == [
+        "authored",
+        "execute_python",
+        "first_local",
+        "start_workflow",
+    ]
+    assert sorted(item.name for item in capabilities.filtered_workflow_tools) == [
+        "authored",
+        "start_workflow",
+        "workflow_only",
+    ]
+    function_names = {
+        function.get_function_name() for function in create_function_app(root).get_functions()
+    }
+    assert "agent_agent_builtin_chat" in function_names
+    assert "agent_agent_builtin_debug_chat_ui" not in function_names
     assert "Ignoring unsupported custom tool" in caplog.text
 
 

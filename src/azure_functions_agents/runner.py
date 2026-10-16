@@ -47,6 +47,7 @@ from .harness._history_identity import validate_agent_slug
 from .registration.capabilities import (
     AgentCapabilities,
     _merge_skill_descriptors,
+    validate_runtime_tool_name_collisions,
 )
 from .registration.catalog import AgentCatalog, CatalogEntry
 from .streaming_events import AgentStreamEvent
@@ -350,6 +351,24 @@ def _request(
     )
 
 
+def _validate_direct_runtime_name_collisions(
+    *,
+    harness: AppHarness,
+    tools: Sequence[ToolDescriptor] | None,
+    workflow_enabled: bool,
+    sandbox_tools: Sequence[ToolDescriptor] | None,
+) -> None:
+    if not workflow_enabled and not sandbox_tools:
+        return
+    authored_tools = discover_user_tools(harness.app_root).tools if tools is None else tools
+    validate_runtime_tool_name_collisions(
+        source_file=str(harness.app_root),
+        authored_tools=authored_tools,
+        workflow_enabled=workflow_enabled,
+        sandbox_enabled=bool(sandbox_tools),
+    )
+
+
 async def run_agent(
     prompt: str,
     *,
@@ -382,6 +401,12 @@ async def run_agent(
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     coordinator_deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
+    _validate_direct_runtime_name_collisions(
+        harness=harness,
+        tools=tools,
+        workflow_enabled=workflow_enabled,
+        sandbox_tools=sandbox_tools,
+    )
     return await get_agent_runner(harness).run_agent(
         prompt,
         instructions=instructions,
@@ -511,6 +536,12 @@ async def run_agent_stream(
         if session_id is not None and session_state.caller_supplied:
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
         harness = _harness or get_harness()
+        _validate_direct_runtime_name_collisions(
+            harness=harness,
+            tools=tools,
+            workflow_enabled=workflow_enabled,
+            sandbox_tools=sandbox_tools,
+        )
         selected = get_agent_runner(harness)
         stream = selected.run_agent_stream(
             prompt,

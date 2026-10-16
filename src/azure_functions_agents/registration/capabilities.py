@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from .._function_tool import WorkflowTool
 from .._logger import logger
+from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME, RUNTIME_WORKFLOW_TOOL_NAMES
 from .._slug import delegate_tool_name
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
@@ -19,11 +20,7 @@ from ..discovery.skills import SkillDescriptor, describe_skill_catalog, describe
 if TYPE_CHECKING:
     from ..harness._harness_binding import AppHarness
 
-# Hardcoded (not imported from system_tools.sandbox) to avoid pulling in
-# that module's heavy optional deps (aiohttp, azure.identity) — matches the
-# lazy-import convention used by `_build_web_request_tools` below. The
-# sandbox tool's name is fixed as "execute_python" by its `@tool` decorator.
-SANDBOX_TOOL_NAME = "execute_python"
+SANDBOX_TOOL_NAME = FHS_EXECUTE_PYTHON_TOOL_NAME
 
 
 @dataclass(frozen=True)
@@ -216,6 +213,40 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
         names.add(SANDBOX_TOOL_NAME)
     names.discard("")
     return names
+
+
+def validate_runtime_tool_name_collisions(
+    resolved: ResolvedAgent | None = None,
+    *,
+    source_file: str | None = None,
+    authored_tools: Sequence[ToolDescriptor],
+    workflow_enabled: bool,
+    sandbox_enabled: bool,
+) -> None:
+    """Reject exact authored/runtime model-tool name collisions that are active here."""
+    runtime_names = set(RUNTIME_WORKFLOW_TOOL_NAMES) if workflow_enabled else set()
+    if sandbox_enabled:
+        runtime_names.add(SANDBOX_TOOL_NAME)
+    if not runtime_names:
+        return
+
+    authored_names = {tool.name for tool in describe_tools(authored_tools) if tool.name}
+    collisions = sorted(authored_names.intersection(runtime_names))
+    if not collisions:
+        return
+
+    source_path = Path(source_file or (resolved.source_file if resolved else None) or "<unknown>")
+    if len(collisions) == 1:
+        raise ValueError(
+            f"{source_path}: authored tool name {collisions[0]!r} collides with an enabled "
+            "runtime-owned tool name for this role. Rename the authored tool or disable the "
+            "matching runtime capability."
+        )
+    raise ValueError(
+        f"{source_path}: authored tool names {collisions!r} collide with enabled runtime-owned "
+        "tool names for this role. Rename the authored tools or disable the matching runtime "
+        "capabilities."
+    )
 
 
 def validate_subagent_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> None:

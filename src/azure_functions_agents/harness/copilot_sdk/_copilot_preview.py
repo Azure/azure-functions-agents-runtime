@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
-from ...workflows.tools import build_workflow_tools
+from ...registration.capabilities import validate_runtime_tool_name_collisions
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .._provider_config import resolve_inference_target
 
@@ -119,26 +119,28 @@ def validate_copilot_agent(
     harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> None:
     """Reject unsupported effective configuration before registration or execution."""
-    from ...registration.capabilities import SANDBOX_TOOL_NAME
 
     validate_configuration(resolved.agent_configuration)
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-    prepared = prepare_tools(
-        [
-            *list(capabilities.filtered_user_tools or []),
-            *list(capabilities.web_request_tools or []),
-        ]
+    authored_tools = [
+        *list(capabilities.filtered_user_tools or []),
+        *list(capabilities.web_request_tools or []),
+    ]
+    builtin_endpoints = resolved.builtin_endpoints
+    has_direct_surface = resolved.trigger is not None or bool(
+        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
     )
-    if resolved.workflows is not None and resolved.workflows.enabled:
-        management_names = {function.name for function in build_workflow_tools()}
-        if management_names.intersection(function.name for function in prepared):
-            raise UnsupportedCapabilityError(
-                "Copilot preview workflow management tool names must not collide with authored tools."
+    if has_direct_surface:
+        try:
+            validate_runtime_tool_name_collisions(
+                resolved,
+                authored_tools=capabilities.filtered_user_tools or (),
+                workflow_enabled=bool(resolved.workflows is not None and resolved.workflows.enabled),
+                sandbox_enabled=bool(
+                    resolved.sandbox_config is not None and not resolved.tools_disabled
+                ),
             )
-    if (
-        resolved.sandbox_config is not None
-        and not resolved.tools_disabled
-        and any(function.name == SANDBOX_TOOL_NAME for function in prepared)
-    ):
-        raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
+        except ValueError as exc:
+            raise UnsupportedCapabilityError(str(exc)) from exc
+    prepare_tools(authored_tools)

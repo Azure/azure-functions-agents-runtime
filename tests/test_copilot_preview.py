@@ -16,6 +16,14 @@ from azure.functions.timer import TimerRequest
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_CANCEL_WORKFLOW_TOOL_NAME,
+    FHS_EXECUTE_PYTHON_TOOL_NAME,
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_LIST_WORKFLOWS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+    FHS_TERMINATE_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
@@ -275,6 +283,83 @@ def test_workflow_management_delegate_namespace_is_not_a_collision(preview):
     _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+def test_direct_surfaces_allow_authored_old_runtime_names_with_active_canonical_tools(
+    preview, kind
+):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(update={
+        "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+            endpoint="https://fixture.dynamicsessions.io"
+        ),
+        "workflows": WorkflowConfig(enabled=True),
+    })
+    capabilities = replace(
+        capabilities,
+        filtered_user_tools=[
+            tool(name="execute_python")(lambda code: code),
+            tool(name="start_workflow")(lambda value: value),
+        ],
+    )
+
+    harness = (
+        _harness.get_harness()
+        if kind is HarnessKind.COPILOT
+        else AppHarness(HarnessKind.MAF, preview)
+    )
+    _harness.validate_agent(harness, resolved, capabilities)
+
+
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+def test_leaf_roles_allow_authored_canonical_runtime_names(kind, preview):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(update={
+        "builtin_endpoints": BuiltinEndpointsConfig(),
+        "trigger": None,
+        "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+            endpoint="https://fixture.dynamicsessions.io"
+        ),
+        "workflows": WorkflowConfig(enabled=True),
+    })
+    capabilities = replace(
+        capabilities,
+        filtered_user_tools=[
+            tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code),
+            tool(name=FHS_START_WORKFLOW_TOOL_NAME)(lambda value: value),
+        ],
+    )
+
+    harness = (
+        _harness.get_harness()
+        if kind is HarnessKind.COPILOT
+        else AppHarness(HarnessKind.MAF, preview)
+    )
+    _harness.validate_agent(harness, resolved, capabilities)
+
+
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+def test_direct_surfaces_allow_disabled_canonical_runtime_names(kind, preview):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(update={
+        "sandbox_config": None,
+        "workflows": WorkflowConfig(enabled=False),
+    })
+    capabilities = replace(
+        capabilities,
+        filtered_user_tools=[
+            tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code),
+            tool(name=FHS_START_WORKFLOW_TOOL_NAME)(lambda value: value),
+        ],
+    )
+
+    harness = (
+        _harness.get_harness()
+        if kind is HarnessKind.COPILOT
+        else AppHarness(HarnessKind.MAF, preview)
+    )
+    _harness.validate_agent(harness, resolved, capabilities)
+
+
 @pytest.mark.parametrize(
     ("configuration", "expected_names"),
     [
@@ -313,9 +398,9 @@ def test_sandbox_name_collision_fails_during_registration(preview):
     })
     capabilities = replace(
         capabilities,
-        filtered_user_tools=[tool(name="execute_python")(lambda code: code)],
+        filtered_user_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
     )
-    with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
+    with pytest.raises(UnsupportedCapabilityError, match=FHS_EXECUTE_PYTHON_TOOL_NAME):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
@@ -454,7 +539,7 @@ def test_maf_standalone_does_not_discover_unrequested_skills(tmp_path, monkeypat
 
 def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
     user = tool(name="user_tool")(lambda: "user")
-    sandbox = tool(name="execute_python")(lambda code: code)
+    sandbox = tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)
     web = tool(name="web_request")(lambda url: url)
     invoke = AsyncMock(return_value=runner.AgentResult("public-id", "native reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
@@ -463,7 +548,11 @@ def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
     ))
     request = invoke.call_args.args[1]
     assert result.session_id == "public-id"
-    assert [function.name for function in request.tools] == ["user_tool", "execute_python", "web_request"]
+    assert [function.name for function in request.tools] == [
+        "user_tool",
+        FHS_EXECUTE_PYTHON_TOOL_NAME,
+        "web_request",
+    ]
 
 
 def test_duplicate_tool_names_are_rejected_before_native_execution(preview, monkeypatch):
@@ -486,8 +575,13 @@ def test_workflow_management_requires_bound_policy(preview):
         durable_client=durable_client,
     )
     assert [function.name for function in _preview.prepare_tools(workflow_tools)] == [
-        "start_workflow", "get_workflow_status", "list_workflows", "cancel_workflow", "terminate_workflow",
+        FHS_START_WORKFLOW_TOOL_NAME,
+        FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+        FHS_LIST_WORKFLOWS_TOOL_NAME,
+        FHS_CANCEL_WORKFLOW_TOOL_NAME,
+        FHS_TERMINATE_WORKFLOW_TOOL_NAME,
     ]
+    assert "start_workflow" not in [function.name for function in _preview.prepare_tools(workflow_tools)]
     with pytest.raises(UnsupportedCapabilityError, match="per-agent workflow policy"):
         asyncio.run(runner.run_agent(
             "hello", tools=[], mcp_tools=[], workflow_enabled=True,
@@ -764,7 +858,7 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
     requests = []
 
     def build_sandbox(_resolved, session_id):
-        return [tool(name="execute_python")(lambda code: f"{session_id}:{code}")]
+        return [tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: f"{session_id}:{code}")]
 
     async def invoke(_selected, request):
         requests.append(request)
@@ -781,7 +875,7 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
     assert requests[0].session_id == public_id
     assert [function.name for function in requests[0].tools] == [
         "make_receipt",
-        "execute_python",
+        FHS_EXECUTE_PYTHON_TOOL_NAME,
         "web_request",
     ]
     result = asyncio.run(requests[0].tools[1].invoke(arguments={"code": "6 * 7"}))
