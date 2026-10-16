@@ -611,14 +611,14 @@ system_tools:
 
 ##### `system_tools.dynamic_sessions_code_interpreter`
 - **Type:** `object` (global), `boolean` (agent)
-- **Description:** Configures the built-in `fhs_execute_python` tool using Azure Container Apps dynamic sessions. All agents inherit code interpreter access by default. Agents can opt out by setting to `false`.
+- **Description:** Configures the built-in `fhs_execute_python` tool using Azure Container Apps dynamic sessions. It is on by default. Agents can opt out with `false`.
 
-The runtime-owned tool was previously named `execute_python`. Update authored
-instructions, skills, and tool selectors that intend to call the sandbox to
-`fhs_execute_python` (or `custom:fhs_execute_python` for Copilot selectors).
-There is no old-name alias: an authored tool named `execute_python` stays
-independent. An authored `fhs_execute_python` conflicts only when the sandbox
-tool is enabled for that execution role.
+The `fhs_` prefix avoids collisions with user-authored functions. If authored
+instructions, skills, or selectors mean the runtime sandbox, update them to
+`fhs_execute_python` (or `custom:fhs_execute_python` in Copilot selectors).
+There is no old-name alias: an authored `execute_python` stays independent, and
+an authored `fhs_execute_python` collides only when the sandbox tool is enabled
+for that execution role.
 
 **Global configuration (in `agents.config.yaml`):**
 ```yaml
@@ -751,17 +751,18 @@ agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
 workflow task targets. No new role or starter fields are required; workflow
 identity comes from the agent's canonical slug.
 
-**Migrating workflow tool names:** The five runtime management tools now use
-the `fhs_` prefix in both harnesses. Update authored instructions, skills, and
-tool selectors that call those internal tools; Copilot selectors use
-`custom:fhs_start_workflow`, for example. There are no unprefixed internal
-aliases. Authored tools and workflow task targets named `start_workflow`,
-`get_workflow_status`, `list_workflows`, `cancel_workflow`, or `terminate_workflow`
-remain independent and usable. Only exact collisions with management tools
-enabled for the execution role are rejected; the entire `fhs_` prefix is not
-reserved. The five prefixed control-plane names cannot be workflow task targets.
-Keep `tools.exclude` and `workflows.exclude` entries as literal authored names;
-neither filter translates old names into internal names. Python helper APIs,
+**Migrating workflow tool names:** The `fhs_` prefix avoids collisions with
+user-authored functions. Update authored instructions, skills, and selectors
+that mean the runtime control-plane tools to `fhs_start_workflow`,
+`fhs_get_workflow_status`, `fhs_list_workflows`, `fhs_cancel_workflow`, and
+`fhs_terminate_workflow` (`custom:fhs_start_workflow` in Copilot selectors).
+There are no old-name aliases.
+
+Authored `start_workflow`, `get_workflow_status`, `list_workflows`,
+`cancel_workflow`, and `terminate_workflow` remain usable as authored names.
+Only exact collisions with enabled management tools are rejected, and
+`tools.exclude` / `workflows.exclude` entries still use literal authored names.
+The five prefixed control-plane names cannot be workflow task targets. Python helper APIs,
 HTTP routes, result envelopes, and historical tool records are unchanged.
 
 Workflow tool handlers can be synchronous (`def`) or asynchronous (`async def`).
