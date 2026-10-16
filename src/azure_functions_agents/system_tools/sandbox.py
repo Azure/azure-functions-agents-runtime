@@ -26,10 +26,10 @@ from .._observability import (
     start_span,
 )
 from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
-from .._sandbox_endpoint import resolve_sandbox_endpoint
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
+from ._sandbox_endpoint import SandboxEndpointStatus, resolve_sandbox_endpoint
 
 if TYPE_CHECKING:
     from azure.identity.aio import DefaultAzureCredential
@@ -299,16 +299,16 @@ def create_sandbox_tools(
     """
     resolution = resolve_sandbox_endpoint(config)
     raw_endpoint = resolution.raw_endpoint
-    if resolution.status == "missing":
+    if resolution.status is SandboxEndpointStatus.MISSING:
         logger.warning("dynamic_sessions_code_interpreter: missing 'endpoint', skipping")
         return []
-    if resolution.status == "unresolved":
+    if resolution.status is SandboxEndpointStatus.UNRESOLVED:
         logger.warning(
             "dynamic_sessions_code_interpreter: could not resolve endpoint '%s', skipping",
             raw_endpoint,
         )
         return []
-    if resolution.status == "invalid":
+    if resolution.status is SandboxEndpointStatus.INVALID:
         logger.warning(
             "dynamic_sessions_code_interpreter: resolved endpoint '%s' failed validation "
             "(must be an https URL whose host is *.dynamicsessions.io); "

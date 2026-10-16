@@ -13,11 +13,11 @@ import azure.functions as func
 
 from ._agent_run_diagnostics import AgentExecutionSurface
 from ._logger import logger
-from ._sandbox_endpoint import sandbox_runtime_tool_enabled
 from .harness._harness_binding import AppHarness, UnsupportedCapabilityError
 from .hosted_skill_binding import HostedSkill
 from .registration.capabilities import validate_runtime_tool_name_collisions
 from .registration.catalog import AgentCatalog, CatalogEntry
+from .system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 
 type _Handler = Callable[..., Any]
 _F = TypeVar("_F", bound=_Handler)

@@ -5,12 +5,19 @@ from __future__ import annotations
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any
 
-from .config.env import has_unresolved_placeholders, substitute_env_vars_in_value
-from .config.schema import DynamicSessionsCodeInterpreterConfig
+from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
+from ..config.schema import DynamicSessionsCodeInterpreterConfig
 
-type SandboxEndpointStatus = Literal["missing", "unresolved", "invalid", "eligible"]
+
+class SandboxEndpointStatus(StrEnum):
+    MISSING = "missing"
+    UNRESOLVED = "unresolved"
+    INVALID = "invalid"
+    ELIGIBLE = "eligible"
+
 
 _ALLOWED_SESSIONS_HOST_SUFFIX = ".dynamicsessions.io"
 
@@ -25,7 +32,7 @@ class SandboxEndpointResolution:
 
     @property
     def eligible(self) -> bool:
-        return self.status == "eligible"
+        return self.status is SandboxEndpointStatus.ELIGIBLE
 
 
 def is_allowed_sessions_endpoint(endpoint: str) -> bool:
@@ -49,23 +56,25 @@ def resolve_sandbox_endpoint(
 ) -> SandboxEndpointResolution:
     """Resolve one sandbox endpoint without importing optional runtime dependencies."""
     if config is None:
-        return SandboxEndpointResolution("missing")
+        return SandboxEndpointResolution(SandboxEndpointStatus.MISSING)
 
-    raw_endpoint = (
-        config.get("endpoint")
-        if isinstance(config, Mapping)
-        else config.endpoint
-    )
+    raw_endpoint = config.get("endpoint") if isinstance(config, Mapping) else config.endpoint
     if raw_endpoint is None or raw_endpoint == "":
-        return SandboxEndpointResolution("missing")
+        return SandboxEndpointResolution(SandboxEndpointStatus.MISSING)
 
     raw_value = str(raw_endpoint)
     endpoint = substitute_env_vars_in_value(raw_value)
     if not endpoint or has_unresolved_placeholders(endpoint):
-        return SandboxEndpointResolution("unresolved", raw_endpoint=raw_value)
+        return SandboxEndpointResolution(
+            SandboxEndpointStatus.UNRESOLVED, raw_endpoint=raw_value
+        )
     if not is_allowed_sessions_endpoint(endpoint):
-        return SandboxEndpointResolution("invalid", raw_endpoint=raw_value, endpoint=endpoint)
-    return SandboxEndpointResolution("eligible", raw_endpoint=raw_value, endpoint=endpoint)
+        return SandboxEndpointResolution(
+            SandboxEndpointStatus.INVALID, raw_endpoint=raw_value, endpoint=endpoint
+        )
+    return SandboxEndpointResolution(
+        SandboxEndpointStatus.ELIGIBLE, raw_endpoint=raw_value, endpoint=endpoint
+    )
 
 
 def sandbox_runtime_tool_enabled(

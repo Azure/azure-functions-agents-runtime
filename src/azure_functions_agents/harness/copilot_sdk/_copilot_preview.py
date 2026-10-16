@@ -9,11 +9,11 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..._sandbox_endpoint import sandbox_runtime_tool_enabled
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...registration.capabilities import validate_runtime_tool_name_collisions
+from ...system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .._provider_config import resolve_inference_target
 

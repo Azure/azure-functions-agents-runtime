@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING
 from .._function_tool import WorkflowTool
 from .._logger import logger
 from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME, RUNTIME_WORKFLOW_TOOL_NAMES
-from .._sandbox_endpoint import sandbox_runtime_tool_enabled
 from .._slug import delegate_tool_name
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor, describe_skill_catalog, describe_skill_paths
+from ..system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 
 if TYPE_CHECKING:
     from ..harness._harness_binding import AppHarness
