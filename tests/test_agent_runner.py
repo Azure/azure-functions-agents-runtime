@@ -320,12 +320,12 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
 
 
 @pytest.mark.asyncio
-async def test_copilot_unsupported_configuration_rejects_before_native_acquisition(
+async def test_copilot_configuration_reaches_native_execution_without_starting_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     harness = make_copilot_harness(tmp_path)
     get_runtime = Mock(side_effect=AssertionError("native runtime should not start"))
-    native_run = AsyncMock(side_effect=AssertionError("native run should not start"))
+    native_run = AsyncMock(return_value=runner.AgentResult("session-id", "native reply"))
     monkeypatch.setattr(_copilot_runtime, "get_runtime", get_runtime)
     monkeypatch.setattr(_copilot_execution, "run", native_run)
 
@@ -336,19 +336,26 @@ async def test_copilot_unsupported_configuration_rejects_before_native_acquisiti
             agent_configuration=AgentConfiguration(max_output_tokens=32),
         )
     ]
-    assert [event["type"] for event in events] == ["error"]
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert native_run.await_args_list[0].args[1].max_output_tokens == 32
 
-    with pytest.raises(ValueError, match="max_output_tokens"):
-        await runner.run_leaf_agent_task(
-            SimpleNamespace(slug="billing", agent_configuration=AgentConfiguration(max_output_tokens=32)),
-            AgentCapabilities(_harness=harness),
-            "work",
-            timeout=1.0,
-            execution_role="workflow_subagent",
-        )
+    leaf = await runner.run_leaf_agent_task(
+        SimpleNamespace(
+            slug="billing",
+            model=None,
+            instructions="Work the task.",
+            agent_configuration=AgentConfiguration(max_output_tokens=32),
+        ),
+        AgentCapabilities(_harness=harness),
+        "work",
+        timeout=1.0,
+        execution_role="workflow_subagent",
+    )
+    assert leaf == "native reply"
+    assert native_run.await_args_list[1].args[1].max_output_tokens == 32
 
     get_runtime.assert_not_called()
-    native_run.assert_not_called()
+    assert native_run.await_count == 2
 
 
 @pytest.mark.asyncio

@@ -4,23 +4,155 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Final, Literal, cast
+from functools import cache, partial
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 from ..._credential import build_async_credential
 from ..._logger import logger
+from ...config.env import EnvVar, runtime_env_value
 from .. import _harness_lifecycle
 from .._agent_runner import get_agent_runner
-from .._harness_binding import AppHarness, HarnessKind
-from ._copilot_preview import CopilotPreviewError
-from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
+from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
+from .._provider_config import resolve_inference_target
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
     from copilot import CopilotClient
-    from copilot.session import ProviderTokenArgs
+    from copilot.session import (
+        ProviderTokenArgs,
+        ReasoningEffort,
+        ReasoningSummary,
+    )
 
     from ._copilot_runner import CopilotRunner
+else:
+    type ReasoningEffort = str
+    type ReasoningSummary = str
 
+SDK_DISTRIBUTION = "github-copilot-sdk"
+PROVIDER_ENV = EnvVar.PROVIDER
+
+
+class CopilotPreviewError(RuntimeError):
+    """A safe, actionable Copilot SDK error without underlying SDK details."""
+
+
+def check_sdk_dependency() -> None:
+    try:
+        version(SDK_DISTRIBUTION)
+    except PackageNotFoundError:
+        raise CopilotPreviewError(
+            "Copilot preview requires azurefunctions-agents-runtime[copilot]. "
+            f"Install {SDK_DISTRIBUTION} through the optional extra."
+        ) from None
+
+
+def _literal_values(name: str, values: tuple[object, ...]) -> frozenset[str]:
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise CopilotPreviewError(
+                f"Copilot preview requires {name} to export string Literal values."
+            )
+        normalized.add(value)
+    return frozenset(normalized)
+
+
+@cache
+def _reasoning_effort_values() -> frozenset[str]:
+    from copilot.session import ReasoningEffort
+
+    return _literal_values("ReasoningEffort", get_args(ReasoningEffort))
+
+
+@cache
+def _reasoning_summary_values() -> frozenset[str]:
+    from copilot.session import ReasoningSummary
+
+    return _literal_values("ReasoningSummary", get_args(ReasoningSummary))
+
+
+def _validate_reasoning_setting(
+    name: EnvVar, *, allowed: Callable[[], frozenset[str]]
+) -> str | None:
+    value = runtime_env_value(name)
+    if not value:
+        return None
+    allowed_values_set = allowed()
+    if value not in allowed_values_set:
+        allowed_values = ", ".join(sorted(allowed_values_set))
+        logger.warning(
+            "Ignoring invalid Copilot reasoning setting %s=%r; expected one of: %s. "
+            "Omitting the override so the SDK/provider default applies.",
+            name,
+            value,
+            allowed_values,
+        )
+        return None
+    return value
+
+
+def _reasoning_effort_from_environment() -> ReasoningEffort | None:
+    return cast(
+        ReasoningEffort | None,
+        _validate_reasoning_setting(
+            EnvVar.REASONING_EFFORT,
+            allowed=_reasoning_effort_values,
+        )
+    )
+
+
+def _reasoning_summary_from_environment() -> ReasoningSummary | None:
+    return cast(
+        ReasoningSummary | None,
+        _validate_reasoning_setting(
+            EnvVar.REASONING_SUMMARY,
+            allowed=_reasoning_summary_values,
+        )
+    )
+
+
+def select_copilot_harness(root: Path) -> AppHarness:
+    """Freeze provider and storage settings without acquiring runtime resources."""
+    from ._copilot_providers import _PROVIDERS
+    from ._copilot_session_identity import resolve_route
+
+    check_sdk_dependency()
+    supported_providers = [provider.value for provider in _PROVIDERS]
+    provider_list = (
+        supported_providers[0]
+        if len(supported_providers) == 1
+        else ", ".join(supported_providers[:-1]) + f", or {supported_providers[-1]}"
+    )
+    try:
+        target = resolve_inference_target(None)
+        provider, model = target.require()
+    except RuntimeError:
+        raise UnsupportedCapabilityError(
+            f"Copilot preview supports {PROVIDER_ENV}={provider_list} "
+            "with the existing explicit-or-autodetected provider settings."
+        ) from None
+    copilot_provider = _PROVIDERS[provider].from_environment()
+    reasoning_effort = _reasoning_effort_from_environment()
+    reasoning_summary = _reasoning_summary_from_environment()
+    route = resolve_route(root)
+    from ._copilot_runner import CopilotRunner
+
+    return AppHarness(
+        HarnessKind.COPILOT,
+        root,
+        partial(
+            CopilotRunner,
+            storage_root=route.local_dir / "copilot-preview",
+            default_model=model,
+            provider=copilot_provider,
+            reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
+            session_storage=route,
+        ),
+    )
 _START_TIMEOUT_SECONDS = 30
 _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 
@@ -57,6 +189,8 @@ class CopilotRuntime:
                 return self._client
             self.workspace.mkdir(parents=True, exist_ok=True)
             from copilot import CopilotClient, RuntimeConnection
+
+            from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
 
             client = CopilotClient(
                 connection=RuntimeConnection.for_stdio(),

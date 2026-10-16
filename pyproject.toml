@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Experimental local Copilot harness. MAF remains the default and does not import this SDK.
+# Experimental Copilot harness. MAF remains the default and does not import this SDK.
 copilot = [
     "github-copilot-sdk==1.0.14",
 ]

@@ -47,7 +47,6 @@ class AgentRunner(Protocol):
 
     @property
     def validate_hosted_skill(self) -> Callable[[ResolvedAgent], None] | None: ...
-
     async def run_agent(
         self,
         prompt: str,
@@ -119,6 +118,7 @@ class AgentRunner(Protocol):
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str: ...
+
 
 def get_agent_runner(harness: AppHarness) -> AgentRunner:
     """Construct one resource-free runner per immutable app binding."""
