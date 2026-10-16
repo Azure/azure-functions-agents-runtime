@@ -473,12 +473,25 @@ The runtime's ordinary `@tool` produces an SDK-free descriptor. Functions can be
 sync or async; signature types and Pydantic schemas supply input validation, and
 the selected harness adapts the descriptor to its SDK. Tools return ordinary
 Python values. Discovery selects one tool per module: a runtime descriptor
-first, then the first local public function. Imported functions and unrelated
-globals are not automatically exposed.
+first, then named callable objects with public `name`/`description`, then the
+first local public function. Imported functions, classes, unrelated globals,
+and workflow-only declarations are not automatically exposed.
 
 The convenience `@tool` accepts only `name`, `description`, `schema`, and
-`approval_mode`; extra keywords are warned and ignored. Runtime capability
-filters, authentication, and schemas still apply.
+`approval_mode`; unexpected keyword arguments raise the normal Python
+`TypeError`. `approval_mode` still accepts the existing
+`"never_require"`/`"always_require"` strings, and you can also use
+`ApprovalMode.NEVER_REQUIRE` or `ApprovalMode.ALWAYS_REQUIRE` directly:
+
+```python
+from azure_functions_agents import ApprovalMode, tool
+
+@tool(approval_mode=ApprovalMode.NEVER_REQUIRE)
+def reverse_string(text: str) -> str:
+    return text[::-1]
+```
+
+Runtime capability filters, authentication, and schemas still apply.
 
 Dynamic Workflow tools live in the same `tools/` directory but must opt in
 explicitly with `@workflow_tool` so they can run safely as Durable

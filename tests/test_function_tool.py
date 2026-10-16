@@ -12,10 +12,12 @@ from azure_functions_agents._agent_run_diagnostics import AgentExecutionSurface
 from azure_functions_agents._function_tool import (
     get_workflow_tool_handler,
     get_workflow_tool_metadata,
+    normalize_optional_tools,
+    normalize_tool,
     tool,
     workflow_tool,
 )
-from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tools
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import (
@@ -26,6 +28,18 @@ from azure_functions_agents.harness._harness_binding import (
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution, _maf_tools
 from azure_functions_agents.harness.copilot_sdk._copilot_capabilities import prepare_tools
+
+
+def test_optional_tool_normalization_preserves_discovery_and_empty_sentinels():
+    assert normalize_optional_tools(None) is None
+    assert normalize_optional_tools([]) == ()
+    assert normalize_optional_tools(()) == ()
+    def lookup(value: int) -> int:
+        raise AssertionError("Normalization must not execute authored code")
+
+    [descriptor] = normalize_optional_tools([lookup])
+    assert descriptor.func is lookup
+    assert normalize_optional_tools([descriptor]) == (descriptor,)
 
 
 def test_ordinary_authoring_never_constructs_maf_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,22 +127,42 @@ async def test_maf_adapter_does_not_add_an_extra_pydantic_validation_pass() -> N
     assert effects == ["ok"]
 
 
-def test_raw_maf_input_models_never_enter_neutral_inventory() -> None:
-    raw = _maf_tools.FunctionTool(name="raw", func=lambda value: value)
-    assert describe_tools((raw,)) == ()
+def test_normalizing_a_runtime_descriptor_preserves_identity() -> None:
+    descriptor = tool(lambda value: value)
+    assert normalize_tool(descriptor) is descriptor
 
 
-def test_runtime_decorators_never_wrap_or_inspect_raw_sdk_tools(caplog) -> None:
-    class OpaqueSDKTool(_maf_tools.FunctionTool):
-        def __getattribute__(self, name):
-            raise AssertionError("No SDK attribute introspection")
+@pytest.mark.asyncio
+async def test_runtime_tool_has_matching_schema_invocation_and_text_across_harnesses():
+    from copilot.tools import ToolInvocation
 
-    raw = object.__new__(OpaqueSDKTool)
-    assert tool(raw) is raw
-    assert workflow_tool(raw) is raw
-    assert get_workflow_tool_metadata(raw) is None
-    assert describe_tools((raw,)) == ()
-    assert "Ignoring unsupported custom tool" in caplog.text
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+
+    effects: list[tuple[int, str]] = []
+
+    def lookup(count: int, label: str = "default") -> dict[str, object]:
+        """Look up items."""
+        effects.append((count, label))
+        return {"count": count, "label": label}
+
+    descriptor = normalize_tool(lookup)
+    [maf_tool] = _maf_tools.build_maf_tools((descriptor,))
+    copilot_tool = _tool(descriptor, CopilotToolCalls())
+    assert copilot_tool.name == maf_tool.name == "lookup"
+    assert copilot_tool.description == maf_tool.description == "Look up items."
+    assert copilot_tool.parameters == maf_tool.parameters()
+    maf_result = await maf_tool.invoke(arguments={"count": "3"})
+    copilot_result = await copilot_tool.handler(
+        ToolInvocation(
+            session_id="session",
+            tool_call_id="call",
+            tool_name="lookup",
+            arguments={"count": "3"},
+        )
+    )
+    assert copilot_result.text_result_for_llm == maf_result[0].text
+    assert effects == [(3, "default"), (3, "default")]
 
 
 @pytest.mark.asyncio
@@ -139,40 +173,47 @@ def test_runtime_decorators_never_wrap_or_inspect_raw_sdk_tools(caplog) -> None:
         ({"result_parser": lambda value: value, "secret_option": "top-secret"}, "result_parser"),
     ],
 )
-async def test_tool_warns_and_ignores_unexpected_keyword_arguments_at_authoring(
+async def test_runtime_helper_does_not_silently_strip_unknown_keywords(
     args: dict[str, object], expected: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    decorator = tool(**args)
-    direct = tool(lambda value: value, **args)
-    decorated = decorator(lambda value: value)
-
-    assert isinstance(direct, ToolDescriptor)
-    assert isinstance(decorated, ToolDescriptor)
-    assert await direct.invoke(arguments={"value": "ok"}) == "ok"
-    assert await decorated.invoke(arguments={"value": "ok"}) == "ok"
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if "Ignoring unsupported @tool keyword argument(s):" in record.getMessage()
-    ]
-    assert len(warnings) == 2
-    assert all(expected in message for message in warnings)
-    assert all(
-        "Supported @tool keyword arguments are: name, description, schema, approval_mode."
-        in message
-        for message in warnings
-    )
-    assert "top-secret" not in caplog.text
+    with pytest.raises(TypeError, match=expected):
+        tool(**args)
+    with pytest.raises(TypeError, match=expected):
+        tool(lambda value: value, **args)
+    assert not caplog.records
 
 
-def test_raw_maf_subclass_is_ignored_by_both_adapters() -> None:
-    class CustomTool(_maf_tools.FunctionTool):
-        pass
+@pytest.mark.asyncio
+async def test_runtime_decorators_accept_authored_callable_objects() -> None:
+    class Lookup:
+        name = "lookup"
 
-    raw = CustomTool(name="custom", func=lambda value: value)
-    assert describe_tools((raw,)) == ()
-    assert _maf_tools.build_maf_tools(describe_tools((raw,))) == []
-    assert prepare_tools((raw,)) == ()
+        def __call__(self, value: str) -> str:
+            return f"found:{value}"
+
+    authored = Lookup()
+    marked = workflow_tool(name="activity")(authored)
+    descriptor = tool(marked)
+
+    assert get_workflow_tool_metadata(marked).name == "activity"
+    assert descriptor.workflow_metadata.name == "activity"
+    assert descriptor.name == "lookup"
+    assert await descriptor.invoke(arguments={"value": "item"}) == "found:item"
+
+
+@pytest.mark.parametrize("description", [None, "Explicit description"])
+def test_callable_description_uses_public_metadata_before_docstring(description):
+    class Lookup:
+        """Docstring fallback."""
+
+        name = "lookup"
+        description = "Authored description"
+
+        def __call__(self, value: str) -> str:
+            return value
+
+    descriptor = tool(Lookup(), description=description)
+    assert descriptor.description == (description or "Authored description")
 
 
 def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> None:
@@ -184,13 +225,19 @@ def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> Non
         prepare_tools((descriptor,))
 
 
+def test_root_package_exports_approval_mode_enum() -> None:
+    import azure_functions_agents as runtime
+
+    assert runtime.ApprovalMode.NEVER_REQUIRE.value == "never_require"
+
+
 def test_workflow_tool_rejects_unexpected_keyword_arguments_at_authoring() -> None:
     with pytest.raises(TypeError, match=r"unexpected keyword argument 'max_invocations'"):
         workflow_tool(max_invocations=1)
 
 
 @pytest.mark.asyncio
-async def test_portable_tool_copies_preserve_schema_policy_and_workflow_metadata() -> None:
+async def test_runtime_tool_copies_preserve_schema_policy_and_workflow_metadata() -> None:
     class Arguments(BaseModel):
         value: str
 
@@ -205,7 +252,6 @@ async def test_portable_tool_copies_preserve_schema_policy_and_workflow_metadata
         name="echo",
         schema=Arguments,
         approval_mode="always_require",
-        max_invocations=1,
     )
     copied = replace(descriptor)
     workflow_copy = workflow_tool(name="activity")(descriptor)
@@ -247,29 +293,6 @@ async def test_authored_options_materialize_the_live_bound_descriptor(asynchrono
 
 
 @pytest.mark.asyncio
-async def test_removed_maf_passthrough_keywords_are_ignored_by_both_harnesses(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    descriptor = tool(
-        lambda value: value,
-        name="portable",
-        max_invocation_exceptions=2,
-        kind="custom",
-        additional_properties={"authored": True},
-    )
-
-    assert isinstance(descriptor, ToolDescriptor)
-    [maf_tool] = _maf_tools.build_maf_tools((descriptor,))
-    [copilot_tool] = prepare_tools((descriptor,))
-    assert await descriptor.invoke(arguments={"value": "ok"}) == "ok"
-    assert await maf_tool.invoke(arguments={"value": "ok"}, skip_parsing=True) == "ok"
-    assert copilot_tool is descriptor
-    assert "max_invocation_exceptions" in caplog.text
-    assert "additional_properties" in caplog.text
-    assert "{'authored': True}" not in caplog.text
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("skills", [(), ("selected", "nested")])
 async def test_maf_adapter_uses_skill_descriptor_paths(
@@ -280,10 +303,7 @@ async def test_maf_adapter_uses_skill_descriptor_paths(
     provider = Mock()
     monkeypatch.setattr(agent_framework, "SkillsProvider", provider)
     monkeypatch.setattr(agent_framework, "create_harness_agent", Mock())
-    selected = tuple(
-        SkillDescriptor(name=name, path=Path(name))
-        for name in skills
-    )
+    selected = tuple(SkillDescriptor(name=name, path=Path(name)) for name in skills)
     request = HarnessRequest(
         prompt="test",
         instructions=None,

@@ -5,20 +5,23 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from types import MethodType
-from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 import azure_functions_agents as _package
 
-from ._logger import logger
 
-type ApprovalMode = Literal["always_require", "never_require"]
+class ApprovalMode(StrEnum):
+    ALWAYS_REQUIRE = "always_require"
+    NEVER_REQUIRE = "never_require"
+
+
 type ToolCallable = Callable[..., Any]
-type ToolInput = object
 
 _JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
     "string": str,
@@ -97,7 +100,7 @@ class WorkflowTool:
 class ToolPolicy:
     """Harness-neutral authoring policy."""
 
-    approval_mode: ApprovalMode = "never_require"
+    approval_mode: ApprovalMode = ApprovalMode.NEVER_REQUIRE
 
 
 def _parameter_annotation(annotation: Any) -> Any:
@@ -112,13 +115,28 @@ def _parameter_annotation(annotation: Any) -> Any:
 
 
 def _function_hints(func: ToolCallable) -> dict[str, Any]:
+    targets: list[object] = []
     try:
-        return get_type_hints(func, include_extras=True)
-    except (NameError, TypeError):
-        return {
-            parameter.name: parameter.annotation
-            for parameter in inspect.signature(func).parameters.values()
-        }
+        targets.append(inspect.unwrap(func))
+    except Exception:
+        targets.append(func)
+    if targets[0] is not func:
+        targets.append(func)
+    if not inspect.isroutine(func) and not inspect.isclass(func):
+        targets.append(type(func).__call__)
+    for target in targets:
+        try:
+            hints = get_type_hints(target, include_extras=True)
+        except (NameError, TypeError):
+            continue
+        if hints or inspect.isroutine(target) or inspect.isclass(target):
+            return hints
+    return {
+        parameter.name: parameter.annotation
+        for parameter in inspect.signature(func).parameters.values()
+    }
+
+
 def _input_model(name: str, func: ToolCallable) -> type[BaseModel]:
     signature = inspect.signature(func)
     hints = _function_hints(func)
@@ -212,27 +230,19 @@ class ToolDescriptor:
         return self
 
 
-def is_harness_object(candidate: object) -> bool:
-    """Recognize SDK-owned values without inspecting their attributes."""
-    harness_roots = {"agent" + "_framework", "co" + "pilot"}
-    return any(
-        base.__module__.split(".", 1)[0] in harness_roots
-        for base in type(candidate).__mro__
-    )
+type ToolInput = ToolDescriptor | ToolCallable
 
 
-def warn_unsupported_tool() -> None:
-    logger.warning(
-        "Ignoring unsupported custom tool; use the runtime @tool decorator "
-        "or a local public function in tools/."
-    )
+def tool_name(candidate: object) -> str:
+    """Read public tool metadata without interpreting the implementation."""
+    name = getattr(candidate, "name", None) or getattr(candidate, "__name__", None)
+    if name is None and callable(candidate):
+        name = type(candidate).__name__
+    return str(name or "")
 
 
-def describe_tools(candidates: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
-    tools: list[ToolDescriptor] = []
-    for candidate in candidates:
-        if issubclass(type(candidate), ToolDescriptor):
-            tools.append(cast(ToolDescriptor, candidate))
-        else:
-            warn_unsupported_tool()
-    return tuple(tools)
+def tool_description(candidate: object) -> str:
+    description = getattr(candidate, "description", None)
+    return (
+        description if isinstance(description, str) and description else candidate.__doc__ or ""
+    ).strip()

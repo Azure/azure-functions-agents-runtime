@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from ..._logger import logger
 from ..._mcp_auth import materialize_mcp_headers
-from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput, describe_tools
 from ...config.env import EnvVar
 from ...config.schema import ResolvedAgent
 from ...workflows.tools import build_workflow_tools
@@ -45,10 +45,10 @@ def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     prepared = describe_tools(tools)
     names: set[str] = set()
     for function in prepared:
-        if function.policy.approval_mode != "never_require":
+        if function.policy.approval_mode is not ApprovalMode.NEVER_REQUIRE:
             raise UnsupportedCapabilityError(
                 "Copilot preview supports ordinary runtime @tool declarations only when "
-                'approval_mode="never_require".'
+                f'approval_mode="{ApprovalMode.NEVER_REQUIRE.value}".'
             )
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", function.name):
             raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")

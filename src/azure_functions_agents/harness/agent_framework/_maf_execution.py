@@ -14,6 +14,7 @@ from azure_functions_agents import runner as _runner
 
 from ..._agent_identity import agent_id
 from ..._agent_run_diagnostics import AgentExecutionSurface, _looks_like_tool_error
+from ..._function_tool import normalize_tool
 from ..._logger import logger
 from ..._observability import (
     ATTR_AGENT_OUTCOME,
@@ -25,7 +26,7 @@ from ..._observability import (
     gen_ai_agent_name,
     start_span,
 )
-from ..._tool_descriptor import ToolCallable, ToolDescriptor
+from ..._tool_descriptor import ToolDescriptor, ToolInput
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
 from ...config.paths import get_app_root
@@ -69,8 +70,8 @@ if TYPE_CHECKING:
     from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
-type AgentFunctionTool = ToolDescriptor
-type AgentTool = ToolTypes | ToolCallable
+type AgentFunctionTool = ToolInput
+type AgentTool = ToolTypes
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
 type _FunctionArguments = str | Mapping[str, Any] | None
 type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
@@ -270,17 +271,17 @@ def _build_chat_options_from_environment() -> _ChatOptions | None:
 def assemble_agent_inputs(
     *,
     instructions: str | None,
-    tools: Sequence[ToolDescriptor] | None,
+    tools: Sequence[ToolInput] | None,
     mcp_tools: Sequence[MCPServerDescriptor] | None,
-    sandbox_tools: Sequence[ToolDescriptor] | None,
-    web_request_tools: Sequence[ToolDescriptor] | None,
+    sandbox_tools: Sequence[ToolInput] | None,
+    web_request_tools: Sequence[ToolInput] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None,
     agent_name: str | None,
     resolved_id: str | None,
-    delegate_tools: Sequence[ToolDescriptor] | None,
+    delegate_tools: Sequence[ToolInput] | None,
     workflow_policy: WorkflowPlanPolicy | None,
     app_root: Path | None = None,
 ) -> tuple[list[AgentTool], str | None]:
@@ -302,7 +303,9 @@ def assemble_agent_inputs(
                 policy=workflow_policy,
             )
         )
-    resolved_tools: list[AgentTool] = list(build_maf_tools(descriptors))
+    resolved_tools: list[AgentTool] = list(
+        build_maf_tools(tuple(map(normalize_tool, descriptors)))
+    )
     servers = (
         tuple(discover_mcp_servers(root).servers.values())
         if mcp_tools is None
@@ -313,7 +316,7 @@ def assemble_agent_inputs(
 
         resolved_tools.extend(build_maf_mcp_tools(servers))
     if delegate_tools:
-        resolved_tools.extend(build_maf_tools(delegate_tools))
+        resolved_tools.extend(build_maf_tools(tuple(map(normalize_tool, delegate_tools))))
     effective = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:
         effective = (effective or "") + system_addendum
@@ -324,7 +327,7 @@ def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
     agent_instructions: str | None,
-    tools: Sequence[AgentTool | ToolDescriptor],
+    tools: Sequence[AgentTool],
     skill_paths: Sequence[Path] | None,
     agent_name: str | None,
     history_provider: HistoryProvider | None,
@@ -333,10 +336,6 @@ def _build_role_agent(
     """Build one conservatively configured MAF harness agent for any role."""
     from agent_framework import SkillsProvider, create_harness_agent
 
-    adapted_tools = [
-        build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
-        for candidate in tools
-    ]
     skills_provider = (
         SkillsProvider.from_paths(
             list(skill_paths),
@@ -355,7 +354,7 @@ def _build_role_agent(
             name=maf_agent_name,
             harness_instructions="",
             agent_instructions=agent_instructions,
-            tools=adapted_tools,
+            tools=list(tools),
             history_provider=history_provider,
             skills_provider=skills_provider,
             disable_tool_auto_approval=True,
@@ -491,7 +490,7 @@ async def _build_agent_session(
     history_agent_slug = _runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
     history_provider = _build_history_provider(history_agent_slug)
 
-    delegate_tools: list[ToolDescriptor] | None = None
+    delegate_tools: Sequence[ToolInput] | None = None
     delegate_error_tracker: _runner._DelegateErrorTracker | None = None
     if subagents:
         effective_deadline = (

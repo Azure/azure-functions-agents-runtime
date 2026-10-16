@@ -42,6 +42,86 @@ def _harness_for(kind: HarnessKind, root: Path) -> AppHarness:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_bound_runners_normalize_all_tool_sources_before_execution(
+    kind, streaming, monkeypatch, tmp_path
+):
+    def lookup(value: int) -> int:
+        return value
+
+    def sandbox_lookup(value: int) -> int:
+        return value
+
+    def web_lookup(value: int) -> int:
+        return value
+
+    backend = _maf_execution if kind is HarnessKind.MAF else _copilot_execution
+    requests = []
+
+    async def execute(harness, request, **kwargs):
+        requests.append(request)
+        return runner.AgentResult("s", "ok")
+
+    async def stream(harness, request, **kwargs):
+        requests.append(request)
+        yield "ok"
+
+    monkeypatch.setattr(backend, "run", execute)
+    if kind is HarnessKind.MAF:
+        monkeypatch.setattr(backend, "run_stream", stream)
+    selected = _agent_runner.get_agent_runner(_harness_for(kind, tmp_path))
+    inputs = [lookup, sandbox_lookup, web_lookup]
+    kwargs = {
+        "tools": [lookup],
+        "sandbox_tools": [sandbox_lookup],
+        "web_request_tools": [web_lookup],
+    }
+    if streaming:
+        assert [chunk async for chunk in selected.run_agent_stream("p", deadline=123, **kwargs)]
+    else:
+        await selected.run_agent("p", deadline=123, **kwargs)
+    [request] = requests
+    assert len(request.tools) == 3
+    for descriptor, authored in zip(request.tools, inputs, strict=True):
+        assert isinstance(descriptor, ToolDescriptor)
+        assert descriptor.func is authored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["delegate", "workflow_subagent"])
+async def test_leaf_capabilities_normalize_tools_before_backend_entry(role, monkeypatch, tmp_path):
+    def lookup(value: int) -> int:
+        return value
+
+    capabilities = AgentCapabilities.create(filtered_user_tools=(lookup,))
+    execute = AsyncMock(return_value="ok")
+    monkeypatch.setattr(_maf_execution, "run_leaf_agent_task", execute)
+    selected = _agent_runner.get_agent_runner(AppHarness(HarnessKind.MAF, tmp_path))
+    assert await selected.run_leaf_agent_task(
+        SimpleNamespace(), capabilities, "p", timeout=1, execution_role=role,
+    ) == "ok"
+    approved = execute.call_args.args[1]
+    [descriptor] = approved.filtered_user_tools
+    assert isinstance(descriptor, ToolDescriptor)
+    assert descriptor.func is lookup
+    assert approved.filtered_user_tools is capabilities.filtered_user_tools
+    assert capabilities._harness is None
+
+
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+def test_history_availability_is_owned_by_selected_backend(kind, tmp_path):
+    selected = _agent_runner.get_agent_runner(_harness_for(kind, tmp_path))
+    if kind is HarnessKind.MAF:
+        assert selected.session_history_unavailable_message is None
+    else:
+        assert selected.session_history_unavailable_message == (
+            "Copilot preview does not support transcript replay. Native state is separate "
+            "from MAF history."
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
 @pytest.mark.parametrize("skills_disabled", [False, True])
 async def test_shared_scenario_inventory_is_filtered_once_and_forwarded_unchanged(
     kind, skills_disabled, monkeypatch

@@ -300,27 +300,127 @@ def test_tool_result_text_preserves_plain_text_and_serializes_sdk_content():
 
     assert _copilot.tool_result_text("first\nsecond") == "first\nsecond"
     values = [Content("text", text="first"), Content("text", text="second")]
-    assert json.loads(_copilot.tool_result_text(values)) == [
-        value.to_dict() for value in values
-    ]
+    assert json.loads(_copilot.tool_result_text(values)) == [value.to_dict() for value in values]
 
 
 async def _invoke_native_tool(function, arguments, event_sink=None):
     from copilot.tools import ToolInvocation
 
+    from azure_functions_agents._function_tool import normalize_tool
+    from azure_functions_agents._tool_descriptor import tool_name
+
     calls = CopilotToolCalls()
-    descriptor = function
+    descriptor = normalize_tool(function)
     native_tool = _copilot._tool(descriptor, calls, event_sink)
     assert native_tool.handler is not None
     result = await native_tool.handler(
         ToolInvocation(
             session_id="native-session",
             tool_call_id="call-1",
-            tool_name=descriptor.name,
+            tool_name=tool_name(descriptor),
             arguments=arguments,
         )
     )
     return result, calls.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["function", "async_function", "callable"])
+async def test_authored_tools_receive_function_arguments_and_return_ordinary_results(kind):
+    effects = []
+
+    def lookup(value: str) -> dict[str, str]:
+        effects.append(value)
+        return {"found": value}
+
+    async def async_lookup(value: str) -> dict[str, str]:
+        await asyncio.sleep(0)
+        return lookup(value)
+
+    class Lookup:
+        name = "lookup"
+        description = "Look up a value."
+
+        def __call__(self, value: str) -> dict[str, str]:
+            return lookup(value)
+
+    candidate = lookup if kind == "function" else async_lookup if kind == "async_function" else Lookup()
+    wrapped = _copilot._tool(tool(candidate), CopilotToolCalls())
+    if kind == "callable":
+        assert wrapped.description == "Look up a value."
+    result, calls = await _invoke_native_tool(candidate, {"value": "ok"})
+    assert effects == ["ok"]
+    assert result.result_type == "success"
+    assert json.loads(result.text_result_for_llm) == {"found": "ok"}
+    assert calls[0]["result"] == result.text_result_for_llm
+    assert calls[0]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_authored_callable_failures_are_not_success_shaped():
+    def failing(value: str) -> str:
+        raise LookupError("actual authored failure")
+
+    result, calls = await _invoke_native_tool(failing, {"value": "ok"})
+
+    assert result.result_type == "failure"
+    assert calls[0]["success"] is False
+    assert calls[0]["result"] == _copilot._SAFE_CUSTOM_TOOL_FAILURE
+
+
+@pytest.mark.asyncio
+async def test_sync_callable_does_not_block_request_deadline():
+    import threading
+
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking() -> str:
+        try:
+            release.wait(timeout=2)
+            return "done"
+        finally:
+            finished.set()
+
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(_invoke_native_tool(blocking, {}), timeout=0.1)
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["object", "noncallable_with_handler"])
+async def test_incompatible_authored_input_surfaces_python_error_before_acquisition(
+    preview, monkeypatch, kind
+):
+    import copilot
+    from copilot.tools import Tool, ToolResult
+
+    from azure_functions_agents import runner
+
+    factory = Mock(side_effect=AssertionError("Native client must not start"))
+    credential = Mock(side_effect=AssertionError("Credentials must not be acquired"))
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    monkeypatch.setattr(_runtime, "build_async_credential", credential)
+    candidate = (
+        object()
+        if kind == "object"
+        else Tool(
+            name="lookup",
+            description="Lookup",
+            handler=Mock(return_value=ToolResult(text_result_for_llm="not invoked")),
+        )
+    )
+
+    with pytest.raises(TypeError, match="callable"):
+        await runner.run_agent("prompt", tools=(candidate,), mcp_tools=(), _harness=preview)
+
+    factory.assert_not_called()
+    credential.assert_not_called()
+    assert not _lifecycle._SHUTDOWN_CALLBACKS
+    assert not copilot_state(preview).storage_root.exists()
 
 
 @pytest.mark.asyncio
@@ -1277,6 +1377,28 @@ async def test_native_custom_tools_preserve_json_results_and_fresh_parameter_sch
     assert result.result_type == "success"
     assert result.text_result_for_llm == '{"value": "ok", "items": [true, null]}'
     assert calls[0]["result"] == result.text_result_for_llm
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_type", ["success", "failure", "denied"])
+async def test_custom_tool_results_follow_ordinary_conversion(result_type):
+    from copilot.tools import ToolResult
+
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+
+    native_result = ToolResult(text_result_for_llm="returned value", result_type=result_type)
+    descriptor = ToolDescriptor.create(
+        name="result",
+        description="Returns a value.",
+        func=lambda: native_result,
+    )
+    result, calls = await _invoke_native_tool(descriptor, {})
+
+    assert result is not native_result
+    assert result.result_type == "success"
+    assert result.text_result_for_llm == _copilot.tool_result_text(native_result)
+    assert calls[0]["result"] == result.text_result_for_llm
+    assert calls[0]["success"] is True
 
 
 @pytest.mark.asyncio

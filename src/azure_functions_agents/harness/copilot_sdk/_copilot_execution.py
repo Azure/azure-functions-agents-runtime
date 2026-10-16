@@ -122,6 +122,7 @@ class _RequestTokenSource:
         self._error = None
         return error
 
+
 @dataclass(frozen=True)
 class _ExecutionLifecycle:
     copilot_id: str
@@ -179,7 +180,11 @@ class _ExecutionLifecycle:
         return CopilotPreviewError("Copilot request exceeded its deadline.")
 
 
-def _tool(function: ToolDescriptor, calls: CopilotToolCalls, event_sink: _EventSink | None = None) -> Tool:
+def _tool(
+    descriptor: ToolDescriptor,
+    calls: CopilotToolCalls,
+    event_sink: _EventSink | None = None,
+) -> Tool:
     from copilot.tools import Tool, ToolResult
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
@@ -188,7 +193,7 @@ def _tool(function: ToolDescriptor, calls: CopilotToolCalls, event_sink: _EventS
         _emit_event(event_sink, start_event)
         with calls.custom_span(invocation, claimed=claimed) as span:
             try:
-                result = await function.invoke(
+                result = await descriptor.invoke(
                     arguments=invocation.arguments,
                     tool_call_id=invocation.tool_call_id,
                 )
@@ -197,7 +202,7 @@ def _tool(function: ToolDescriptor, calls: CopilotToolCalls, event_sink: _EventS
                 span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.CANCELLED)
                 raise
             except Exception as exc:
-                logger.warning("Copilot custom tool failed: tool=%s", function.name)
+                logger.warning("Copilot custom tool failed: tool=%s", descriptor.name)
                 text = _SAFE_CUSTOM_TOOL_FAILURE
                 span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.ERROR)
                 span.record_exception(
@@ -214,9 +219,9 @@ def _tool(function: ToolDescriptor, calls: CopilotToolCalls, event_sink: _EventS
             return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
-        name=function.name,
-        description=function.description,
-        parameters=function.parameters(),
+        name=descriptor.name,
+        description=descriptor.description,
+        parameters=descriptor.parameters(),
         handler=invoke,
         skip_permission=True,
         defer="never",
