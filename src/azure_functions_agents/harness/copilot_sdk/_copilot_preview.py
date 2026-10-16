@@ -9,7 +9,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ..._function_tool import normalize_tool
+from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...registration.capabilities import validate_runtime_tool_name_collisions
@@ -99,20 +100,21 @@ def validate_configuration(configuration: AgentConfiguration) -> None:
 
 
 def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
-    """Preserve existing schemas and invocation without silently dropping policy."""
-    prepared = describe_tools(tools)
+    """Check normalized tools against Copilot's approval and naming limits."""
+    prepared = tuple(map(normalize_tool, tools))
     names: set[str] = set()
     for function in prepared:
-        if function.policy.approval_mode != "never_require":
+        if function.policy.approval_mode != ApprovalMode.NEVER_REQUIRE:
             raise UnsupportedCapabilityError(
                 "Copilot preview supports ordinary runtime @tool declarations only when "
-                'approval_mode="never_require".'
+                f'approval_mode="{ApprovalMode.NEVER_REQUIRE.value}".'
             )
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", function.name):
+        name = function.name
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", name):
             raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")
-        if function.name in names:
+        if name in names:
             raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
-        names.add(function.name)
+        names.add(name)
     return prepared
 
 

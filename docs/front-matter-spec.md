@@ -776,13 +776,21 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools may be runtime `@tool` descriptors or local public
-functions in `tools/*.py`. Discovery selects one tool per module: runtime
-descriptors first, then the first local public function. It does not invoke
-authored functions or expose imported functions, classes, and unrelated
-globals. The convenience `@tool` accepts `name`, `description`, `schema`, and
-`approval_mode`; extra keyword arguments are warned and ignored. Runtime
-schemas and capability authorization still apply.
+Normal custom tools use the runtime's `@tool` or Python callables in
+`tools/*.py`. Discovery selects one tool per module:
+runtime `@tool` descriptors first, then named tool objects with public
+`name`/`description`, then the first local public function. Classes, imported
+functions, unrelated globals, and workflow-only declarations are not exposed as
+fallback tools, and discovery never invokes authored functions. Runtime `@tool`
+accepts only `name`, `description`, `schema`, and `approval_mode`; unexpected
+keyword arguments raise the normal Python `TypeError`. Authored functions and
+callable instances become runtime tool descriptors before either harness adapts
+them. Both use the same tool names, descriptions, and input schemas.
+The decorator accepts `"never_require"` and `"always_require"` approval strings
+and normalizes them to the runtime's `azure_functions_agents.ApprovalMode`
+enum; you may also pass `ApprovalMode.NEVER_REQUIRE` or
+`ApprovalMode.ALWAYS_REQUIRE` directly. Other values raise `ValueError` during
+authoring.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. Use `_`-prefixed helpers for

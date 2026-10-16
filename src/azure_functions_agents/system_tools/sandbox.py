@@ -15,7 +15,7 @@ from azure.identity.aio import get_bearer_token_provider
 from pydantic import BaseModel, Field
 
 from .._credential import build_async_credential, build_async_credential_with_client_id
-from .._function_tool import tool
+from .._function_tool import normalize_tool, tool
 from .._logger import logger
 from .._observability import (
     ATTR_OPERATION_ID,
@@ -26,7 +26,7 @@ from .._observability import (
     start_span,
 )
 from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
-from .._tool_descriptor import ToolDescriptor, describe_tools
+from .._tool_descriptor import ToolDescriptor
 from ..config import ResolvedAgent
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
 from ._sandbox_endpoint import SandboxEndpointStatus, resolve_sandbox_endpoint
@@ -445,11 +445,10 @@ def build_sandbox_tools_for_session(
     if resolved.tools_disabled or resolved.sandbox_config is None:
         return None
     fallback_session_id = session_id or uuid.uuid4().hex
-    return list(
-        describe_tools(
-            create_sandbox_tools(
-                resolved.sandbox_config.model_dump(),
-                fallback_session_id=fallback_session_id,
-            )
+    return [
+        normalize_tool(item)
+        for item in create_sandbox_tools(
+            resolved.sandbox_config.model_dump(),
+            fallback_session_id=fallback_session_id,
         )
-    )
+    ]

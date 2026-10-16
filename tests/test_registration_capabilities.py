@@ -66,8 +66,13 @@ def _named_tool(name: str) -> ToolDescriptor:
 
 def _mcp_server(name: str) -> MCPServerDescriptor:
     return MCPServerDescriptor(
-        name=name, url="https://fixture.invalid/mcp", transport="streamable-http",
-        headers=(), tools=None, auth_scope=None, client_id=None,
+        name=name,
+        url="https://fixture.invalid/mcp",
+        transport="streamable-http",
+        headers=(),
+        tools=None,
+        auth_scope=None,
+        client_id=None,
     )
 
 
@@ -110,6 +115,7 @@ def test_filtering_retains_same_name_candidates_for_sdk_selection(tmp_path: Path
     assert excluded.skills == ()
     assert excluded.skill_catalog == candidates
 
+
 def test_build_capabilities_skips_unknown_enabled_skill_names(tmp_path: Path) -> None:
     skill_dir_a = tmp_path / "alpha"
     skill_dir_a.mkdir()
@@ -124,9 +130,7 @@ def test_build_capabilities_skips_unknown_enabled_skill_names(tmp_path: Path) ->
 
 def test_skill_metadata_is_filtered_without_discarding_excluded_ownership(tmp_path: Path) -> None:
     approved = SkillDescriptor(name="parent", path=tmp_path / "parent")
-    excluded = SkillDescriptor(
-        name="child", path=approved.path / "child",
-    )
+    excluded = SkillDescriptor(name="child", path=approved.path / "child")
     capabilities = build_capabilities(
         _resolved(enabled_skills_names=["parent"]),
         discovered_user_tools=[],
@@ -168,16 +172,12 @@ def test_with_runtime_skill_paths_returns_direct_role_copy(tmp_path: Path) -> No
     runtime_skill = tmp_path / "runtime"
     runtime_skill.mkdir()
     (runtime_skill / "SKILL.md").write_text(
-        "---\nname: runtime\ndescription: Runtime guidance\n---\n", encoding="utf-8"
+        "---\nname: runtime\ndescription: Runtime guidance\n---\n",
+        encoding="utf-8",
     )
-    capabilities = AgentCapabilities.create(
-        skills=(SkillDescriptor(name="project", path=project_skill),)
-    )
+    capabilities = AgentCapabilities.create(skills=(SkillDescriptor(name="project", path=project_skill),))
 
-    direct_capabilities = capabilities_module.with_runtime_skill_paths(
-        capabilities,
-        [runtime_skill],
-    )
+    direct_capabilities = capabilities_module.with_runtime_skill_paths(capabilities, [runtime_skill])
 
     assert direct_capabilities is not capabilities
     assert direct_capabilities.enabled_skill_paths == (project_skill, runtime_skill)
@@ -197,20 +197,45 @@ def test_build_capabilities_filters_user_tools_by_exclude_name() -> None:
     assert [t.name for t in capabilities.filtered_user_tools] == ["keep"]
 
 
-def test_filtered_tools_keep_name_filters_and_delegate_collision_checks() -> None:
-    authored = _named_tool("delegate_leaf")
+@pytest.mark.parametrize("kind", ["descriptor", "callable", "function"])
+def test_authored_tools_keep_name_filters_and_delegate_collision_checks(kind):
+    from azure_functions_agents._function_tool import normalize_tool
+
+    def delegate_leaf(value: str) -> str:
+        return value
+
+    class Lookup:
+        name = "delegate_leaf"
+        description = "Delegate lookup."
+
+        def __call__(self, value: str) -> str:
+            return value
+
+    authored = (
+        normalize_tool(delegate_leaf)
+        if kind == "descriptor"
+        else Lookup()
+        if kind == "callable"
+        else delegate_leaf
+    )
     resolved = _resolved(subagents=[SubagentRef(agent="leaf")])
     capabilities = build_capabilities(
-        resolved, discovered_user_tools=[authored],
-        discovered_mcp_tools={}, discovered_skills={},
+        resolved,
+        discovered_user_tools=[authored],
+        discovered_mcp_tools={},
+        discovered_skills={},
     )
-    assert capabilities.filtered_user_tools == (authored,)
+    [descriptor] = capabilities.filtered_user_tools
+    assert descriptor.name == "delegate_leaf"
+    assert descriptor.func is (authored.func if kind == "descriptor" else authored)
     with pytest.raises(ValueError, match="collides"):
         validate_subagent_tool_names(resolved, capabilities)
 
     filtered = build_capabilities(
-        _resolved(exclude=["delegate_leaf"]), discovered_user_tools=[authored],
-        discovered_mcp_tools={}, discovered_skills={},
+        _resolved(exclude=["delegate_leaf"]),
+        discovered_user_tools=[authored],
+        discovered_mcp_tools={},
+        discovered_skills={},
     )
     assert filtered.filtered_user_tools == ()
 
@@ -259,14 +284,6 @@ def test_agent_capabilities_defaults_are_immutable() -> None:
     assert a.enabled_skill_paths == b.enabled_skill_paths == ()
     with pytest.raises(FrozenInstanceError):
         a.enabled_skill_paths = (Path("x"),)
-
-
-# ---------------------------------------------------------------------------
-# web_request tool channel — build-once-at-registration, default-on wiring.
-# The factory import is lazy (``import_module`` inside ``capabilities.py``),
-# so these tests monkeypatch that lazy import to avoid building a real tool
-# and to assert it is skipped entirely when suppressed.
-# ---------------------------------------------------------------------------
 
 
 def test_build_capabilities_default_web_request_config_builds_one_tool(
@@ -331,12 +348,6 @@ def test_build_capabilities_tools_disabled_suppresses_web_request_tool_and_skips
     )
 
     assert capabilities.web_request_tools == ()
-
-
-# ---------------------------------------------------------------------------
-# existing_tool_names / validate_subagent_tool_names — delegate_<slug>
-# collision fail-fast (FRD 0007 §4.9, §5 Decision log).
-# ---------------------------------------------------------------------------
 
 
 def test_existing_tool_names_aggregates_all_categories() -> None:
@@ -404,7 +415,7 @@ def test_validate_subagent_tool_names_noop_when_no_subagents() -> None:
     resolved = _resolved(subagents=[])
     capabilities = AgentCapabilities(filtered_user_tools=[_named_tool("delegate_billing")])
 
-    validate_subagent_tool_names(resolved, capabilities)  # must not raise
+    validate_subagent_tool_names(resolved, capabilities)
 
 
 @pytest.mark.parametrize(
@@ -448,7 +459,7 @@ def test_validate_subagent_tool_names_passes_when_no_collision() -> None:
     resolved = _resolved(subagents=[SubagentRef(agent="billing")])
     capabilities = AgentCapabilities(filtered_user_tools=[_named_tool("unrelated_tool")])
 
-    validate_subagent_tool_names(resolved, capabilities)  # must not raise
+    validate_subagent_tool_names(resolved, capabilities)
 
 
 @pytest.mark.parametrize(

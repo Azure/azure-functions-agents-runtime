@@ -32,6 +32,7 @@ from agent_framework import (
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
@@ -64,11 +65,10 @@ def test_agent_result_preserves_existing_positional_argument_order() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
-async def test_both_bound_runners_ignore_unsupported_inputs_without_eager_invocation(
-    kind, monkeypatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_both_bound_runners_normalize_authored_callables_before_execution(
+    kind, streaming, monkeypatch,
 ):
-    from agent_framework import FunctionTool
-
     from azure_functions_agents.harness.copilot_sdk import _copilot_execution
 
     calls = []
@@ -77,26 +77,79 @@ async def test_both_bound_runners_ignore_unsupported_inputs_without_eager_invoca
         calls.append("executed")
         return "authored"
 
+    async def asynchronous(value: int = 3) -> int:
+        calls.append("async")
+        return value
+
+    class Lookup:
+        name = "lookup"
+        description = "Look up a value."
+
+        def __call__(self, value: int) -> int:
+            calls.append("callable")
+            return value
+
+    lookup = Lookup()
+
     @tool
     def authored() -> str:
         return "allowed"
 
-    raw = FunctionTool(name="private-raw-name", func=undecorated, max_invocations=1)
     harness = _harness_for(kind)
     invoke = AsyncMock(return_value=runner.AgentResult("session", "captured"))
     backend = maf if kind is HarnessKind.MAF else _copilot_execution
     monkeypatch.setattr(backend, "run", invoke)
-    result = await runner.run_agent(
-        "fixture", tools=[raw, undecorated, authored], mcp_tools=[],
-        sandbox_tools=[raw, undecorated], web_request_tools=[raw, undecorated],
-        _harness=harness,
-    )
-    assert result.content == "captured"
-    request = invoke.call_args.args[1]
-    assert request.tools == (authored,)
+    requests = []
+
+    async def stream(_harness, request, **kwargs):
+        requests.append(request)
+        yield "captured"
+
+    if kind is HarnessKind.MAF:
+        monkeypatch.setattr(backend, "run_stream", stream)
+    inputs = [undecorated, asynchronous, lookup, authored]
+    if streaming:
+        chunks = [
+            chunk async for chunk in runner.run_agent_stream(
+                "fixture", tools=inputs, mcp_tools=[], _harness=harness,
+            )
+        ]
+        assert chunks
+        request = requests[0] if kind is HarnessKind.MAF else invoke.call_args.args[1]
+    else:
+        result = await runner.run_agent(
+            "fixture", tools=inputs, mcp_tools=[], _harness=harness,
+        )
+        assert result.content == "captured"
+        request = invoke.call_args.args[1]
+    assert all(isinstance(candidate, ToolDescriptor) for candidate in request.tools)
+    assert [candidate.func for candidate in request.tools] == [
+        undecorated, asynchronous, lookup, authored.func,
+    ]
+    assert request.tools[-1] is authored
+    assert request.tools[2].name == "lookup"
+    assert request.tools[2].description == "Look up a value."
+    assert request.tools[2].parameters()["properties"]["value"]["type"] == "integer"
     assert calls == []
-    assert "Ignoring unsupported custom tool" in caplog.text
-    assert "private-raw-name" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+async def test_incompatible_authored_callable_fails_before_harness_execution(kind, monkeypatch):
+    from agent_framework import FunctionTool
+
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution
+
+    candidate = FunctionTool(name="lookup", func=lambda value: value)
+    backend = maf if kind is HarnessKind.MAF else _copilot_execution
+    invoke = AsyncMock()
+    monkeypatch.setattr(backend, "run", invoke)
+    with pytest.raises(ValueError, match="no signature found"):
+        await runner.run_agent(
+            "p", tools=[candidate], mcp_tools=[],
+            _harness=_harness_for(kind),
+        )
+    invoke.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -181,6 +234,47 @@ async def test_copilot_backend_rejects_authored_approval_before_effects(monkeypa
             "fixture", tools=[bounded], mcp_tools=[], _harness=harness,
         )
     invoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_events_normalizes_callable_host_tools(monkeypatch):
+    requests = []
+
+    async def stream(_harness, request, **kwargs):
+        requests.append(request)
+        yield 'data: {"type":"done"}\n\n'
+
+    monkeypatch.setattr(maf, "run_stream", stream)
+
+    def user_tool(value: int) -> int:
+        return value
+
+    def sandbox_tool(code: str) -> str:
+        return code
+
+    def web_tool(url: str) -> str:
+        return url
+
+    events = [
+        event
+        async for event in runner.run_agent_events(
+            "fixture",
+            tools=[user_tool],
+            sandbox_tools=[sandbox_tool],
+            web_request_tools=[web_tool],
+            mcp_tools=[],
+            _harness=_harness_for(HarnessKind.MAF),
+        )
+    ]
+
+    assert [event.kind.value for event in events] == ["done"]
+    request = requests[0]
+    assert all(isinstance(candidate, ToolDescriptor) for candidate in request.tools)
+    assert [candidate.name for candidate in request.tools] == [
+        "user_tool",
+        "sandbox_tool",
+        "web_tool",
+    ]
 
 
 def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(monkeypatch: Any) -> None:
