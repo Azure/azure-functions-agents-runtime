@@ -169,6 +169,47 @@ async def test_copilot_backend_rejects_authored_approval_before_effects(monkeypa
     invoke.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_run_agent_events_normalizes_callable_host_tools(monkeypatch):
+    requests = []
+
+    async def stream(_harness, request, **kwargs):
+        requests.append(request)
+        yield 'data: {"type":"done"}\n\n'
+
+    monkeypatch.setattr(maf, "run_stream", stream)
+
+    def user_tool(value: int) -> int:
+        return value
+
+    def sandbox_tool(code: str) -> str:
+        return code
+
+    def web_tool(url: str) -> str:
+        return url
+
+    events = [
+        event
+        async for event in runner.run_agent_events(
+            "fixture",
+            tools=[user_tool],
+            sandbox_tools=[sandbox_tool],
+            web_request_tools=[web_tool],
+            mcp_tools=[],
+            _harness=_harness_for(HarnessKind.MAF),
+        )
+    ]
+
+    assert [event.kind.value for event in events] == ["done"]
+    request = requests[0]
+    assert all(isinstance(candidate, ToolDescriptor) for candidate in request.tools)
+    assert [candidate.name for candidate in request.tools] == [
+        "user_tool",
+        "sandbox_tool",
+        "web_tool",
+    ]
+
+
 def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(monkeypatch: Any) -> None:
     messages = [
         Message("assistant", [

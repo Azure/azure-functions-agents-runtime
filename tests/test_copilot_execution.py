@@ -307,10 +307,11 @@ def test_tool_result_text_preserves_plain_text_and_serializes_sdk_content():
 async def _invoke_native_tool(function, arguments, event_sink=None):
     from copilot.tools import ToolInvocation
 
+    from azure_functions_agents._function_tool import normalize_tool
     from azure_functions_agents._tool_descriptor import tool_name
 
     calls = CopilotToolCalls()
-    descriptor = function
+    descriptor = normalize_tool(function)
     native_tool = _copilot._tool(descriptor, calls, event_sink)
     assert native_tool.handler is not None
     result = await native_tool.handler(
@@ -345,7 +346,7 @@ async def test_authored_tools_receive_function_arguments_and_return_ordinary_res
             return lookup(value)
 
     candidate = lookup if kind == "function" else async_lookup if kind == "async_function" else Lookup()
-    wrapped = _copilot._tool(candidate, CopilotToolCalls())
+    wrapped = _copilot._tool(tool(candidate), CopilotToolCalls())
     if kind == "callable":
         assert wrapped.description == "Look up a value."
     result, calls = await _invoke_native_tool(candidate, {"value": "ok"})

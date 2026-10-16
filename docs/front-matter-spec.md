@@ -761,8 +761,10 @@ keyword arguments raise the normal Python `TypeError`. Authored functions and
 callable instances become runtime tool descriptors before either harness adapts
 them. Both use the same tool names, descriptions, and input schemas.
 The decorator accepts `"never_require"` and `"always_require"` approval strings
-and normalizes them to the runtime's `ApprovalMode` enum; other values raise
-`ValueError` during authoring.
+and normalizes them to the runtime's `azure_functions_agents.ApprovalMode`
+enum; you may also pass `ApprovalMode.NEVER_REQUIRE` or
+`ApprovalMode.ALWAYS_REQUIRE` directly. Other values raise `ValueError` during
+authoring.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. Use `_`-prefixed helpers for

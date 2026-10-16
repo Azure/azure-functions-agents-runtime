@@ -250,6 +250,11 @@ def test_discovery_does_not_expose_unrelated_globals_or_imported_functions(tmp_p
         unrelated = date(2026, 10, 14)
         path = Path("not-a-tool")
         values = {"name": "not-a-tool"}
+        class Metadata:
+            name = "metadata"
+            description = "Not callable"
+
+        metadata = Metadata()
 
         def local(value: str) -> str:
             return value
@@ -301,6 +306,28 @@ def test_runtime_and_callable_authoring_scenario(copilot, monkeypatch) -> None:
         "first_local",
     ]
     assert create_function_app(root).get_functions()
+
+
+def test_metadata_shaped_noncallable_does_not_suppress_local_fallback(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "metadata_then_tool",
+        """
+        class Metadata:
+            name = "metadata"
+            description = "Not callable"
+
+        metadata = Metadata()
+
+        def valid_tool(value: str) -> str:
+            return value
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert discovered.failed_loads == []
+    assert _tool_names(discovered.user_tools) == ["valid_tool"]
 
 
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:

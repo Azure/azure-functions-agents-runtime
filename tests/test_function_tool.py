@@ -225,6 +225,12 @@ def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> Non
         prepare_tools((descriptor,))
 
 
+def test_root_package_exports_approval_mode_enum() -> None:
+    import azure_functions_agents as runtime
+
+    assert runtime.ApprovalMode.NEVER_REQUIRE.value == "never_require"
+
+
 def test_workflow_tool_rejects_unexpected_keyword_arguments_at_authoring() -> None:
     with pytest.raises(TypeError, match=r"unexpected keyword argument 'max_invocations'"):
         workflow_tool(max_invocations=1)

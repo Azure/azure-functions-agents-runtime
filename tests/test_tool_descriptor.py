@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 from dataclasses import FrozenInstanceError
 from datetime import date
 from enum import Enum
@@ -73,6 +74,26 @@ async def test_callable_instance_resolves_postponed_module_annotations():
     descriptor = tool(Lookup())
     assert descriptor.parameters()["$defs"]["_Choice"]["enum"] == ["first", "second"]
     assert await descriptor.invoke(arguments={"choice": "first"}) == "first"
+
+
+@pytest.mark.asyncio
+async def test_callable_wrapper_preserves_wrapped_postponed_annotations():
+    def authored(choice: _Choice) -> str:
+        return choice.value
+
+    class WrappedLookup:
+        name = "lookup"
+
+        def __call__(self, *args, **kwargs) -> str:
+            return authored(*args, **kwargs)
+
+    wrapped = WrappedLookup()
+    functools.update_wrapper(wrapped, authored)
+
+    descriptor = tool(wrapped)
+
+    assert descriptor.parameters()["$defs"]["_Choice"]["enum"] == ["first", "second"]
+    assert await descriptor.invoke(arguments={"choice": "second"}) == "second"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,6 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager, context
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
-from ..._function_tool import normalize_tool
 from ..._logger import logger
 from ..._observability import (
     ATTR_TOOL_OUTCOME,
@@ -19,7 +18,7 @@ from ..._observability import (
     current_span,
 )
 from ..._skill_policy import SkillPolicy
-from ..._tool_descriptor import ToolInput
+from ..._tool_descriptor import ToolDescriptor
 from .. import _harness_execution
 from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
 from .._provider_config import InferenceTarget
@@ -179,13 +178,11 @@ class _ExecutionLifecycle:
 
 
 def _tool(
-    function: ToolInput,
+    descriptor: ToolDescriptor,
     calls: CopilotToolCalls,
     event_sink: _EventSink | None = None,
 ) -> Tool:
     from copilot.tools import Tool, ToolResult
-
-    descriptor = normalize_tool(function)
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
         claimed = calls.start_custom(invocation)

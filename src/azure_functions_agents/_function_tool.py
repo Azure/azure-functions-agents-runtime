@@ -34,6 +34,12 @@ _WORKFLOW_TOOL_METADATA_ATTR = "__azure_functions_agents_workflow_tool__"
 _WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
 
 
+def _normalize_approval_mode(value: ApprovalMode | str | None) -> ApprovalMode:
+    if value is None:
+        return ApprovalMode.NEVER_REQUIRE
+    return ApprovalMode(value)
+
+
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
     if isinstance(target, ToolDescriptor):
         return target.workflow_metadata
@@ -141,9 +147,7 @@ def tool(
             func=wrapped,
             input_model=input_model,
             policy=ToolPolicy(
-                approval_mode=(
-                    ApprovalMode.NEVER_REQUIRE if approval_mode is None else ApprovalMode(approval_mode)
-                ),
+                approval_mode=_normalize_approval_mode(approval_mode),
             ),
             workflow_metadata=get_workflow_tool_metadata(inner),
         )

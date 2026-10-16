@@ -22,7 +22,6 @@ class ApprovalMode(StrEnum):
 
 
 type ToolCallable = Callable[..., Any]
-type ToolInput = object
 
 _JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
     "string": str,
@@ -116,14 +115,24 @@ def _parameter_annotation(annotation: Any) -> Any:
 
 
 def _function_hints(func: ToolCallable) -> dict[str, Any]:
-    target = func if inspect.isroutine(func) or inspect.isclass(func) else type(func).__call__
+    targets: list[object] = []
     try:
-        return get_type_hints(target, include_extras=True)
-    except (NameError, TypeError):
-        return {
-            parameter.name: parameter.annotation
-            for parameter in inspect.signature(func).parameters.values()
-        }
+        targets.append(inspect.unwrap(func))
+    except Exception:
+        targets.append(func)
+    if targets[0] is not func:
+        targets.append(func)
+    if not inspect.isroutine(func) and not inspect.isclass(func):
+        targets.append(type(func).__call__)
+    for target in targets:
+        try:
+            return get_type_hints(target, include_extras=True)
+        except (NameError, TypeError):
+            continue
+    return {
+        parameter.name: parameter.annotation
+        for parameter in inspect.signature(func).parameters.values()
+    }
 
 
 def _input_model(name: str, func: ToolCallable) -> type[BaseModel]:
@@ -219,7 +228,10 @@ class ToolDescriptor:
         return self
 
 
-def tool_name(candidate: ToolInput) -> str:
+type ToolInput = ToolDescriptor | ToolCallable
+
+
+def tool_name(candidate: object) -> str:
     """Read public tool metadata without interpreting the implementation."""
     name = getattr(candidate, "name", None) or getattr(candidate, "__name__", None)
     if name is None and callable(candidate):
@@ -227,7 +239,7 @@ def tool_name(candidate: ToolInput) -> str:
     return str(name or "")
 
 
-def tool_description(candidate: ToolInput) -> str:
+def tool_description(candidate: object) -> str:
     description = getattr(candidate, "description", None)
     return (
         description if isinstance(description, str) and description else candidate.__doc__ or ""

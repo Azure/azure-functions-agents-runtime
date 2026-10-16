@@ -188,7 +188,9 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
             if picked is None:
                 for _name, obj in members:
                     if (
-                        isinstance(getattr(obj, "name", None), str)
+                        callable(obj)
+                        and not inspect.isclass(obj)
+                        and isinstance(getattr(obj, "name", None), str)
                         and isinstance(getattr(obj, "description", None), str)
                         and not _is_workflow_marked(obj)
                     ):
