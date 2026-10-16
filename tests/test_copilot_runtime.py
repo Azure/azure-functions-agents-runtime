@@ -18,7 +18,7 @@ from azure.functions.timer import TimerRequest
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
-from azure_functions_agents._tool_descriptor import ToolDescriptor
+from azure_functions_agents._tool_descriptor import ApprovalMode, ToolDescriptor
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.env import EnvVar
@@ -443,7 +443,7 @@ def test_sandbox_name_collision_fails_during_registration(preview):
 
 def test_maf_keeps_authored_approval_that_copilot_cannot_adapt(tmp_path):
     resolved, capabilities = _sample()
-    descriptor = tool(name="bounded", approval_mode="always_require")(lambda: "ok")
+    descriptor = tool(name="bounded", approval_mode=ApprovalMode.ALWAYS_REQUIRE)(lambda: "ok")
     capabilities = replace(capabilities, filtered_user_tools=(descriptor,))
 
     _harness.validate_agent(AppHarness(HarnessKind.MAF, tmp_path), resolved, capabilities)
@@ -477,7 +477,7 @@ def test_standalone_output_limit_reaches_request_boundary(preview, monkeypatch):
     assert request.max_output_tokens == 256
 
 
-@pytest.mark.parametrize("policy", [{"approval_mode": "always_require"}])
+@pytest.mark.parametrize("policy", [{"approval_mode": ApprovalMode.ALWAYS_REQUIRE}])
 def test_unsupported_tool_policies_are_not_silently_lost(policy):
     descriptor = tool(name="bounded", **policy)(lambda value: value)
     with pytest.raises(UnsupportedCapabilityError, match="approval"):

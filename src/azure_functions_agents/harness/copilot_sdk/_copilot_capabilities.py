@@ -7,9 +7,10 @@ import re
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
+from ..._function_tool import normalize_tool
 from ..._logger import logger
 from ..._mcp_auth import materialize_mcp_headers
-from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput, describe_tools
+from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput
 from ...config.env import EnvVar
 from ...config.schema import ResolvedAgent
 from ...workflows.tools import build_workflow_tools
@@ -42,10 +43,10 @@ def reject_unsupported(**capabilities: bool) -> None:
 
 def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     """Preserve existing schemas and invocation without silently dropping policy."""
-    prepared = describe_tools(tools)
+    prepared = tuple(map(normalize_tool, tools))
     names: set[str] = set()
     for function in prepared:
-        if function.policy.approval_mode is not ApprovalMode.NEVER_REQUIRE:
+        if function.policy.approval_mode != ApprovalMode.NEVER_REQUIRE:
             raise UnsupportedCapabilityError(
                 "Copilot preview supports ordinary runtime @tool declarations only when "
                 f'approval_mode="{ApprovalMode.NEVER_REQUIRE.value}".'
