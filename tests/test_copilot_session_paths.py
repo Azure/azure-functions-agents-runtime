@@ -64,3 +64,56 @@ def test_registry_contains_only_the_two_sdk_conventions():
     assert set(paths._PATH_POLICIES) == {"windows", "posix"}
     assert paths.select_session_path_policy("windows") is paths.select_session_path_policy("windows")
     assert paths.select_session_path_policy("posix") is paths.select_session_path_policy("posix")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (r"Q:\session-state", "/session-state"),
+        (r"q:\SESSION-STATE\temp", "/session-state/temp"),
+        ("Q:/session-state/temp/Mixed.Txt", "/session-state/temp/Mixed.Txt"),
+        (r"Q:\session-state\temp\.\file", "/session-state/temp/file"),
+    ],
+)
+def test_windows_state_paths_use_only_the_current_workspace_drive(path, expected):
+    assert paths.select_session_path_policy("windows").normalize(
+        path, r"Q:\worker\workspace",
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "workspace"),
+    [
+        (r"C:\session-state\temp", r"Q:\worker\workspace"),
+        (r"Q:\session-statex\temp", r"Q:\worker\workspace"),
+        (r"Q:\other\temp", r"Q:\worker\workspace"),
+        (r"Q:session-state\temp", r"Q:\worker\workspace"),
+        (r"Q:\session-state\..\workspace\file", r"Q:\worker\workspace"),
+        (r"Q:\session-state\temp\NUL.txt", r"Q:\worker\workspace"),
+        (r"Q:\session-state\temp\file:stream", r"Q:\worker\workspace"),
+        (r"Q:\session-state\temp\trailing.", r"Q:\worker\workspace"),
+        (r"\\server\share\session-state\temp", r"\\server\share\workspace"),
+        (r"Q:\session-state\temp", ""),
+        (r"Q:\session-state\temp", "/workspace"),
+        (r"Q:\session-state\temp", r"Q:worker\workspace"),
+        ("Q:\\session-state\\temp\\file\x00", r"Q:\worker\workspace"),
+    ],
+)
+def test_windows_state_aliases_keep_existing_path_denials(path, workspace):
+    with pytest.raises(OSError) as error:
+        paths.select_session_path_policy("windows").normalize(path, workspace)
+    assert error.value.errno == (errno.EINVAL if "\x00" in path else errno.EACCES)
+
+
+def test_windows_state_alias_does_not_replace_the_exact_physical_workspace():
+    assert paths.select_session_path_policy("windows").normalize(
+        r"Q:\session-state\temp", r"Q:\session-state",
+    ) == "/workspace/temp"
+
+
+def test_posix_policy_does_not_accept_windows_state_alias():
+    with pytest.raises(OSError) as error:
+        paths.select_session_path_policy("posix").normalize(
+            r"Q:\session-state\temp", r"Q:\worker\workspace",
+        )
+    assert error.value.errno == errno.EACCES

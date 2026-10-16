@@ -477,9 +477,9 @@ requires-dist = [
     { name = "azure-monitor-opentelemetry", marker = "extra == 'monitor'", specifier = "==1.8.8" },
     { name = "azure-storage-blob", specifier = ">=12.28.0,<13" },
     { name = "azure-storage-queue", marker = "extra == 'dev'", specifier = "==12.13.*,<13" },
+    { name = "azurefunctions-agents-runtime", extras = ["copilot"], marker = "extra == 'dev'" },
     { name = "azurefunctions-extensions-http-fastapi", specifier = ">=1.0.1,<2" },
-    { name = "github-copilot-sdk", marker = "extra == 'copilot'", specifier = "==1.0.14" },
-    { name = "github-copilot-sdk", marker = "extra == 'dev'", specifier = "==1.0.14" },
+    { name = "github-copilot-sdk", marker = "extra == 'copilot'", specifier = "==1.0.16" },
     { name = "jmespath", marker = "extra == 'dev'", specifier = ">=1.0.1,<2" },
     { name = "jsonschema", specifier = ">=4.26.0,<5" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
@@ -929,7 +929,7 @@ wheels = [
 
 [[package]]
 name = "github-copilot-sdk"
-version = "1.0.14"
+version = "1.0.16"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
 dependencies = [
     { name = "httpx" },
@@ -937,7 +937,7 @@ dependencies = [
     { name = "python-dateutil" },
 ]
 wheels = [
-    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/github-copilot-sdk/1.0.14/github_copilot_sdk-1.0.14-py3-none-any.whl", hash = "sha256:9f4538cec7295f24507c650d794307396458a51f280a0fbbcd840da177109050", size = 614607, upload-time = "2026-09-23T05:11:34Z" },
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/github-copilot-sdk/1.0.16/github_copilot_sdk-1.0.16-py3-none-any.whl", hash = "sha256:fcbc9e2673d5cf3da40c4095fd841d39f04ff2c9b09dfc970b3fb5f962f47a0f", size = 722199, upload-time = "2026-10-07T21:52:36Z" },
 ]
 
 [[package]]
