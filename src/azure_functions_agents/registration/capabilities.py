@@ -223,7 +223,7 @@ def validate_runtime_tool_name_collisions(
     workflow_enabled: bool,
     sandbox_enabled: bool,
 ) -> None:
-    """Reject exact authored/runtime model-tool name collisions that are active here."""
+    """Reject exact authored/runtime tool-name collisions active for this role."""
     runtime_names = set(RUNTIME_WORKFLOW_TOOL_NAMES) if workflow_enabled else set()
     if sandbox_enabled:
         runtime_names.add(SANDBOX_TOOL_NAME)

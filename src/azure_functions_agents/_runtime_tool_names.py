@@ -1,4 +1,4 @@
-"""Dependency-free canonical model-visible names for runtime-owned tools."""
+"""Canonical model-visible names for runtime-owned tools."""
 
 from __future__ import annotations
 

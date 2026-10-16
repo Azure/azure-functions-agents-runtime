@@ -8,11 +8,10 @@ Five tools:
 - ``fhs_cancel_workflow`` — cooperatively cancel a workflow and preserve partial results.
 - ``fhs_terminate_workflow`` — hard-stop a workflow; no cooperative cleanup.
 
-All five call the Durable client captured by the per-session tool wrappers
-built in ``build_workflow_tools``.
-Isolation is enforced by prefix-matching the Durable instance ID against a
-128-bit SHA-256 prefix for ``(workflow_agent_slug, session_id)``; a mismatch
-returns 404 (same shape as "not found") to avoid leaking another agent's workflows.
+All five use the Durable client captured by the per-session wrappers built in
+``build_workflow_tools``. A workflow is visible only when its instance id
+matches the current ``(workflow_agent_slug, session_id)`` pair; other ids get
+the same 404 shape as "not found".
 """
 
 from __future__ import annotations

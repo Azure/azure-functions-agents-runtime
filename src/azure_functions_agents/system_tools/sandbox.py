@@ -1,16 +1,4 @@
-"""
-ACA Dynamic Sessions sandbox — fhs_execute_python tool.
-
-Provides an ``fhs_execute_python`` tool backed by Azure Container Apps dynamic
-sessions (code-interpreter pools). Configured via the
-``dynamic_sessions_code_interpreter`` system tool configuration.
-
-Each agent can have its own session pool endpoint. The ACA session id is
-usually derived from the runtime's ``session_id`` (passed in by the runner via
-``fallback_session_id``) so REPL state — variables, imports, files, browser
-pages — persists across calls within a conversation. When no session id is
-available, a fresh GUID is generated for that tool instance.
-"""
+"""ACA Dynamic Sessions sandbox for the ``fhs_execute_python`` tool."""
 
 from __future__ import annotations
 
@@ -320,7 +308,7 @@ def create_sandbox_tools(
     *,
     fallback_session_id: str | None = None,
 ) -> list[ToolDescriptor]:
-    """Create an ``fhs_execute_python`` tool bound to a specific ACA session pool.
+    """Create an ``fhs_execute_python`` tool for one ACA session pool.
 
     Parameters
     ----------
@@ -329,11 +317,10 @@ def create_sandbox_tools(
         contain ``endpoint``. Optional ``client_id`` selects a user-assigned
         managed identity for the session pool.
     fallback_session_id:
-        Used as the ACA session identifier so the REPL state persists across
-        ``fhs_execute_python`` calls within the same conversation. The runner
-        passes the resolved agent-runtime session id here. When omitted, a
-        fresh GUID is generated so independent invocations do not share a
-        sandbox.
+        Used as the ACA session identifier so state persists across
+        ``fhs_execute_python`` calls in one conversation. The runner passes
+        the resolved agent-runtime session id here. When omitted, a fresh GUID
+        is generated so separate invocations do not share a sandbox.
 
     Returns a list with one tool, or an empty list if the config is invalid.
     """
