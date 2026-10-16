@@ -87,6 +87,28 @@ python -m build --wheel
 uv build
 ```
 
+## Test matrix notes
+
+The official E2E job runs the unchanged suite
+`python -m pytest -m e2e tests/endtoend -v` in four lanes: Python 3.13/3.14
+crossed with `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=false/true`.
+
+Before running that suite locally, set
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` for the lane you want and rebuild the
+shared Function-app dependency tree:
+
+```bash
+python eng/scripts/install_e2e_dependencies.py
+python -m pytest -m e2e tests/endtoend -v
+```
+
+Keep the same selector value for both commands. The E2E helpers also copy any
+non-empty provider env vars (for example `FOUNDRY_PROJECT_ENDPOINT` and
+`FOUNDRY_MODEL`) into each sample app's gitignored `local.settings.json` before
+startup so blank template values do not override CI or local shell settings.
+The installer recreates the shared `.e2e-python-packages` tree for the selected
+lane, so rerun it whenever you switch the selector value.
+
 ### uv index defaults
 
 This repository includes [uv.toml](uv.toml) with default settings for environments where direct TLS access to PyPI is blocked:
