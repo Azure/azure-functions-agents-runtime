@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-15
+updated: 2026-10-16
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -249,12 +249,14 @@ usable for later requests. Resume uses SDK-owned continuation without host-side
 history scans and rejects live abort/interruption signals observed before
 returning a final reply. The SDK still owns opaque file formats, compaction,
 and recovery. Unsupported capabilities still fail explicitly when the preview
-cannot preserve their semantics. `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`,
-`AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY`, and
-`agent_configuration.max_output_tokens` warn and are ignored on this path.
-Copilot keeps the SDK/provider defaults for reasoning behavior, and
-`max_output_tokens` is not enforced because this path does not expose a
-verified provider generation-cap mapping.
+cannot preserve their semantics. Valid non-empty
+`AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` and
+`AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` values are captured once in the
+immutable Copilot app binding and passed through to every native create/resume
+call. Invalid values are explicit configuration errors. The runtime also maps
+`agent_configuration.max_output_tokens` into the request-local Copilot
+`ProviderConfig.max_output_tokens` override for direct turns, SSE, delegates,
+and workflow leaves without mutating the shared app-level provider settings.
 
 **Entrypoint qualification**
 
@@ -441,6 +443,7 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | --- | --- | --- | --- | --- | --- |
 | 30 | Hosted worker/storage contract amendment | keep local-only/single-worker FRD guard / mirror the existing MAF storage and process-local concurrency contract | Remove the local-only and single-worker FRD restriction. Keep MAF as the default harness, preserve the existing storage-selection and no-fallback-on-configured-error contract, keep the existing registered surfaces enabled, and describe same-session overlap across workers/instances as the same process-local coordination limit already present on the MAF path rather than as a Copilot-only carve-out. | Human (larohra) | 2026-10-14 |
 | 31 | Copilot ignored reasoning/output settings | keep rejecting Copilot reasoning/output-limit overrides / warn and ignore the settings | Keep other unsupported-capability checks unchanged, but treat `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`, `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY`, and `agent_configuration.max_output_tokens` as warned no-op settings on the Copilot path. Copilot keeps SDK/provider defaults for reasoning behavior, and `max_output_tokens` is not enforced because the pinned SDK/runtime still lacks a verified provider generation-cap mapping. | Human (larohra) | 2026-10-15 |
+| 32 | Copilot native reasoning/output amendment | preserve the warned no-op contract / pass through verified SDK-native settings | Supersede row 31 after verifying the pinned `github-copilot-sdk` exposes these settings natively. Freeze valid `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`) and `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` (`none`, `concise`, `detailed`) once in the Copilot app binding, fail fast on invalid values, and pass them through to native create/resume calls. Map `agent_configuration.max_output_tokens` into the request-local Copilot `ProviderConfig.max_output_tokens` override without mutating the shared app-level provider configuration. MAF remains unchanged. | Human (larohra) | 2026-10-16 |
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |
@@ -493,7 +496,9 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 - **Hosted/worker amendment sign-off:** larohra approved this amendment to the
   existing finalized FRD on 2026-10-14 without creating a new FRD.
 - **Ignored-settings amendment sign-off:** larohra approved this scoped
-  amendment on 2026-10-15 without creating a new FRD.
+  amendment on 2026-10-15 without creating a new FRD, then approved this
+  SDK-verified native-settings amendment on 2026-10-16 without creating a new
+  FRD.
 - **Scope note:** This FRD records the durable feature contract only. It does
   not preserve superseded iteration history, review churn, or qualification
   narratives that no longer change the product boundary.

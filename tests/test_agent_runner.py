@@ -240,7 +240,7 @@ async def test_public_runner_shims_dispatch_all_three_operations_through_bound_r
 
 
 @pytest.mark.asyncio
-async def test_copilot_ignored_configuration_warns_and_clears_before_native_acquisition(
+async def test_copilot_configuration_reaches_native_execution_without_starting_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     harness = make_copilot_harness(tmp_path)
@@ -257,7 +257,7 @@ async def test_copilot_ignored_configuration_warns_and_clears_before_native_acqu
         )
     ]
     assert [event["type"] for event in events] == ["delta", "done"]
-    assert native_run.await_args_list[0].args[1].max_output_tokens is None
+    assert native_run.await_args_list[0].args[1].max_output_tokens == 32
 
     leaf = await runner.run_leaf_agent_task(
         SimpleNamespace(
@@ -272,7 +272,7 @@ async def test_copilot_ignored_configuration_warns_and_clears_before_native_acqu
         execution_role="workflow_subagent",
     )
     assert leaf == "native reply"
-    assert native_run.await_args_list[1].args[1].max_output_tokens is None
+    assert native_run.await_args_list[1].args[1].max_output_tokens == 32
 
     get_runtime.assert_not_called()
     assert native_run.await_count == 2

@@ -11,12 +11,11 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 
 from ..._credential import build_async_credential
 from ..._logger import logger
-from ...config.env import EnvVar
+from ...config.env import EnvVar, runtime_env_value
 from .. import _harness_lifecycle
 from .._agent_runner import get_agent_runner
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .._provider_config import resolve_inference_target
-from ._copilot_warnings import warn_ignored_reasoning_setting
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
@@ -27,6 +26,10 @@ if TYPE_CHECKING:
 
 SDK_DISTRIBUTION = "github-copilot-sdk"
 PROVIDER_ENV = EnvVar.PROVIDER
+type ReasoningEffortSetting = Literal["low", "medium", "high", "xhigh", "max"]
+type ReasoningSummarySetting = Literal["none", "concise", "detailed"]
+_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+_REASONING_SUMMARIES = frozenset({"none", "concise", "detailed"})
 
 
 class CopilotPreviewError(RuntimeError):
@@ -41,6 +44,46 @@ def check_sdk_dependency() -> None:
             "Copilot preview requires azurefunctions-agents-runtime[copilot]. "
             f"Install {SDK_DISTRIBUTION} through the optional extra."
         ) from None
+
+
+def _validate_reasoning_setting(
+    name: EnvVar, *, allowed: frozenset[str]
+) -> str | None:
+    value = runtime_env_value(name)
+    if not value:
+        return None
+    if value not in allowed:
+        allowed_values = ", ".join(sorted(allowed))
+        raise UnsupportedCapabilityError(
+            f"Copilot preview requires {name} to be one of: {allowed_values}."
+        )
+    return value
+
+
+def _reasoning_effort_from_environment() -> ReasoningEffortSetting | None:
+    value = _validate_reasoning_setting(EnvVar.REASONING_EFFORT, allowed=_REASONING_EFFORTS)
+    if value is None:
+        return None
+    if value == "low":
+        return "low"
+    if value == "medium":
+        return "medium"
+    if value == "high":
+        return "high"
+    if value == "xhigh":
+        return "xhigh"
+    return "max"
+
+
+def _reasoning_summary_from_environment() -> ReasoningSummarySetting | None:
+    value = _validate_reasoning_setting(EnvVar.REASONING_SUMMARY, allowed=_REASONING_SUMMARIES)
+    if value is None:
+        return None
+    if value == "none":
+        return "none"
+    if value == "concise":
+        return "concise"
+    return "detailed"
 
 
 def select_copilot_harness(root: Path) -> AppHarness:
@@ -64,8 +107,8 @@ def select_copilot_harness(root: Path) -> AppHarness:
             "with the existing explicit-or-autodetected provider settings."
         ) from None
     copilot_provider = _PROVIDERS[provider].from_environment()
-    for name in (EnvVar.REASONING_EFFORT, EnvVar.REASONING_SUMMARY):
-        warn_ignored_reasoning_setting(name)
+    reasoning_effort = _reasoning_effort_from_environment()
+    reasoning_summary = _reasoning_summary_from_environment()
     route = resolve_route(root)
     from ._copilot_runner import CopilotRunner
 
@@ -77,6 +120,8 @@ def select_copilot_harness(root: Path) -> AppHarness:
             storage_root=route.local_dir / "copilot-preview",
             default_model=model,
             provider=copilot_provider,
+            reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
             session_storage=route,
         ),
     )

@@ -11,6 +11,10 @@ from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     OpenAIProvider,
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_runner import CopilotRunner
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import (
+    ReasoningEffortSetting,
+    ReasoningSummarySetting,
+)
 from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     StorageRoute,
     resolve_route,
@@ -23,6 +27,8 @@ def make_copilot_harness(
     storage_root: Path | None = None,
     default_model: str = "gpt-4.1-mini",
     provider: CopilotProvider | None = None,
+    reasoning_effort: ReasoningEffortSetting | None = None,
+    reasoning_summary: ReasoningSummarySetting | None = None,
     session_storage: StorageRoute | None = None,
 ) -> AppHarness:
     return AppHarness(
@@ -33,6 +39,8 @@ def make_copilot_harness(
             storage_root=storage_root or app_root / "state",
             default_model=default_model,
             provider=provider or OpenAIProvider("not-a-credential"),
+            reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
             session_storage=session_storage or resolve_route(app_root),
         ),
     )

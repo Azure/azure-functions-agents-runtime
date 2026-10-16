@@ -34,7 +34,6 @@ from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
 from ._copilot_session_local import LocalSessionFileBackend
 from ._copilot_tool_calls import CopilotToolCalls, tool_result_text
-from ._copilot_warnings import warn_ignored_output_limit
 
 if TYPE_CHECKING:
     from copilot import CopilotClient
@@ -56,6 +55,10 @@ if TYPE_CHECKING:
 
     from ...runner import AgentResult
     from ._copilot_providers import ProviderTokenSource
+    from ._copilot_runtime import (
+        ReasoningEffortSetting,
+        ReasoningSummarySetting,
+    )
     from ._copilot_session_fs import CopilotSessionFs
 
 
@@ -223,7 +226,7 @@ def _tool(function: ToolDescriptor, calls: CopilotToolCalls, event_sink: _EventS
 def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
     provider = get_runtime(harness)._runner.provider
     try:
-        return provider.sdk_config(model, tokens)
+        config = provider.sdk_config(model, tokens)
     except CopilotPreviewError:
         raise
     except Exception:
@@ -234,6 +237,7 @@ def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> P
             provider.auth_label,
         )
         raise CopilotPreviewError(provider.setup_diagnostic()) from None
+    return config
 
 
 async def _abort(session: CopilotSession) -> None:
@@ -302,18 +306,26 @@ async def _open_session(
     *,
     new_session: bool,
     options: _SessionOptions,
+    reasoning_effort: ReasoningEffortSetting | None,
+    reasoning_summary: ReasoningSummarySetting | None,
     on_permission_request: Callable[
         [PermissionRequest, PermissionInvocation], PermissionRequestResult
     ],
 ) -> CopilotSession:
     if new_session:
         return await client.create_session(
-            session_id=session_id, on_permission_request=on_permission_request, **options
+            session_id=session_id,
+            on_permission_request=on_permission_request,
+            reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
+            **options,
         )
     return await client.resume_session(
         session_id,
         on_permission_request=on_permission_request,
         continue_pending_work=False,
+        reasoning_effort=reasoning_effort,
+        reasoning_summary=reasoning_summary,
         **options,
     )
 
@@ -436,7 +448,6 @@ async def _run_session_turn(
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
-    warn_ignored_output_limit("request.max_output_tokens", request.max_output_tokens)
     from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
     from copilot.session_events import (
         AssistantMessageData,
@@ -520,6 +531,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     token_source = _RequestTokenSource(owner)
     try:
         provider = _provider(harness, token_source, request.model)
+        if request.max_output_tokens is not None:
+            provider["max_output_tokens"] = request.max_output_tokens
         async with lifecycle.session_lock(request), asyncio.timeout_at(request.deadline):
             route = lifecycle.session_storage
             if route is None:
@@ -576,6 +589,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     new_session=request.new_session,
                     options=options,
                     on_permission_request=on_permission_request,
+                    reasoning_effort=owner._runner.reasoning_effort,
+                    reasoning_summary=owner._runner.reasoning_summary,
                 )
                 request.session_state.resumable = True
                 async with _bounded_cleanup(

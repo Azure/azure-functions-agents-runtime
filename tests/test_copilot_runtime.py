@@ -172,20 +172,16 @@ def test_provider_selection_error_lists_registered_copilot_providers(preview, mo
         runtime.select_copilot_harness(preview)
 
 
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high"),
-        ("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", "detailed"),
-    ],
-)
-def test_reasoning_app_settings_warn_and_are_ignored(preview, monkeypatch, caplog, name, value):
-    monkeypatch.setenv(name, value)
-    with caplog.at_level("WARNING"):
-        harness = _harness.get_harness()
+def test_reasoning_app_settings_are_frozen_on_the_selected_harness(preview, monkeypatch):
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", "detailed")
+
+    harness = _harness.get_harness()
+
     assert harness.name is HarnessKind.COPILOT
-    assert name in caplog.text
-    assert "Ignoring" in caplog.text
+    state = copilot_state(harness)
+    assert state.reasoning_effort == "high"
+    assert state.reasoning_summary == "detailed"
 
 
 @pytest.mark.parametrize(
@@ -224,10 +220,12 @@ def test_host_owned_worker_and_hosting_settings_are_accepted(preview, monkeypatc
         (EnvVar.REASONING_EFFORT, "", True, ""),
         (EnvVar.REASONING_EFFORT, "   ", True, ""),
         (EnvVar.REASONING_EFFORT, "high", True, ""),
+        (EnvVar.REASONING_EFFORT, "none", False, "one of"),
         (EnvVar.REASONING_SUMMARY, None, True, ""),
         (EnvVar.REASONING_SUMMARY, "", True, ""),
         (EnvVar.REASONING_SUMMARY, "   ", True, ""),
         (EnvVar.REASONING_SUMMARY, "detailed", True, ""),
+        (EnvVar.REASONING_SUMMARY, "auto", False, "one of"),
     ],
 )
 def test_copilot_environment_edge_semantics(preview, monkeypatch, name, value, allowed, diagnostic):
@@ -411,29 +409,28 @@ def test_maf_keeps_authored_approval_that_copilot_cannot_adapt(tmp_path):
 
 
 def test_retired_maf_compaction_has_no_active_copilot_configuration(preview):
-    _capabilities.validate_configuration(AgentConfiguration())
+    resolved, capabilities = _sample()
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
-def test_output_limit_warns_and_is_ignored_before_native_execution(preview, caplog):
-    with caplog.at_level("WARNING"):
-        _capabilities.validate_configuration(AgentConfiguration(max_output_tokens=256))
-    assert "agent_configuration.max_output_tokens" in caplog.text
-    assert "not enforced" in caplog.text
+def test_output_limit_is_preserved_during_copilot_validation(preview):
+    resolved, capabilities = _sample()
+    candidate = resolved.model_copy(update={"agent_configuration": AgentConfiguration(max_output_tokens=256)})
+
+    _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
 
 
-def test_standalone_output_limit_warns_and_clears_request_boundary(preview, monkeypatch, caplog):
+def test_standalone_output_limit_reaches_request_boundary(preview, monkeypatch):
     invoke = AsyncMock(return_value=runner.AgentResult("session-id", "native reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
-    with caplog.at_level("WARNING"):
-        result = asyncio.run(runner.run_agent(
-            "no inference", tools=[], mcp_tools=[],
-            agent_configuration=AgentConfiguration(max_output_tokens=256),
-        ))
+    result = asyncio.run(runner.run_agent(
+        "no inference", tools=[], mcp_tools=[],
+        agent_configuration=AgentConfiguration(max_output_tokens=256),
+    ))
     assert result.content == "native reply"
     invoke.assert_awaited_once()
     request = invoke.await_args.args[1]
-    assert request.max_output_tokens is None
-    assert "agent_configuration.max_output_tokens" in caplog.text
+    assert request.max_output_tokens == 256
 
 
 @pytest.mark.parametrize("policy", [{"approval_mode": "always_require"}])

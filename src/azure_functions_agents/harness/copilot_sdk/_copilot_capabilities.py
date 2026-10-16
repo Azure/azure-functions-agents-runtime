@@ -11,11 +11,10 @@ from ..._logger import logger
 from ..._mcp_auth import materialize_mcp_headers
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...config.env import EnvVar
-from ...config.schema import AgentConfiguration, ResolvedAgent
+from ...config.schema import ResolvedAgent
 from ...workflows.tools import build_workflow_tools
 from .._harness_binding import AppHarness, UnsupportedCapabilityError
 from ._copilot_runtime import CopilotPreviewError
-from ._copilot_warnings import warn_ignored_output_limit
 
 if TYPE_CHECKING:
     from copilot.session import MCPServerConfig, PermissionInvocation, PermissionRequestResult
@@ -41,22 +40,6 @@ def reject_unsupported(**capabilities: bool) -> None:
             + "=false to use MAF. No fallback was attempted."
         )
 
-
-def validate_configuration(configuration: AgentConfiguration) -> None:
-    warn_ignored_output_limit(
-        "agent_configuration.max_output_tokens",
-        configuration.max_output_tokens,
-    )
-
-
-def effective_configuration(configuration: AgentConfiguration) -> AgentConfiguration:
-    """Return the Copilot-effective configuration after boundary warnings."""
-    validate_configuration(configuration)
-    if configuration.max_output_tokens is None:
-        return configuration
-    return configuration.model_copy(update={"max_output_tokens": None})
-
-
 def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     """Preserve existing schemas and invocation without silently dropping policy."""
     prepared = describe_tools(tools)
@@ -81,7 +64,6 @@ def validate_copilot_agent(
     """Reject unsupported effective configuration before registration or execution."""
     from ...registration.capabilities import SANDBOX_TOOL_NAME
 
-    validate_configuration(resolved.agent_configuration)
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
     prepared = prepare_tools(

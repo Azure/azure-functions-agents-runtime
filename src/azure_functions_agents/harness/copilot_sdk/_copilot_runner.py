@@ -55,7 +55,11 @@ if TYPE_CHECKING:
     from ...runner import AgentResult
     from ...workflows.schema import WorkflowPlanPolicy
     from ._copilot_providers import CopilotProvider
-    from ._copilot_runtime import CopilotRuntime
+    from ._copilot_runtime import (
+        CopilotRuntime,
+        ReasoningEffortSetting,
+        ReasoningSummarySetting,
+    )
     from ._copilot_session_identity import StorageRoute
 
 
@@ -112,12 +116,16 @@ class CopilotRunner:
         storage_root: Path,
         default_model: str,
         provider: CopilotProvider,
+        reasoning_effort: ReasoningEffortSetting | None,
+        reasoning_summary: ReasoningSummarySetting | None,
         session_storage: StorageRoute,
     ) -> None:
         self._harness = harness
         self.storage_root = storage_root
         self.default_model = default_model
         self.provider = provider
+        self.reasoning_effort = reasoning_effort
+        self.reasoning_summary = reasoning_summary
         self.session_storage = session_storage
         self.runtime: CopilotRuntime | None = None
 
@@ -157,9 +165,7 @@ class CopilotRunner:
 
         del timeout
 
-        configuration = _copilot_capabilities.effective_configuration(
-            agent_configuration or AgentConfiguration()
-        )
+        configuration = agent_configuration or AgentConfiguration()
         if workflow_enabled and workflow_policy is None:
             raise UnsupportedCapabilityError(
                 "Copilot workflow management requires a bound per-agent workflow policy."
@@ -369,9 +375,7 @@ class CopilotRunner:
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str:
-        configuration = _copilot_capabilities.effective_configuration(
-            resolved.agent_configuration
-        )
+        configuration = resolved.agent_configuration
         resolved_model = resolved.model or self.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")

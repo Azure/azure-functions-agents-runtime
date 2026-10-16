@@ -210,7 +210,9 @@ agent_configuration:
 Agents recursively inherit global `agent_configuration` values. Per-agent values override individual
 leaves, while explicit `null` clears inherited values. Legacy
 `agent_framework.compaction.max_context_window_tokens` configuration emits a warning and is ignored;
-remove it to use the selected harness's native compaction default. See
+remove it to use the selected harness's native compaction default. On the Copilot
+preview path, `max_output_tokens` is passed through as the SDK provider's
+request-local native output cap. See
 [`docs/front-matter-spec.md#agent_configuration`](docs/front-matter-spec.md#agent_configuration).
 
 #### Securing endpoints
@@ -714,8 +716,8 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` | Per-call timeout in seconds (default `900`) |
 | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
-| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
-| `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (`low`, `medium`, `high`, `xhigh`, `max`) |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (`none`, `concise`, `detailed`) |
 
 ## Development
 
