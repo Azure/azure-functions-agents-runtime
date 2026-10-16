@@ -15,7 +15,7 @@ import pytest
 
 from azure_functions_agents._slug import _function_name_from_source
 from azure_functions_agents.config.loader import load_agent_specs
-from tests.endtoend._func_host import start_and_verify
+from tests.endtoend._func_host import overlay_provider_settings, start_and_verify
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SAMPLES_DIR = REPO_ROOT / "samples"
@@ -50,6 +50,11 @@ def test_startup_env_disables_timer_functions_only() -> None:
     assert _startup_env(SAMPLES_DIR / "workflow-queue-p0-report" / "src") == {}
 
 
+def _start_sample_app(app_dir: Path):
+    overlay_provider_settings(app_dir)
+    return start_and_verify(app_dir, env=_startup_env(app_dir))
+
+
 @pytest.mark.parametrize(
     "app_dir",
     SAMPLE_APPS,
@@ -57,7 +62,7 @@ def test_startup_env_disables_timer_functions_only() -> None:
 )
 def test_sample_app_starts(app_dir: Path) -> None:
     """Each sample app should start cleanly under ``func start``."""
-    result = start_and_verify(app_dir, env=_startup_env(app_dir))
+    result = _start_sample_app(app_dir)
     assert result.started, (
         f"`func start` did not start cleanly for '{app_dir.parent.name}': "
         f"{result.reason}\n"
