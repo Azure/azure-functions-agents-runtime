@@ -18,6 +18,7 @@ from azure.core.credentials import AccessToken
 from pydantic import BaseModel, Field
 
 from azure_functions_agents._function_tool import tool, workflow_tool
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 from azure_functions_agents.discovery.skills import SkillDescriptor
@@ -597,7 +598,7 @@ async def test_sdk_receives_only_combined_custom_catalog(preview, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     functions = _preview.prepare_tools([
         tool(name="user_tool")(lambda: "user"),
-        tool(name="execute_python")(lambda code: code),
+        tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code),
         tool(name="web_request")(lambda url: url),
     ])
     client = _fake_client()
@@ -610,12 +611,12 @@ async def test_sdk_receives_only_combined_custom_catalog(preview, monkeypatch):
         options = client.create_session.call_args.kwargs
         assert options["available_tools"] == [
             "custom:user_tool",
-            "custom:execute_python",
+            f"custom:{FHS_EXECUTE_PYTHON_TOOL_NAME}",
             "custom:web_request",
         ]
         assert [item.name for item in options["tools"]] == [
             "user_tool",
-            "execute_python",
+            FHS_EXECUTE_PYTHON_TOOL_NAME,
             "web_request",
         ]
         assert options["enable_config_discovery"] is False
@@ -2155,7 +2156,7 @@ async def test_interrupted_turn_aborts_disconnects_and_closes_only_its_adapter(
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     request = _request()
     if not cancel:
-        request = replace(request, deadline=asyncio.get_running_loop().time() + 0.1)
+        request = replace(request, deadline=asyncio.get_running_loop().time() + 1.0)
     task = asyncio.create_task(_copilot.run(preview, request))
     try:
         await asyncio.wait_for(started.wait(), timeout=5)

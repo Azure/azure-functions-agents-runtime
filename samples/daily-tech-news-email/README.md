@@ -87,7 +87,7 @@ If `O365_MCP_CLIENT_ID` is set, only the Office 365 Outlook MCP server uses that
 
 Without `ACA_SESSION_POOL_ENDPOINT`:
 
-- The timer still fires, but the agent cannot fetch news (execute_python unavailable)
+- The timer still fires, but the agent cannot fetch news (`fhs_execute_python` unavailable)
 - Email sending may fail if the agent cannot build the news summary
 
 Without `O365_MCP_SERVER_URL`:
@@ -122,7 +122,7 @@ Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_tech_news" `
 - [`daily_tech_news.agent.md`](src/daily_tech_news.agent.md) defines the agent with a timer trigger, code execution sandbox, and Office 365 Outlook MCP email tool
 - [`mcp.json`](src/mcp.json) configures the Office 365 Outlook MCP server provisioned by Bicep and limits the exposed tool set to `office365_SendEmailV2`
 - When the timer fires, the agent:
-  1. Uses `execute_python` to fetch tech news from public RSS feeds and Hacker News
+  1. Uses `fhs_execute_python` to fetch tech news from public RSS feeds and Hacker News
   2. Summarizes the top stories into an HTML email
   3. Calls the Office 365 Outlook MCP email tool to deliver the summary to the configured recipient
 - The `$TO_EMAIL` variable in the agent instructions is replaced with the actual email address at load time. Inline `$VAR` and `%VAR%` substitution applies to all config string values

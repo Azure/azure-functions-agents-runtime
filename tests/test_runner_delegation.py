@@ -38,6 +38,11 @@ import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._function_tool import tool as runtime_tool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_LIST_WORKFLOWS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -339,9 +344,9 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
     def _build_workflow_tools(**kwargs: object) -> list[object]:
         captured.update(kwargs)
         return [
-            _static_tool("start_workflow"),
-            _static_tool("get_workflow_status"),
-            _static_tool("list_workflows"),
+            _static_tool(FHS_START_WORKFLOW_TOOL_NAME),
+            _static_tool(FHS_GET_WORKFLOW_STATUS_TOOL_NAME),
+            _static_tool(FHS_LIST_WORKFLOWS_TOOL_NAME),
         ]
 
     monkeypatch.setattr(
@@ -372,9 +377,9 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
         "run_code",
         "web_request",
         "delegate_billing",
-        "start_workflow",
-        "get_workflow_status",
-        "list_workflows",
+        FHS_START_WORKFLOW_TOOL_NAME,
+        FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+        FHS_LIST_WORKFLOWS_TOOL_NAME,
     } <= tool_names
     assert captured["policy"] is policy
 
