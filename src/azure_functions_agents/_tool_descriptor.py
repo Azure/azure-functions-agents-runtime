@@ -126,9 +126,11 @@ def _function_hints(func: ToolCallable) -> dict[str, Any]:
         targets.append(type(func).__call__)
     for target in targets:
         try:
-            return get_type_hints(target, include_extras=True)
+            hints = get_type_hints(target, include_extras=True)
         except (NameError, TypeError):
             continue
+        if hints or inspect.isroutine(target) or inspect.isclass(target):
+            return hints
     return {
         parameter.name: parameter.annotation
         for parameter in inspect.signature(func).parameters.values()
