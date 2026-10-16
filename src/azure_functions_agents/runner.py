@@ -24,8 +24,9 @@ from ._observability import (
     current_span,
     record_delegate_call,
 )
+from ._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from ._slug import delegate_tool_name
-from ._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput
+from ._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput, tool_name
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
@@ -47,6 +48,7 @@ from .harness._history_identity import validate_agent_slug
 from .registration.capabilities import (
     AgentCapabilities,
     _merge_skill_descriptors,
+    validate_runtime_tool_name_collisions,
 )
 from .registration.catalog import AgentCatalog, CatalogEntry
 from .streaming_events import AgentStreamEvent
@@ -348,6 +350,40 @@ def _request(
     )
 
 
+def _validate_direct_runtime_name_collisions(
+    *,
+    harness: AppHarness,
+    tools: Sequence[ToolInput] | None,
+    workflow_enabled: bool,
+    sandbox_tools: Sequence[ToolInput] | None,
+) -> None:
+    sandbox_enabled = False
+    for candidate in sandbox_tools or ():
+        if isinstance(candidate, ToolDescriptor):
+            sandbox_enabled = sandbox_enabled or (
+                candidate.name == FHS_EXECUTE_PYTHON_TOOL_NAME
+            )
+            continue
+        if callable(candidate):
+            sandbox_enabled = sandbox_enabled or (
+                tool_name(candidate) == FHS_EXECUTE_PYTHON_TOOL_NAME
+            )
+            continue
+        logger.warning(
+            "Ignoring unsupported custom tool; use the runtime @tool decorator "
+            "or a local public function in tools/."
+        )
+    if not workflow_enabled and not sandbox_enabled:
+        return
+    authored_tools = discover_user_tools(harness.app_root).tools if tools is None else tools
+    validate_runtime_tool_name_collisions(
+        source_file=str(harness.app_root),
+        authored_tools=authored_tools,
+        workflow_enabled=workflow_enabled,
+        sandbox_enabled=sandbox_enabled,
+    )
+
+
 async def run_agent(
     prompt: str,
     *,
@@ -380,6 +416,12 @@ async def run_agent(
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     coordinator_deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
+    _validate_direct_runtime_name_collisions(
+        harness=harness,
+        tools=tools,
+        workflow_enabled=workflow_enabled,
+        sandbox_tools=sandbox_tools,
+    )
     return await get_agent_runner(harness).run_agent(
         prompt,
         instructions=instructions,
@@ -509,6 +551,12 @@ async def run_agent_stream(
         if session_id is not None and session_state.caller_supplied:
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
         harness = _harness or get_harness()
+        _validate_direct_runtime_name_collisions(
+            harness=harness,
+            tools=tools,
+            workflow_enabled=workflow_enabled,
+            sandbox_tools=sandbox_tools,
+        )
         selected = get_agent_runner(harness)
         stream = selected.run_agent_stream(
             prompt,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -30,6 +31,7 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import AgentConfiguration
@@ -148,6 +150,71 @@ async def test_incompatible_authored_callable_fails_before_harness_execution(kin
             _harness=_harness_for(kind),
         )
     invoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sandbox_tools", "expect_warning"),
+    [
+        ([tool(lambda: "ok", name="sandbox_tool")], False),
+        ([object()], True),
+    ],
+)
+async def test_run_agent_only_reserves_canonical_sandbox_runtime_tool(
+    sandbox_tools: list[object],
+    expect_warning: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    def fail_discovery(_root: Path) -> Any:
+        raise AssertionError("discover_user_tools should stay lazy without active runtime tools")
+
+    class _Runner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            return runner.AgentResult("session", prompt)
+
+    monkeypatch.setattr(runner, "discover_user_tools", fail_discovery)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _selected: _Runner())
+
+    with caplog.at_level(logging.WARNING):
+        result = await runner.run_agent(
+            "hello",
+            tools=None,
+            mcp_tools=[],
+            sandbox_tools=sandbox_tools,  # type: ignore[arg-type]
+            _harness=harness,
+        )
+
+    assert result.content == "hello"
+    assert ("Ignoring unsupported custom tool" in caplog.text) is expect_warning
+
+
+@pytest.mark.asyncio
+async def test_run_agent_rejects_canonical_sandbox_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    def discovered(_root: Path) -> Any:
+        return SimpleNamespace(
+            tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)]
+        )
+
+    class _Runner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            raise AssertionError("collision must fail before backend execution")
+
+    monkeypatch.setattr(runner, "discover_user_tools", discovered)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _selected: _Runner())
+
+    with pytest.raises(ValueError, match=FHS_EXECUTE_PYTHON_TOOL_NAME):
+        await runner.run_agent(
+            "hello",
+            tools=None,
+            mcp_tools=[],
+            sandbox_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
+            _harness=harness,
+        )
 
 
 @pytest.mark.asyncio
@@ -480,6 +547,34 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
         workflow_policy=None,
     )
     assert resolved_disabled == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+async def test_direct_runner_skips_authored_tool_discovery_without_active_runtime_tools(
+    kind: HarnessKind, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness_for(kind)
+    seen: dict[str, Any] = {}
+
+    class _Runner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            seen["prompt"] = prompt
+            seen["kwargs"] = kwargs
+            return runner.AgentResult("session", "captured")
+
+    def fail_discovery(_root: Path) -> Any:
+        raise AssertionError("discover_user_tools should stay lazy when no runtime tools are active")
+
+    monkeypatch.setattr(runner, "discover_user_tools", fail_discovery)
+    monkeypatch.setattr(runner, "get_harness", lambda: harness)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _Runner())
+
+    result = await runner.run_agent("fixture", tools=None, mcp_tools=[], _harness=harness)
+
+    assert result.content == "captured"
+    assert seen["prompt"] == "fixture"
+    assert seen["kwargs"]["tools"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -71,7 +71,7 @@ def test_sample_provides_storage_and_dts_host_configurations() -> None:
 def test_sample_agent_relies_on_the_tool_retry_policy() -> None:
     agent_text = (_SAMPLE_SRC / "main.agent.md").read_text(encoding="utf-8")
 
-    assert "start_workflow" in agent_text
+    assert "fhs_start_workflow" in agent_text
     assert "execution.retry" in agent_text
     assert "execution.timeout" in agent_text
     assert "execution.continue_on_error" in agent_text

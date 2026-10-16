@@ -1,16 +1,4 @@
-"""
-ACA Dynamic Sessions sandbox — execute_python tool.
-
-Provides an ``execute_python`` tool backed by Azure Container Apps dynamic
-sessions (code-interpreter pools). Configured via the
-``dynamic_sessions_code_interpreter`` system tool configuration.
-
-Each agent can have its own session pool endpoint. The ACA session id is
-usually derived from the runtime's ``session_id`` (passed in by the runner via
-``fallback_session_id``) so REPL state — variables, imports, files, browser
-pages — persists across calls within a conversation. When no session id is
-available, a fresh GUID is generated for that tool instance.
-"""
+"""ACA Dynamic Sessions sandbox for the ``fhs_execute_python`` tool."""
 
 from __future__ import annotations
 
@@ -37,42 +25,16 @@ from .._observability import (
     record_sandbox_execution,
     start_span,
 )
+from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from .._tool_descriptor import ToolDescriptor
 from ..config import ResolvedAgent
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
+from ._sandbox_endpoint import SandboxEndpointStatus, resolve_sandbox_endpoint
 
 if TYPE_CHECKING:
     from azure.identity.aio import DefaultAzureCredential
 
 _API_VERSION = "2025-10-02-preview"
-
-# The managed-identity bearer token is minted for the Azure Container Apps
-# dynamic sessions audience and must only ever be attached to a genuine dynamic
-# sessions host. Endpoints are restricted to subdomains of ``dynamicsessions.io``
-# so a mis-set app setting cannot redirect the token elsewhere.
-_ALLOWED_SESSIONS_HOST_SUFFIX = ".dynamicsessions.io"
-
-
-def _is_allowed_sessions_endpoint(endpoint: str) -> bool:
-    """Return ``True`` only for https URLs on an ACA dynamic sessions host.
-
-    The resolved endpoint host must be a subdomain of ``dynamicsessions.io``
-    (``*.dynamicsessions.io``). Any non-https scheme, embedded userinfo, empty
-    host, lookalike host, or malformed URL is rejected so the tool (and the
-    managed-identity token it carries) is never bound to an unintended host.
-    """
-    try:
-        parsed = urllib.parse.urlparse(endpoint)
-    except ValueError:
-        return False
-    if parsed.scheme != "https":
-        return False
-    if "@" in parsed.netloc:
-        return False
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return False
-    return host.endswith(_ALLOWED_SESSIONS_HOST_SUFFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +281,7 @@ def create_sandbox_tools(
     *,
     fallback_session_id: str | None = None,
 ) -> list[ToolDescriptor]:
-    """Create an ``execute_python`` tool bound to a specific ACA session pool.
+    """Create an ``fhs_execute_python`` tool for one ACA session pool.
 
     Parameters
     ----------
@@ -328,35 +290,34 @@ def create_sandbox_tools(
         contain ``endpoint``. Optional ``client_id`` selects a user-assigned
         managed identity for the session pool.
     fallback_session_id:
-        Used as the ACA session identifier so the REPL state persists across
-        ``execute_python`` calls within the same conversation. The runner
-        passes the resolved agent-runtime session id here. When omitted, a
-        fresh GUID is generated so independent invocations do not share a
-        sandbox.
+        Used as the ACA session identifier so state persists across
+        ``fhs_execute_python`` calls in one conversation. The runner passes
+        the resolved agent-runtime session id here. When omitted, a fresh GUID
+        is generated so separate invocations do not share a sandbox.
 
     Returns a list with one tool, or an empty list if the config is invalid.
     """
-    raw_endpoint = config.get("endpoint", "")
-    if not raw_endpoint:
+    resolution = resolve_sandbox_endpoint(config)
+    raw_endpoint = resolution.raw_endpoint
+    if resolution.status is SandboxEndpointStatus.MISSING:
         logger.warning("dynamic_sessions_code_interpreter: missing 'endpoint', skipping")
         return []
-
-    endpoint = substitute_env_vars_in_value(str(raw_endpoint))
-    if not endpoint or has_unresolved_placeholders(endpoint):
+    if resolution.status is SandboxEndpointStatus.UNRESOLVED:
         logger.warning(
             "dynamic_sessions_code_interpreter: could not resolve endpoint '%s', skipping",
             raw_endpoint,
         )
         return []
-
-    if not _is_allowed_sessions_endpoint(endpoint):
+    if resolution.status is SandboxEndpointStatus.INVALID:
         logger.warning(
             "dynamic_sessions_code_interpreter: resolved endpoint '%s' failed validation "
             "(must be an https URL whose host is *.dynamicsessions.io); "
             "skipping tool creation",
-            endpoint,
+            resolution.endpoint,
         )
         return []
+    endpoint = resolution.endpoint
+    assert endpoint is not None
 
     raw_client_id = config.get("client_id")
     client_id = None
@@ -379,7 +340,7 @@ def create_sandbox_tools(
     )
 
     @tool(
-        name="execute_python",
+        name=FHS_EXECUTE_PYTHON_TOOL_NAME,
         description=_EXECUTE_PYTHON_DESCRIPTION,
         schema=ExecutePythonParams,
     )
@@ -447,7 +408,7 @@ def create_sandbox_tools(
                 record_sandbox_execution(error=has_error)
                 if has_error:
                     span.set_error(
-                        "execute_python produced stderr", fault_domain=FaultDomain.SANDBOX
+                        "fhs_execute_python produced stderr", fault_domain=FaultDomain.SANDBOX
                     )
                     logger.warning(
                         "dynamic_sessions_code_interpreter: ACA session %s returned stderr "
@@ -472,7 +433,7 @@ def create_sandbox_tools(
                 )
                 return json.dumps({"error": error_msg})
 
-    logger.info("dynamic_sessions_code_interpreter: execute_python tool created")
+    logger.info("dynamic_sessions_code_interpreter: fhs_execute_python tool created")
     return [execute_python]
 
 

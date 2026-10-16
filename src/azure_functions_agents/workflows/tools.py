@@ -2,17 +2,16 @@
 
 Five tools:
 
-- ``start_workflow`` — validate + start a workflow; return ``{"workflow_id"}``.
-- ``get_workflow_status`` — return the status envelope for a workflow.
-- ``list_workflows`` — list this session's recent workflows.
-- ``cancel_workflow`` — cooperatively cancel a workflow and preserve partial results.
-- ``terminate_workflow`` — hard-stop a workflow; no cooperative cleanup.
+- ``fhs_start_workflow`` — validate + start a workflow; return ``{"workflow_id"}``.
+- ``fhs_get_workflow_status`` — return the status envelope for a workflow.
+- ``fhs_list_workflows`` — list this session's recent workflows.
+- ``fhs_cancel_workflow`` — cooperatively cancel a workflow and preserve partial results.
+- ``fhs_terminate_workflow`` — hard-stop a workflow; no cooperative cleanup.
 
-All five call the Durable client captured by the per-session tool wrappers
-built in ``build_workflow_tools``.
-Isolation is enforced by prefix-matching the Durable instance ID against a
-128-bit SHA-256 prefix for ``(workflow_agent_slug, session_id)``; a mismatch
-returns 404 (same shape as "not found") to avoid leaking another agent's workflows.
+All five use the Durable client captured by the per-session wrappers built in
+``build_workflow_tools``. A workflow is visible only when its instance id
+matches the current ``(workflow_agent_slug, session_id)`` pair; other ids get
+the same 404 shape as "not found".
 """
 
 from __future__ import annotations
@@ -25,6 +24,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from azure_functions_agents._function_tool import tool as define_tool
 from azure_functions_agents._logger import logger
+from azure_functions_agents._runtime_tool_names import (
+    FHS_CANCEL_WORKFLOW_TOOL_NAME,
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_LIST_WORKFLOWS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+    FHS_TERMINATE_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 
 from . import registry
@@ -206,7 +212,7 @@ class StartWorkflowParams(BaseModel):
 
 class GetWorkflowStatusParams(BaseModel):
     workflow_id: str = Field(
-        description="Workflow ID returned by a prior call to start_workflow."
+        description=f"Workflow ID returned by a prior call to {FHS_START_WORKFLOW_TOOL_NAME}."
     )
 
 
@@ -216,7 +222,7 @@ class ListWorkflowsParams(BaseModel):
 
 class TerminateWorkflowParams(BaseModel):
     workflow_id: str = Field(
-        description="Workflow ID returned by a prior call to start_workflow."
+        description=f"Workflow ID returned by a prior call to {FHS_START_WORKFLOW_TOOL_NAME}."
     )
     reason: str = Field(
         default="terminated by agent",
@@ -226,7 +232,7 @@ class TerminateWorkflowParams(BaseModel):
 
 class CancelWorkflowParams(BaseModel):
     workflow_id: str = Field(
-        description="Workflow ID returned by a prior call to start_workflow."
+        description=f"Workflow ID returned by a prior call to {FHS_START_WORKFLOW_TOOL_NAME}."
     )
     reason: str = Field(
         default="canceled by agent",
@@ -298,9 +304,9 @@ async def fetch_session_workflows(
 ) -> list[dict[str, Any]]:
     """Return status envelopes for workflows matching the agent and session.
 
-    Shared between the ``list_workflows`` tool (LLM-facing) and the
+    Shared between the ``fhs_list_workflows`` tool (LLM-facing) and the
     ``/agent/workflows`` HTTP endpoint (UI polling). See the note in
-    ``list_workflows`` about the SDK's missing ``instance_id_prefix``
+    ``fhs_list_workflows`` about the SDK's missing ``instance_id_prefix``
     filter (FU-7) — until that lands we pull the full instance list
     and filter in memory.
     """
@@ -381,7 +387,7 @@ START_WORKFLOW_DESCRIPTION = (
     "supported task types are 'tool', 'wait', and authorized 'sub_agent' tasks. "
     "This tool is fire-and-forget: "
     "after receiving the workflow_id, end your turn promptly and do not poll "
-    "get_workflow_status unless the user asks, or the chat client later injects "
+    f"{FHS_GET_WORKFLOW_STATUS_TOOL_NAME} unless the user asks, or the chat client later injects "
     "a <workflow-notification> envelope containing a <workflow-id> and <status>."
 )
 
@@ -725,7 +731,7 @@ def build_workflow_tools(
     )
 
     @define_tool(
-        name="start_workflow",
+        name=FHS_START_WORKFLOW_TOOL_NAME,
         description=START_WORKFLOW_DESCRIPTION,
         schema=StartWorkflowParams,
     )
@@ -733,7 +739,7 @@ def build_workflow_tools(
         return await start_workflow(params, session, policy=policy)
 
     @define_tool(
-        name="get_workflow_status",
+        name=FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
         description=GET_WORKFLOW_STATUS_DESCRIPTION,
         schema=GetWorkflowStatusParams,
     )
@@ -741,7 +747,7 @@ def build_workflow_tools(
         return await get_workflow_status(params, session)
 
     @define_tool(
-        name="list_workflows",
+        name=FHS_LIST_WORKFLOWS_TOOL_NAME,
         description=LIST_WORKFLOWS_DESCRIPTION,
         schema=ListWorkflowsParams,
     )
@@ -749,7 +755,7 @@ def build_workflow_tools(
         return await list_workflows(params, session)
 
     @define_tool(
-        name="cancel_workflow",
+        name=FHS_CANCEL_WORKFLOW_TOOL_NAME,
         description=CANCEL_WORKFLOW_DESCRIPTION,
         schema=CancelWorkflowParams,
     )
@@ -757,7 +763,7 @@ def build_workflow_tools(
         return await cancel_workflow(params, session)
 
     @define_tool(
-        name="terminate_workflow",
+        name=FHS_TERMINATE_WORKFLOW_TOOL_NAME,
         description=TERMINATE_WORKFLOW_DESCRIPTION,
         schema=TerminateWorkflowParams,
     )

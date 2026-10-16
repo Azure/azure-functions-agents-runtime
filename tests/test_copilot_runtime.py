@@ -18,6 +18,14 @@ from azure.functions.timer import TimerRequest
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_CANCEL_WORKFLOW_TOOL_NAME,
+    FHS_EXECUTE_PYTHON_TOOL_NAME,
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_LIST_WORKFLOWS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+    FHS_TERMINATE_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ApprovalMode, ToolDescriptor
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
@@ -435,7 +443,7 @@ def test_sandbox_name_collision_fails_during_registration(preview):
     })
     capabilities = replace(
         capabilities,
-        filtered_user_tools=[tool(name="execute_python")(lambda code: code)],
+        filtered_user_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
     )
     with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
@@ -613,7 +621,11 @@ def test_workflow_management_requires_bound_policy(preview):
         durable_client=durable_client,
     )
     assert [function.name for function in _capabilities.prepare_tools(workflow_tools)] == [
-        "start_workflow", "get_workflow_status", "list_workflows", "cancel_workflow", "terminate_workflow",
+        FHS_START_WORKFLOW_TOOL_NAME,
+        FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+        FHS_LIST_WORKFLOWS_TOOL_NAME,
+        FHS_CANCEL_WORKFLOW_TOOL_NAME,
+        FHS_TERMINATE_WORKFLOW_TOOL_NAME,
     ]
     with pytest.raises(UnsupportedCapabilityError, match="per-agent workflow policy"):
         asyncio.run(runner.run_agent(
