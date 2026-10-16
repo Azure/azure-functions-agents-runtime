@@ -11,6 +11,7 @@ from agent_framework import MCPStreamableHTTPTool
 
 from ..._logger import logger
 from ..._mcp_auth import build_mcp_header_provider
+from ..._tool_descriptor import ApprovalMode
 from ...discovery.mcp import MCPServerDescriptor
 
 _MAF_MCP_TOOLS_CACHE: dict[
@@ -82,7 +83,7 @@ def _build_maf_mcp_tool(server: MCPServerDescriptor) -> MCPStreamableHTTPTool:
         allowed_tools=list(server.tools) if server.tools is not None else None,
         load_tools=True,
         load_prompts=False,
-        approval_mode="never_require",
+        approval_mode=ApprovalMode.NEVER_REQUIRE.value,
         header_provider=header_provider,
     )
 

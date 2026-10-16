@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import textwrap
 import threading
@@ -27,6 +28,35 @@ def _write_tool_file(app_root: Path, name: str, body: str) -> None:
 
 def _tool_names(tools: list[ToolDescriptor]) -> list[str]:
     return sorted(tool_obj.name for tool_obj in tools)
+
+
+def test_authored_callables_are_normalized_in_a_fresh_process():
+    root = Path(__file__).parent / "fixtures" / "config_scenarios" / "25_user_authored_tools"
+    script = """
+import sys
+from pathlib import Path
+from azure_functions_agents.discovery.tools import discover_project_tools
+from azure_functions_agents._tool_descriptor import ToolDescriptor
+
+assert "agent_framework" not in sys.modules
+assert "copilot" not in sys.modules
+result = discover_project_tools(Path(sys.argv[1]))
+assert result.failed_loads == [], result.failed_loads
+assert sorted(tool.name for tool in result.user_tools) == [
+    "async_lookup", "callable_lookup", "plain_lookup"
+]
+assert result.workflow_tools == []
+assert all(
+    isinstance(candidate, ToolDescriptor)
+    for candidate in result.user_tools
+)
+assert "agent_framework" not in sys.modules
+assert "copilot" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(root)], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @tool
@@ -158,7 +188,7 @@ def test_discovery_records_neutral_metadata_without_maf_construction(
     assert descriptor.parameters()["properties"]["value"]["type"] == "integer"
 
 
-def test_raw_maf_tools_are_ignored_in_discovery(tmp_path: Path, caplog) -> None:
+def test_incompatible_callable_is_reported_as_a_discovery_failure(tmp_path: Path, caplog) -> None:
     _write_tool_file(
         tmp_path,
         "legacy",
@@ -171,57 +201,60 @@ def test_raw_maf_tools_are_ignored_in_discovery(tmp_path: Path, caplog) -> None:
         lookup = ExtendedTool(name="legacy_lookup", func=lambda value: value)
         """,
     )
-    assert discover_project_tools(tmp_path).user_tools == []
-    assert "Ignoring unsupported custom tool" in caplog.text
-    assert "legacy_lookup" not in caplog.text
+    discovered = discover_project_tools(tmp_path)
+    assert discovered.user_tools == []
+    assert len(discovered.failed_loads) == 1
+    filename, error = discovered.failed_loads[0]
+    assert filename == "legacy.py"
+    assert error.startswith("ValueError: no signature found")
+    assert "Failed to load tool from legacy.py" in caplog.text
 
 
-@pytest.mark.parametrize("subclass", [False, True])
-@pytest.mark.parametrize("stacked", [False, True])
-def test_workflow_member_rejects_raw_sdk_before_metadata(
-    subclass: bool, stacked: bool, monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
-    from agent_framework import FunctionTool
+def test_workflow_member_accepts_an_explicitly_marked_callable() -> None:
+    class Lookup:
+        def __call__(self, args):
+            return args["value"]
 
-    from azure_functions_agents.discovery import tools as discovery_tools
-
-    class OpaqueTool(FunctionTool):
-        def __getattribute__(self, name):
-            raise AssertionError("No SDK attributes may be inspected")
-
-    raw = (
-        object.__new__(OpaqueTool)
-        if subclass
-        else FunctionTool(name="sensitive_sdk_name", func=lambda value: value)
-    )
-    if stacked:
-        assert workflow_tool(name="sensitive_workflow_name")(raw) is raw
-    caplog.clear()
-
-    def forbidden_metadata(target):
-        raise AssertionError("SDK rejection must precede workflow metadata extraction")
-
-    monkeypatch.setattr(discovery_tools, "get_workflow_tool_metadata", forbidden_metadata)
-
-    assert _workflow_tool_from_member(__name__, "sensitive_member_name", raw) is None
-    assert [record.getMessage() for record in caplog.records] == [
-        "Ignoring unsupported custom tool; use the runtime @tool decorator "
-        "or a local public function in tools/."
-    ]
+    raw = workflow_tool(name="lookup_activity")(Lookup())
+    declared = _workflow_tool_from_member(__name__, "lookup", raw)
+    assert declared.name == "lookup_activity"
+    assert declared.handler is raw
+    assert declared.handler({"value": "ok"}) == "ok"
 
 
-def test_discovery_ignores_sdk_attributes_and_keeps_local_fallback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("description", [None, "Explicit activity description"])
+def test_workflow_callable_description_preserves_public_metadata(description):
+    class Lookup:
+        """Docstring fallback."""
+
+        name = "lookup"
+        description = "Authored description"
+
+        def __call__(self, args: dict[str, object]) -> object:
+            return args
+
+    authored = workflow_tool(description=description)(Lookup())
+    declared = _workflow_tool_from_member(__name__, "lookup", authored)
+    assert declared.description == (description or "Authored description")
+
+
+def test_discovery_does_not_expose_unrelated_globals_or_imported_functions(tmp_path: Path) -> None:
     _write_tool_file(
         tmp_path,
-        "opaque",
+        "ordinary",
         """
-        from agent_framework import FunctionTool
+        from datetime import date
+        from pathlib import Path
+        from os.path import join
 
-        class OpaqueTool(FunctionTool):
-            def __getattribute__(self, name):
-                raise AssertionError("No SDK attributes may be inspected")
+        unrelated = date(2026, 10, 14)
+        path = Path("not-a-tool")
+        values = {"name": "not-a-tool"}
+        class Metadata:
+            name = "metadata"
+            description = "Not callable"
 
-        raw = object.__new__(OpaqueTool)
+        metadata = Metadata()
 
         def local(value: str) -> str:
             return value
@@ -233,7 +266,7 @@ def test_discovery_ignores_sdk_attributes_and_keeps_local_fallback(tmp_path: Pat
 
 
 @pytest.mark.parametrize("copilot", [False, True])
-def test_runtime_only_authoring_scenario(copilot, monkeypatch, caplog) -> None:
+def test_runtime_and_callable_authoring_scenario(copilot, monkeypatch) -> None:
     from azure_functions_agents.app import create_function_app
     from azure_functions_agents.config.loader import load_agent_specs, load_global_config
     from azure_functions_agents.config.merge import compose
@@ -248,20 +281,53 @@ def test_runtime_only_authoring_scenario(copilot, monkeypatch, caplog) -> None:
         monkeypatch.delenv(name, raising=False)
     discovered = discover_project_tools(root)
     assert discovered.failed_loads == []
-    assert _tool_names(discovered.user_tools) == ["authored", "first_local"]
+    assert sorted(tool.name for tool in discovered.user_tools) == [
+        "authored",
+        "callable_constructed",
+        "first_local",
+    ]
     assert sorted(item.name for item in discovered.workflow_tools) == ["authored", "workflow_only"]
     resolved = compose(
-        load_agent_specs(root)[0], load_global_config(root),
-        discovered_mcp_names=[], discovered_skill_names=[],
+        load_agent_specs(root)[0],
+        load_global_config(root),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
     )
     capabilities = build_capabilities(
-        resolved, discovered_user_tools=discovered.user_tools,
+        resolved,
+        discovered_user_tools=discovered.user_tools,
         discovered_workflow_tools=discovered.workflow_tools,
-        discovered_mcp_tools={}, discovered_skills={},
+        discovered_mcp_tools={},
+        discovered_skills={},
     )
-    assert _tool_names(list(capabilities.filtered_user_tools)) == ["authored", "first_local"]
+    assert sorted(tool.name for tool in capabilities.filtered_user_tools) == [
+        "authored",
+        "callable_constructed",
+        "first_local",
+    ]
     assert create_function_app(root).get_functions()
-    assert "Ignoring unsupported custom tool" in caplog.text
+
+
+def test_metadata_shaped_noncallable_does_not_suppress_local_fallback(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "metadata_then_tool",
+        """
+        class Metadata:
+            name = "metadata"
+            description = "Not callable"
+
+        metadata = Metadata()
+
+        def valid_tool(value: str) -> str:
+            return value
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert discovered.failed_loads == []
+    assert _tool_names(discovered.user_tools) == ["valid_tool"]
 
 
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:
@@ -349,10 +415,10 @@ def test_dual_decorator_with_schema_tool_then_workflow_tool_is_both(tmp_path: Pa
 
     assert _tool_names(discovered.user_tools) == ["shared"]
     assert discovered.user_tools[0].input_model.__name__ == "SharedArgs"
-    [workflow_tool] = discovered.workflow_tools
-    assert workflow_tool.name == "shared"
-    assert workflow_tool.description == "Shared schema tool"
-    assert workflow_tool.handler is not None
+    [workflow_tool_descriptor] = discovered.workflow_tools
+    assert workflow_tool_descriptor.name == "shared"
+    assert workflow_tool_descriptor.description == "Shared schema tool"
+    assert workflow_tool_descriptor.handler is not None
 
 
 def test_dual_decorator_with_schema_workflow_tool_then_tool_is_both(tmp_path: Path) -> None:
@@ -378,10 +444,10 @@ def test_dual_decorator_with_schema_workflow_tool_then_tool_is_both(tmp_path: Pa
 
     assert _tool_names(discovered.user_tools) == ["shared"]
     assert discovered.user_tools[0].input_model.__name__ == "SharedArgs"
-    [workflow_tool] = discovered.workflow_tools
-    assert workflow_tool.name == "shared"
-    assert workflow_tool.description == "Shared schema tool"
-    assert workflow_tool.handler is not None
+    [workflow_tool_descriptor] = discovered.workflow_tools
+    assert workflow_tool_descriptor.name == "shared"
+    assert workflow_tool_descriptor.description == "Shared schema tool"
+    assert workflow_tool_descriptor.handler is not None
 
 
 @pytest.mark.asyncio
@@ -444,11 +510,11 @@ def test_workflow_tool_public_false_flows_through_discovery(tmp_path: Path) -> N
     discovered = discover_project_tools(tmp_path)
 
     assert discovered.user_tools == []
-    [workflow_tool] = discovered.workflow_tools
-    assert workflow_tool.name == "private_lookup"
-    assert workflow_tool.description == "Internal lookup"
-    assert workflow_tool.public is False
-    assert workflow_tool.handler is not None
+    [workflow_tool_descriptor] = discovered.workflow_tools
+    assert workflow_tool_descriptor.name == "private_lookup"
+    assert workflow_tool_descriptor.description == "Internal lookup"
+    assert workflow_tool_descriptor.public is False
+    assert workflow_tool_descriptor.handler is not None
 
 
 def test_workflow_tool_retry_flows_through_discovery(tmp_path: Path) -> None:
@@ -477,12 +543,12 @@ def test_workflow_tool_retry_flows_through_discovery(tmp_path: Path) -> None:
         """,
     )
 
-    [workflow_tool] = discover_project_tools(tmp_path).workflow_tools
+    [workflow_tool_descriptor] = discover_project_tools(tmp_path).workflow_tools
 
-    assert workflow_tool.retry is not None
-    assert workflow_tool.retry.max_attempts == 3
-    assert workflow_tool.retry.backoff is not None
-    assert workflow_tool.retry.backoff.max == "PT4S"
+    assert workflow_tool_descriptor.retry is not None
+    assert workflow_tool_descriptor.retry.max_attempts == 3
+    assert workflow_tool_descriptor.retry.backoff is not None
+    assert workflow_tool_descriptor.retry.backoff.max == "PT4S"
 
 
 def test_workflow_tool_timeout_flows_through_discovery(tmp_path: Path) -> None:
@@ -498,9 +564,9 @@ def test_workflow_tool_timeout_flows_through_discovery(tmp_path: Path) -> None:
         """,
     )
 
-    [workflow_tool] = discover_project_tools(tmp_path).workflow_tools
+    [workflow_tool_descriptor] = discover_project_tools(tmp_path).workflow_tools
 
-    assert workflow_tool.timeout == "PT20S"
+    assert workflow_tool_descriptor.timeout == "PT20S"
 
 
 def test_workflow_tool_rejects_invalid_retry_type() -> None:
@@ -571,7 +637,6 @@ def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> 
 
 
 def test_discover_user_tools_tracks_failed_loads(tmp_path: Path) -> None:
-    """Test that failed tool loads are tracked and reported."""
     _write_tool_file(
         tmp_path,
         "broken_tool",
@@ -594,7 +659,6 @@ def test_discover_user_tools_tracks_failed_loads(tmp_path: Path) -> None:
 
     result = discover_user_tools(tmp_path)
 
-    # Should have 1 success and 1 failure
     assert len(result.tools) == 1
     assert result.tools[0].name == "working"
     assert len(result.failed_loads) == 1
