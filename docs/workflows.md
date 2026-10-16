@@ -69,7 +69,7 @@ on top.
 In a **standard agent loop**, each tool result returns through the model and
 becomes part of the next loop's context:
 
-![A standard agent loop repeatedly sends growing history, definitions, and tool results through the LLM.](images/dynamic-workflows/standard-agent-loop.gif)
+![An LLM reasoning loop repeatedly sends growing history, definitions, and tool results through the LLM.](images/dynamic-workflows/standard-agent-loop.gif)
 
 With a **Dynamic Workflow**, intermediate results stay in the orchestration;
 the agent plans once and later summarizes the final envelope:
