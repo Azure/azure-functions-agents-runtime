@@ -24,6 +24,7 @@ from ._observability import (
     current_span,
     record_delegate_call,
 )
+from ._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from ._slug import delegate_tool_name
 from ._tool_descriptor import ToolDescriptor, describe_tools
 from .config import ResolvedAgent, SubagentRef
@@ -358,14 +359,18 @@ def _validate_direct_runtime_name_collisions(
     workflow_enabled: bool,
     sandbox_tools: Sequence[ToolDescriptor] | None,
 ) -> None:
-    if not workflow_enabled and not sandbox_tools:
+    sandbox_enabled = any(
+        tool.name == FHS_EXECUTE_PYTHON_TOOL_NAME
+        for tool in describe_tools(sandbox_tools or ())
+    )
+    if not workflow_enabled and not sandbox_enabled:
         return
     authored_tools = discover_user_tools(harness.app_root).tools if tools is None else tools
     validate_runtime_tool_name_collisions(
         source_file=str(harness.app_root),
         authored_tools=authored_tools,
         workflow_enabled=workflow_enabled,
-        sandbox_enabled=bool(sandbox_tools),
+        sandbox_enabled=sandbox_enabled,
     )
 
 

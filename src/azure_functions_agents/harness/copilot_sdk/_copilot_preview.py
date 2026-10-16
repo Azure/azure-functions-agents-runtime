@@ -9,6 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..._sandbox_endpoint import sandbox_runtime_tool_enabled
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
@@ -137,8 +138,9 @@ def validate_copilot_agent(
                 resolved,
                 authored_tools=capabilities.filtered_user_tools or (),
                 workflow_enabled=bool(resolved.workflows is not None and resolved.workflows.enabled),
-                sandbox_enabled=bool(
-                    resolved.sandbox_config is not None and not resolved.tools_disabled
+                sandbox_enabled=sandbox_runtime_tool_enabled(
+                    resolved.sandbox_config,
+                    tools_disabled=resolved.tools_disabled,
                 ),
             )
         except ValueError as exc:

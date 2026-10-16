@@ -404,6 +404,21 @@ def test_sandbox_name_collision_fails_during_registration(preview):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
+def test_ineligible_sandbox_endpoint_does_not_reserve_runtime_tool_name(preview):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(update={
+        "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+            endpoint="https://$UNSET_DYNAMIC_SESSIONS/api"
+        ),
+    })
+    capabilities = replace(
+        capabilities,
+        filtered_user_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
+    )
+
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+
 def test_maf_keeps_authored_approval_that_copilot_cannot_adapt(tmp_path):
     resolved, capabilities = _sample()
     descriptor = tool(name="bounded", approval_mode="always_require")(lambda: "ok")

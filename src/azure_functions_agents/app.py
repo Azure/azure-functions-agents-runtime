@@ -14,6 +14,7 @@ from . import _hosted_skill_app
 from ._agent_identity import agent_id
 from ._logger import logger
 from ._observability import configure_observability
+from ._sandbox_endpoint import sandbox_runtime_tool_enabled
 from ._source_marker import source_marker
 from ._tool_descriptor import ToolDescriptor
 from .config.loader import load_agent_specs, load_global_config
@@ -249,8 +250,9 @@ def _compose_function_app(
                 resolved,
                 authored_tools=capabilities.filtered_user_tools or (),
                 workflow_enabled=bool(resolved.workflows is not None and resolved.workflows.enabled),
-                sandbox_enabled=bool(
-                    resolved.sandbox_config is not None and not resolved.tools_disabled
+                sandbox_enabled=sandbox_runtime_tool_enabled(
+                    resolved.sandbox_config,
+                    tools_disabled=resolved.tools_disabled,
                 ),
             )
         validate_subagent_tool_names(resolved, capabilities)

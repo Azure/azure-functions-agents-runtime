@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -30,6 +31,7 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
@@ -95,6 +97,71 @@ async def test_both_bound_runners_ignore_unsupported_inputs_without_eager_invoca
     assert calls == []
     assert "Ignoring unsupported custom tool" in caplog.text
     assert "private-raw-name" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sandbox_tools", "expect_warning"),
+    [
+        ([tool(lambda: "ok", name="sandbox_tool")], False),
+        ([object()], True),
+    ],
+)
+async def test_run_agent_only_reserves_canonical_sandbox_runtime_tool(
+    sandbox_tools: list[object],
+    expect_warning: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    def fail_discovery(_root: Path) -> Any:
+        raise AssertionError("discover_user_tools should stay lazy without active runtime tools")
+
+    class _Runner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            return runner.AgentResult("session", prompt)
+
+    monkeypatch.setattr(runner, "discover_user_tools", fail_discovery)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _selected: _Runner())
+
+    with caplog.at_level(logging.WARNING):
+        result = await runner.run_agent(
+            "hello",
+            tools=None,
+            mcp_tools=[],
+            sandbox_tools=sandbox_tools,  # type: ignore[arg-type]
+            _harness=harness,
+        )
+
+    assert result.content == "hello"
+    assert ("Ignoring unsupported custom tool" in caplog.text) is expect_warning
+
+
+@pytest.mark.asyncio
+async def test_run_agent_rejects_canonical_sandbox_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    def discovered(_root: Path) -> Any:
+        return SimpleNamespace(
+            tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)]
+        )
+
+    class _Runner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            raise AssertionError("collision must fail before backend execution")
+
+    monkeypatch.setattr(runner, "discover_user_tools", discovered)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _selected: _Runner())
+
+    with pytest.raises(ValueError, match=FHS_EXECUTE_PYTHON_TOOL_NAME):
+        await runner.run_agent(
+            "hello",
+            tools=None,
+            mcp_tools=[],
+            sandbox_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
+            _harness=harness,
+        )
 
 
 @pytest.mark.asyncio

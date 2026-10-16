@@ -13,6 +13,7 @@ import azure.functions as func
 
 from ._agent_run_diagnostics import AgentExecutionSurface
 from ._logger import logger
+from ._sandbox_endpoint import sandbox_runtime_tool_enabled
 from .harness._harness_binding import AppHarness, UnsupportedCapabilityError
 from .hosted_skill_binding import HostedSkill
 from .registration.capabilities import validate_runtime_tool_name_collisions
@@ -102,7 +103,10 @@ def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
             resolved,
             authored_tools=entry.capabilities.filtered_user_tools or (),
             workflow_enabled=False,
-            sandbox_enabled=bool(resolved.sandbox_config is not None and not resolved.tools_disabled),
+            sandbox_enabled=sandbox_runtime_tool_enabled(
+                resolved.sandbox_config,
+                tools_disabled=resolved.tools_disabled,
+            ),
         )
     except ValueError as exc:
         raise UnsupportedCapabilityError(str(exc)) from exc

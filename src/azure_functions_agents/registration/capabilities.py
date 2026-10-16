@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from .._function_tool import WorkflowTool
 from .._logger import logger
 from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME, RUNTIME_WORKFLOW_TOOL_NAMES
+from .._sandbox_endpoint import sandbox_runtime_tool_enabled
 from .._slug import delegate_tool_name
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
@@ -209,7 +210,10 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     names.update(tool.name for tool in capabilities.filtered_mcp_tools or ())
     names.update(tool.name for tool in capabilities.filtered_workflow_tools)
     names.update(tool.name for tool in capabilities.web_request_tools or ())
-    if resolved.sandbox_config is not None and not resolved.tools_disabled:
+    if sandbox_runtime_tool_enabled(
+        resolved.sandbox_config,
+        tools_disabled=resolved.tools_disabled,
+    ):
         names.add(SANDBOX_TOOL_NAME)
     names.discard("")
     return names

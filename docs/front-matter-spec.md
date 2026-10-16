@@ -613,8 +613,10 @@ system_tools:
 - **Type:** `object` (global), `boolean` (agent)
 - **Description:** Configures the built-in `fhs_execute_python` tool using Azure Container Apps dynamic sessions. It is on by default. Agents can opt out with `false`.
 
-The `fhs_` prefix avoids collisions with user-authored functions. If authored
-instructions, skills, or selectors mean the runtime sandbox, update them to
+The `fhs_` prefix avoids collisions with user-authored functions. Runtime
+injection and its built-in guidance update automatically, so most users do not
+need a migration step. Only explicitly hardcoded references to the runtime
+sandbox in authored instructions, skills, or selectors need
 `fhs_execute_python` (or `custom:fhs_execute_python` in Copilot selectors).
 There is no old-name alias: an authored `execute_python` stays independent, and
 an authored `fhs_execute_python` collides only when the sandbox tool is enabled
@@ -751,12 +753,14 @@ agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
 workflow task targets. No new role or starter fields are required; workflow
 identity comes from the agent's canonical slug.
 
-**Migrating workflow tool names:** The `fhs_` prefix avoids collisions with
-user-authored functions. Update authored instructions, skills, and selectors
-that mean the runtime control-plane tools to `fhs_start_workflow`,
-`fhs_get_workflow_status`, `fhs_list_workflows`, `fhs_cancel_workflow`, and
-`fhs_terminate_workflow` (`custom:fhs_start_workflow` in Copilot selectors).
-There are no old-name aliases.
+The `fhs_` prefix avoids collisions with user-authored functions. Runtime
+injection and its built-in guidance update automatically, so most users do not
+need a migration step. Only explicitly hardcoded references to the runtime
+control-plane tools in authored instructions, skills, or selectors need
+`fhs_start_workflow`, `fhs_get_workflow_status`, `fhs_list_workflows`,
+`fhs_cancel_workflow`, and `fhs_terminate_workflow`
+(`custom:fhs_start_workflow` in Copilot selectors). There are no old-name
+aliases.
 
 Authored `start_workflow`, `get_workflow_status`, `list_workflows`,
 `cancel_workflow`, and `terminate_workflow` remain usable as authored names.

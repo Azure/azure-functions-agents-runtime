@@ -26,6 +26,7 @@ from .._observability import (
     start_span,
 )
 from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
+from .._sandbox_endpoint import resolve_sandbox_endpoint
 from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import ResolvedAgent
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
@@ -34,34 +35,6 @@ if TYPE_CHECKING:
     from azure.identity.aio import DefaultAzureCredential
 
 _API_VERSION = "2025-10-02-preview"
-
-# The managed-identity bearer token is minted for the Azure Container Apps
-# dynamic sessions audience and must only ever be attached to a genuine dynamic
-# sessions host. Endpoints are restricted to subdomains of ``dynamicsessions.io``
-# so a mis-set app setting cannot redirect the token elsewhere.
-_ALLOWED_SESSIONS_HOST_SUFFIX = ".dynamicsessions.io"
-
-
-def _is_allowed_sessions_endpoint(endpoint: str) -> bool:
-    """Return ``True`` only for https URLs on an ACA dynamic sessions host.
-
-    The resolved endpoint host must be a subdomain of ``dynamicsessions.io``
-    (``*.dynamicsessions.io``). Any non-https scheme, embedded userinfo, empty
-    host, lookalike host, or malformed URL is rejected so the tool (and the
-    managed-identity token it carries) is never bound to an unintended host.
-    """
-    try:
-        parsed = urllib.parse.urlparse(endpoint)
-    except ValueError:
-        return False
-    if parsed.scheme != "https":
-        return False
-    if "@" in parsed.netloc:
-        return False
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return False
-    return host.endswith(_ALLOWED_SESSIONS_HOST_SUFFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -324,27 +297,27 @@ def create_sandbox_tools(
 
     Returns a list with one tool, or an empty list if the config is invalid.
     """
-    raw_endpoint = config.get("endpoint", "")
-    if not raw_endpoint:
+    resolution = resolve_sandbox_endpoint(config)
+    raw_endpoint = resolution.raw_endpoint
+    if resolution.status == "missing":
         logger.warning("dynamic_sessions_code_interpreter: missing 'endpoint', skipping")
         return []
-
-    endpoint = substitute_env_vars_in_value(str(raw_endpoint))
-    if not endpoint or has_unresolved_placeholders(endpoint):
+    if resolution.status == "unresolved":
         logger.warning(
             "dynamic_sessions_code_interpreter: could not resolve endpoint '%s', skipping",
             raw_endpoint,
         )
         return []
-
-    if not _is_allowed_sessions_endpoint(endpoint):
+    if resolution.status == "invalid":
         logger.warning(
             "dynamic_sessions_code_interpreter: resolved endpoint '%s' failed validation "
             "(must be an https URL whose host is *.dynamicsessions.io); "
             "skipping tool creation",
-            endpoint,
+            resolution.endpoint,
         )
         return []
+    endpoint = resolution.endpoint
+    assert endpoint is not None
 
     raw_client_id = config.get("client_id")
     client_id = None

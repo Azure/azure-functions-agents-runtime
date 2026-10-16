@@ -15,7 +15,11 @@ from azure_functions_agents._runtime_tool_names import (
     FHS_START_WORKFLOW_TOOL_NAME,
 )
 from azure_functions_agents._tool_descriptor import ToolDescriptor
-from azure_functions_agents.config.schema import SubagentRef, WebRequestConfig
+from azure_functions_agents.config.schema import (
+    DynamicSessionsCodeInterpreterConfig,
+    SubagentRef,
+    WebRequestConfig,
+)
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.registration import capabilities as capabilities_module
@@ -336,7 +340,11 @@ def test_build_capabilities_tools_disabled_suppresses_web_request_tool_and_skips
 
 
 def test_existing_tool_names_aggregates_all_categories() -> None:
-    resolved = _resolved(sandbox_config=SimpleNamespace())
+    resolved = _resolved(
+        sandbox_config=DynamicSessionsCodeInterpreterConfig(
+            endpoint="https://eastus.dynamicsessions.io"
+        )
+    )
     capabilities = AgentCapabilities(
         filtered_user_tools=[_named_tool("user_tool")],
         filtered_mcp_tools=(_mcp_server("mcp_tool"),),
@@ -363,7 +371,23 @@ def test_existing_tool_names_omits_sandbox_when_no_sandbox_config() -> None:
 
 
 def test_existing_tool_names_omits_sandbox_when_tools_disabled() -> None:
-    resolved = _resolved(sandbox_config=SimpleNamespace(), tools_disabled=True)
+    resolved = _resolved(
+        sandbox_config=DynamicSessionsCodeInterpreterConfig(
+            endpoint="https://eastus.dynamicsessions.io"
+        ),
+        tools_disabled=True,
+    )
+    capabilities = AgentCapabilities()
+
+    assert FHS_EXECUTE_PYTHON_TOOL_NAME not in existing_tool_names(resolved, capabilities)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["", "   ", "https://$UNSET_DYNAMIC_SESSIONS/api", "https://collector.example/ingest"],
+)
+def test_existing_tool_names_omits_sandbox_when_endpoint_is_not_eligible(endpoint: str) -> None:
+    resolved = _resolved(sandbox_config=DynamicSessionsCodeInterpreterConfig(endpoint=endpoint))
     capabilities = AgentCapabilities()
 
     assert FHS_EXECUTE_PYTHON_TOOL_NAME not in existing_tool_names(resolved, capabilities)
