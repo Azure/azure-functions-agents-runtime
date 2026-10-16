@@ -122,7 +122,13 @@ class CopilotProvider(ABC):
         """Return the safe provider-setup diagnostic."""
 
     @abstractmethod
-    def sdk_config(self, model: str, tokens: ProviderTokenSource) -> ProviderConfig:
+    def sdk_config(
+        self,
+        model: str,
+        tokens: ProviderTokenSource,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ProviderConfig:
         """Build the SDK ProviderConfig lazily."""
 
 
@@ -149,13 +155,19 @@ class OpenAIProvider(CopilotProvider):
             f"{EnvVar.OPENAI_API_KEY} configuration."
         )
 
-    def sdk_config(self, model: str, _tokens: ProviderTokenSource) -> ProviderConfig:
+    def sdk_config(
+        self,
+        model: str,
+        _tokens: ProviderTokenSource,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ProviderConfig:
         from copilot.session import ProviderConfig
 
         async def token(_args: ProviderTokenArgs) -> str:
             return self.api_key
 
-        return ProviderConfig(
+        provider = ProviderConfig(
             type=_PROVIDER_WIRE_OPENAI,
             wire_api=_WIRE_API_RESPONSES,
             base_url=_OPENAI_BASE_URL,
@@ -163,6 +175,9 @@ class OpenAIProvider(CopilotProvider):
             wire_model=model,
             bearer_token_provider=token,
         )
+        if max_output_tokens is not None:
+            provider["max_output_tokens"] = max_output_tokens
+        return provider
 
 
 @dataclass(frozen=True)
@@ -193,7 +208,13 @@ class AzureOpenAIProvider(CopilotProvider):
             f"{self.auth_label} configuration."
         )
 
-    def sdk_config(self, model: str, tokens: ProviderTokenSource) -> ProviderConfig:
+    def sdk_config(
+        self,
+        model: str,
+        tokens: ProviderTokenSource,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ProviderConfig:
         from copilot.session import ProviderConfig
 
         provider = ProviderConfig(
@@ -213,6 +234,8 @@ class AzureOpenAIProvider(CopilotProvider):
                 "Copilot Azure OpenAI could not acquire an Entra token. "
                 "Check the approved Azure credential configuration and deployment access.",
             )
+        if max_output_tokens is not None:
+            provider["max_output_tokens"] = max_output_tokens
         return provider
 
 
@@ -236,10 +259,16 @@ class FoundryProvider(CopilotProvider):
             "the deployment, and the approved Azure credential configuration."
         )
 
-    def sdk_config(self, model: str, tokens: ProviderTokenSource) -> ProviderConfig:
+    def sdk_config(
+        self,
+        model: str,
+        tokens: ProviderTokenSource,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ProviderConfig:
         from copilot.session import ProviderConfig
 
-        return ProviderConfig(
+        provider = ProviderConfig(
             type=_PROVIDER_WIRE_OPENAI,
             wire_api=_WIRE_API_RESPONSES,
             base_url=f"{self.endpoint}{_FOUNDRY_OPENAI_V1_SUFFIX}",
@@ -251,6 +280,9 @@ class FoundryProvider(CopilotProvider):
                 "Check the approved Azure credential configuration and project access.",
             ),
         )
+        if max_output_tokens is not None:
+            provider["max_output_tokens"] = max_output_tokens
+        return provider
 
 
 _PROVIDERS: dict[ProviderKind, type[CopilotProvider]] = {

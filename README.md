@@ -716,8 +716,8 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` | Per-call timeout in seconds (default `900`) |
 | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
-| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (`low`, `medium`, `high`, `xhigh`, `max`) |
-| `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (`none`, `concise`, `detailed`) |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (`low`, `medium`, `high`, `xhigh`, `max`). Invalid values are warned and ignored so the SDK/provider default applies. |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (`none`, `concise`, `detailed`). Invalid values are warned and ignored so the SDK/provider default applies. |
 
 ## Development
 

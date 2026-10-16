@@ -203,6 +203,20 @@ def test_azure_api_key_provider_avoids_credential_construction(binding, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_provider_applies_request_local_output_cap_without_mutating_binding(binding):
+    owner = runtime.get_runtime(binding)
+
+    capped = execution._provider(binding, owner, "per-agent-model", max_output_tokens=64)
+    uncapped = execution._provider(binding, owner, "per-agent-model")
+
+    assert capped["max_output_tokens"] == 64
+    assert "max_output_tokens" not in uncapped
+    assert "max_output_tokens" not in owner._runner.provider.sdk_config(
+        "per-agent-model", owner
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider", "endpoint", "scope"),
     [

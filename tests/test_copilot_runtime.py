@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -184,6 +185,49 @@ def test_reasoning_app_settings_are_frozen_on_the_selected_harness(preview, monk
     assert state.reasoning_summary == "detailed"
 
 
+def test_reasoning_effort_preserves_new_sdk_literal_value(preview, monkeypatch):
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "future")
+    runtime._reasoning_effort_values.cache_clear()
+    monkeypatch.setattr(
+        runtime,
+        "get_args",
+        lambda _: ("low", "medium", "high", "xhigh", "max", "future"),
+    )
+
+    try:
+        harness = _harness.get_harness(preview, new_app=True)
+    finally:
+        runtime._reasoning_effort_values.cache_clear()
+
+    assert harness.name is HarnessKind.COPILOT
+    assert copilot_state(harness).reasoning_effort == "future"
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        (EnvVar.REASONING_EFFORT, "none", "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT='none'"),
+        (EnvVar.REASONING_SUMMARY, "auto", "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY='auto'"),
+    ],
+)
+def test_invalid_reasoning_settings_warn_and_omit_override(
+    preview, monkeypatch, caplog: pytest.LogCaptureFixture, name, value, expected
+):
+    monkeypatch.setenv(name, value)
+
+    with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
+        harness = _harness.get_harness(preview, new_app=True)
+
+    assert harness.name is HarnessKind.COPILOT
+    state = copilot_state(harness)
+    if name is EnvVar.REASONING_EFFORT:
+        assert state.reasoning_effort is None
+    else:
+        assert state.reasoning_summary is None
+    assert expected in caplog.text
+    assert "SDK/provider default applies" in caplog.text
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -220,12 +264,12 @@ def test_host_owned_worker_and_hosting_settings_are_accepted(preview, monkeypatc
         (EnvVar.REASONING_EFFORT, "", True, ""),
         (EnvVar.REASONING_EFFORT, "   ", True, ""),
         (EnvVar.REASONING_EFFORT, "high", True, ""),
-        (EnvVar.REASONING_EFFORT, "none", False, "one of"),
+        (EnvVar.REASONING_EFFORT, "none", True, ""),
         (EnvVar.REASONING_SUMMARY, None, True, ""),
         (EnvVar.REASONING_SUMMARY, "", True, ""),
         (EnvVar.REASONING_SUMMARY, "   ", True, ""),
         (EnvVar.REASONING_SUMMARY, "detailed", True, ""),
-        (EnvVar.REASONING_SUMMARY, "auto", False, "one of"),
+        (EnvVar.REASONING_SUMMARY, "auto", True, ""),
     ],
 )
 def test_copilot_environment_edge_semantics(preview, monkeypatch, name, value, allowed, diagnostic):

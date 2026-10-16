@@ -166,7 +166,7 @@ network or configuration failures surface as errors, never a local fallback.
 | `AzureWebJobsStorage__clientId` / `AZURE_CLIENT_ID` | Optional managed-identity client ID for storage; the storage-specific `clientId` takes precedence. |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER` | Blob container name; defaults to `azure-functions-agents` (the same container the MAF history provider uses, in a disjoint prefix). |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Existing local root override; defaults to `~/.azure-functions-agents`. Determines the local SDK workspace even with Blob persistence, and the native file storage root when no Blob setting is configured. Keep it stable when resuming SDK sessions. |
-| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` / `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional native Copilot reasoning settings captured once per app. Valid effort values are `low`, `medium`, `high`, `xhigh`, `max`; valid summary values are `none`, `concise`, `detailed`. Invalid values fail app selection. |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` / `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional native Copilot reasoning settings captured once per app. Valid effort values are `low`, `medium`, `high`, `xhigh`, `max`; valid summary values are `none`, `concise`, `detailed`. Invalid values emit a warning and are omitted so the native SDK/provider default applies. |
 
 Storage configuration is captured per app. Restart the host after changing
 captured settings, and check both process variables and `local.settings.json`

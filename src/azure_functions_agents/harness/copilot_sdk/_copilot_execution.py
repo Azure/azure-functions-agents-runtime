@@ -223,10 +223,20 @@ def _tool(function: ToolDescriptor, calls: CopilotToolCalls, event_sink: _EventS
     )
 
 
-def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
+def _provider(
+    harness: AppHarness,
+    tokens: ProviderTokenSource,
+    model: str,
+    *,
+    max_output_tokens: int | None = None,
+) -> ProviderConfig:
     provider = get_runtime(harness)._runner.provider
     try:
-        config = provider.sdk_config(model, tokens)
+        config = provider.sdk_config(
+            model,
+            tokens,
+            max_output_tokens=max_output_tokens,
+        )
     except CopilotPreviewError:
         raise
     except Exception:
@@ -530,9 +540,12 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     sdk_tools = [_tool(function, calls, request.event_sink) for function in request.tools]
     token_source = _RequestTokenSource(owner)
     try:
-        provider = _provider(harness, token_source, request.model)
-        if request.max_output_tokens is not None:
-            provider["max_output_tokens"] = request.max_output_tokens
+        provider = _provider(
+            harness,
+            token_source,
+            request.model,
+            max_output_tokens=request.max_output_tokens,
+        )
         async with lifecycle.session_lock(request), asyncio.timeout_at(request.deadline):
             route = lifecycle.session_storage
             if route is None:

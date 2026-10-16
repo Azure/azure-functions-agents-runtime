@@ -310,13 +310,13 @@ the selected runner constructs SDK objects at execution. MAF and Copilot
 therefore share authoring and policy inputs but not SDK-specific
 construction, auth timing, or result translation.
 
-On the Copilot path, valid non-empty `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`
-and `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` values are captured once in the
-immutable app binding alongside the selected provider/storage settings and
-passed through unchanged to native create/resume calls. Invalid values fail app
-selection. `HarnessRequest.max_output_tokens` flows into a request-local
-Copilot `ProviderConfig.max_output_tokens` override, so per-agent output caps
-remain isolated to the current turn and do not mutate the shared app provider.
+When the selected harness supports them, non-empty
+`AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` and
+`AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` values are accepted as app-level
+reasoning overrides and handed to the selected harness's native reasoning
+surface using that harness's own validation and defaulting behavior.
+`HarnessRequest.max_output_tokens` is a per-request output cap passed
+downstream without mutating shared app-level provider settings.
 
 One concrete runner owns execution, qualification, defaults, history, and
 observability policy. A construction callable captures the selected settings

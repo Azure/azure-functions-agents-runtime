@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from functools import partial
+from functools import cache, partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 from ..._credential import build_async_credential
 from ..._logger import logger
@@ -20,16 +20,22 @@ from .._provider_config import resolve_inference_target
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
     from copilot import CopilotClient
-    from copilot.session import ProviderTokenArgs
+    from copilot.session import (
+        ProviderTokenArgs,
+        ReasoningEffort,
+        ReasoningSummary,
+    )
 
     from ._copilot_runner import CopilotRunner
+else:
+    type ReasoningEffort = str
+    type ReasoningSummary = str
+
+type ReasoningEffortSetting = ReasoningEffort
+type ReasoningSummarySetting = ReasoningSummary
 
 SDK_DISTRIBUTION = "github-copilot-sdk"
 PROVIDER_ENV = EnvVar.PROVIDER
-type ReasoningEffortSetting = Literal["low", "medium", "high", "xhigh", "max"]
-type ReasoningSummarySetting = Literal["none", "concise", "detailed"]
-_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
-_REASONING_SUMMARIES = frozenset({"none", "concise", "detailed"})
 
 
 class CopilotPreviewError(RuntimeError):
@@ -46,44 +52,69 @@ def check_sdk_dependency() -> None:
         ) from None
 
 
+def _literal_values(name: str, values: tuple[object, ...]) -> frozenset[str]:
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise CopilotPreviewError(
+                f"Copilot preview requires {name} to export string Literal values."
+            )
+        normalized.add(value)
+    return frozenset(normalized)
+
+
+@cache
+def _reasoning_effort_values() -> frozenset[str]:
+    from copilot.session import ReasoningEffort
+
+    return _literal_values("ReasoningEffort", get_args(ReasoningEffort))
+
+
+@cache
+def _reasoning_summary_values() -> frozenset[str]:
+    from copilot.session import ReasoningSummary
+
+    return _literal_values("ReasoningSummary", get_args(ReasoningSummary))
+
+
 def _validate_reasoning_setting(
-    name: EnvVar, *, allowed: frozenset[str]
+    name: EnvVar, *, allowed: Callable[[], frozenset[str]]
 ) -> str | None:
     value = runtime_env_value(name)
     if not value:
         return None
-    if value not in allowed:
-        allowed_values = ", ".join(sorted(allowed))
-        raise UnsupportedCapabilityError(
-            f"Copilot preview requires {name} to be one of: {allowed_values}."
+    allowed_values_set = allowed()
+    if value not in allowed_values_set:
+        allowed_values = ", ".join(sorted(allowed_values_set))
+        logger.warning(
+            "Ignoring invalid Copilot reasoning setting %s=%r; expected one of: %s. "
+            "Omitting the override so the SDK/provider default applies.",
+            name,
+            value,
+            allowed_values,
         )
+        return None
     return value
 
 
 def _reasoning_effort_from_environment() -> ReasoningEffortSetting | None:
-    value = _validate_reasoning_setting(EnvVar.REASONING_EFFORT, allowed=_REASONING_EFFORTS)
-    if value is None:
-        return None
-    if value == "low":
-        return "low"
-    if value == "medium":
-        return "medium"
-    if value == "high":
-        return "high"
-    if value == "xhigh":
-        return "xhigh"
-    return "max"
+    return cast(
+        ReasoningEffortSetting | None,
+        _validate_reasoning_setting(
+            EnvVar.REASONING_EFFORT,
+            allowed=_reasoning_effort_values,
+        )
+    )
 
 
 def _reasoning_summary_from_environment() -> ReasoningSummarySetting | None:
-    value = _validate_reasoning_setting(EnvVar.REASONING_SUMMARY, allowed=_REASONING_SUMMARIES)
-    if value is None:
-        return None
-    if value == "none":
-        return "none"
-    if value == "concise":
-        return "concise"
-    return "detailed"
+    return cast(
+        ReasoningSummarySetting | None,
+        _validate_reasoning_setting(
+            EnvVar.REASONING_SUMMARY,
+            allowed=_reasoning_summary_values,
+        )
+    )
 
 
 def select_copilot_harness(root: Path) -> AppHarness:
