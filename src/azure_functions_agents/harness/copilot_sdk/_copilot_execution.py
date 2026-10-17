@@ -9,13 +9,14 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager, context
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
+from ..._agent_run_diagnostics import _set_run_summary_attributes
 from ..._logger import logger
 from ..._observability import (
     ATTR_TOOL_OUTCOME,
     FaultDomain,
+    RuntimeSpan,
     SpanOutcome,
     capture_current_context,
-    current_span,
 )
 from ..._skill_policy import SkillPolicy
 from ..._tool_descriptor import ToolDescriptor
@@ -28,7 +29,7 @@ from ._copilot_capabilities import (
     mcp_configuration,
     permission_handler,
 )
-from ._copilot_observability import CopilotEventTelemetry
+from ._copilot_observability import CopilotEventTelemetry, invocation_span
 from ._copilot_preview import CopilotPreviewError
 from ._copilot_runtime import CopilotRuntime, get_runtime
 from ._copilot_session_fs import open_session_fs
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     from copilot.session_events import SessionEvent as CopilotSessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
-    from ...runner import AgentResult
+    from ...runner import AgentResult, _DelegateErrorTracker
     from ._copilot_providers import ProviderTokenSource
     from ._copilot_session_fs import CopilotSessionFs
 
@@ -440,12 +441,27 @@ async def _run_session_turn(
             recorder.emit_counts(input_tokens=input_tokens, output_tokens=output_tokens)
 
 
-async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
+async def run(
+    harness: AppHarness,
+    request: HarnessRequest,
+    *,
+    delegate_tracker: _DelegateErrorTracker | None = None,
+) -> AgentResult:
     if request.max_output_tokens is not None:
         raise UnsupportedCapabilityError(
             "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
             "Remove the cap or use the MAF harness."
         )
+    with invocation_span(request) as run_span:
+        result = await _run(harness, request, run_span)
+        result.delegate_error_count = delegate_tracker.count if delegate_tracker else 0
+        _set_run_summary_attributes(run_span, result)
+        return result
+
+
+async def _run(
+    harness: AppHarness, request: HarnessRequest, run_span: RuntimeSpan
+) -> AgentResult:
     from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
     from copilot.session_events import (
         AssistantMessageData,
@@ -461,7 +477,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
 
     owner = get_runtime(harness)
     lifecycle = _ExecutionLifecycle.create(owner, request)
-    run_span = current_span()
     calls = CopilotToolCalls(
         parent_context=capture_current_context(),
         run_span=run_span,

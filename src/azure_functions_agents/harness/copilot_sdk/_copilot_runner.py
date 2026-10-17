@@ -222,9 +222,11 @@ class CopilotRunner:
             ),
             event_sink=event_sink,
         )
-        result = await _copilot_execution.run(self._harness, request)
-        result.delegate_error_count = delegate_tracker.count if delegate_tracker else 0
-        return result
+        if delegate_tracker is None:
+            return await _copilot_execution.run(self._harness, request)
+        return await _copilot_execution.run(
+            self._harness, request, delegate_tracker=delegate_tracker,
+        )
 
     async def run_agent_stream(
         self,

@@ -38,6 +38,7 @@ from azure_functions_agents.workflows.integration import data_driven_workflows_s
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
 from tests._harness_helpers import copilot_state, make_copilot_harness
 from tests.test_copilot_execution import _fake_client, _request
+from tests.test_copilot_execution import invocation_spans as invocation_spans
 from tests.test_copilot_execution import preview as preview
 
 
@@ -67,6 +68,108 @@ def _exception_event(span, *, message: str):
     assert event.attributes["exception.message"] == message
     assert message in event.attributes["exception.stacktrace"]
     return event
+
+
+@pytest.mark.asyncio
+async def test_direct_invocation_summary_includes_recovered_delegate_errors(
+    preview, native, monkeypatch, invocation_spans,
+):
+    from copilot.tools import ToolInvocation
+
+    from azure_functions_agents._agent_run_diagnostics import _total_tool_error_count
+
+    _, exporter = invocation_spans
+    monkeypatch.setattr(
+        runner, "run_leaf_agent_task", AsyncMock(side_effect=RuntimeError("leaf failed")),
+    )
+    specialist = _specialist()
+    catalog = build_catalog({
+        specialist.slug: CatalogEntry(specialist, AgentCapabilities()),
+    })
+    session = native.create_session.return_value
+
+    async def create(**options):
+        [delegate] = options["tools"]
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+            tools=[SimpleNamespace(name=delegate.name)],
+        )
+
+        async def send(**_kwargs):
+            await delegate.handler(ToolInvocation(
+                session_id="example", tool_call_id="delegate-call",
+                tool_name=delegate.name, arguments={"task": "analyze"},
+            ))
+            return session.send_and_wait.return_value
+
+        session.send_and_wait.side_effect = send
+        return session
+
+    native.create_session.side_effect = create
+    try:
+        result = await copilot_state(preview).run_agent(
+            "hello", session_id="example", session_is_new=True, agent_name="main",
+            deadline=asyncio.get_running_loop().time() + 10,
+            subagents=[SubagentRef(agent=specialist.slug)], catalog=catalog,
+        )
+    finally:
+        await _harness_lifecycle._shutdown_harnesses()
+
+    invocation = next(
+        span for span in exporter.get_finished_spans() if span.name.startswith("invoke_agent ")
+    )
+    assert result.delegate_error_count == 1
+    assert invocation.attributes["af.agent.tool_error_count"] == _total_tool_error_count(result)
+    assert invocation.attributes["af.agent.outcome"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "timeout", "disconnect"])
+async def test_sse_semantic_invocation_tracks_actual_execution_lifecycle(
+    preview, native, invocation_spans, outcome,
+):
+    _, exporter = invocation_spans
+    session = native.create_session.return_value
+    if outcome != "success":
+        async def wait(**_kwargs):
+            await asyncio.Event().wait()
+
+        session.send_and_wait.side_effect = wait
+    stream = copilot_state(preview).run_agent_stream(
+        "hello", session_is_new=True, agent_name="main",
+        deadline=asyncio.get_running_loop().time() + (0.05 if outcome == "timeout" else 5),
+    )
+    events = []
+    try:
+        if outcome == "disconnect":
+            events.append(json.loads((await anext(stream)).removeprefix("data: ").strip()))
+            await stream.aclose()
+        else:
+            events = [
+                json.loads(chunk.removeprefix("data: ").strip()) async for chunk in stream
+            ]
+    finally:
+        await stream.aclose()
+        await _harness_lifecycle._shutdown_harnesses()
+
+    spans = exporter.get_finished_spans()
+    [invocation] = [span for span in spans if span.name.startswith("invoke_agent ")]
+    [outer] = [span for span in spans if span.name == "agent.run main"]
+    assert invocation.parent.span_id == outer.context.span_id
+    assert invocation.context.trace_id == outer.context.trace_id
+    assert events[0]["type"] == "session"
+    assert invocation.attributes["gen_ai.conversation.id"] == events[0]["session_id"]
+    assert native.create_session.call_args.kwargs["session_id"] != events[0]["session_id"]
+    assert invocation.attributes["gen_ai.request.model"] == "gpt-4.1-mini"
+    assert "gen_ai.operation.name" not in outer.attributes
+    assert invocation.attributes["af.agent.outcome"] == (
+        "cancelled" if outcome == "disconnect" else "error" if outcome == "timeout" else "success"
+    )
+    assert invocation.status.status_code.name == ("ERROR" if outcome == "timeout" else "UNSET")
+    if outcome != "disconnect":
+        assert events[-1]["type"] == ("error" if outcome == "timeout" else "done")
+    session.on.assert_called_once()
+    session.unsubscribe.assert_called_once()
+    session.disconnect.assert_awaited_once()
 
 
 @pytest.mark.asyncio

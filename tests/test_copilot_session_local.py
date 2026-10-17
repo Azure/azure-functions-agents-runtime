@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -60,3 +63,24 @@ async def test_posix_callbacks_still_obey_the_windows_host(local_route):
         assert error.value.errno == errno.EINVAL
     finally:
         await provider.close()
+
+
+@pytest.mark.parametrize("birthtime", [None, 1234567890.0])
+def test_stat_uses_birthtime_when_available_and_ctime_otherwise(tmp_path, monkeypatch, birthtime):
+    info = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600, st_size=17, st_mtime=1234567800.0, st_ctime=1234567900.0,
+    )
+    if birthtime is not None:
+        info.st_birthtime = birthtime
+    backend = LocalSessionFileBackend(tmp_path)
+    monkeypatch.setattr(backend, "_path", Mock(return_value=Mock(stat=Mock(return_value=info))))
+
+    result = backend._stat("file")
+
+    assert result.is_file
+    assert not result.is_directory
+    assert result.size == 17
+    assert result.mtime == datetime.fromtimestamp(info.st_mtime, UTC)
+    assert result.birthtime == datetime.fromtimestamp(
+        birthtime if birthtime is not None else info.st_ctime, UTC,
+    )

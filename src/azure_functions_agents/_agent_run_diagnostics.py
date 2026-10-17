@@ -71,11 +71,17 @@ def _total_tool_error_count(result: Any) -> int:
     return _tool_error_count(tool_calls) + delegate_error_count
 
 
-def _set_run_result_attributes(span: Any, result: Any) -> None:
-    """Attach non-sensitive run-summary attributes; content only when opted in."""
+def _set_run_summary_attributes(span: Any, result: Any) -> None:
+    """Attach content-free run-summary attributes."""
     tool_calls = list(getattr(result, "tool_calls", None) or [])
     content = str(getattr(result, "content", "") or "")
     span.set_attribute("af.agent.tool_call_count", len(tool_calls))
     span.set_attribute("af.agent.tool_error_count", _total_tool_error_count(result))
     span.set_attribute("af.agent.response_bytes", len(content))
+
+
+def _set_run_result_attributes(span: Any, result: Any) -> None:
+    """Attach non-sensitive run-summary attributes; content only when opted in."""
+    _set_run_summary_attributes(span, result)
+    content = str(getattr(result, "content", "") or "")
     span.set_content("af.agent.response", content)
