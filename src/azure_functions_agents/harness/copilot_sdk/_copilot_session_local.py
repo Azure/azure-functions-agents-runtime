@@ -83,10 +83,7 @@ class LocalSessionFileBackend:
 
     def _stat(self, path: str) -> SessionFsFileInfo:
         info = self._path(path).stat()
-        try:
-            birthtime = info.st_birthtime
-        except AttributeError:
-            birthtime = info.st_ctime
+        birthtime: float = getattr(info, "st_birthtime", info.st_ctime)
         return SessionFsFileInfo(
             is_file=stat.S_ISREG(info.st_mode),
             is_directory=stat.S_ISDIR(info.st_mode),

@@ -364,9 +364,9 @@ path. The shared run-log sensitive-data gate applies to both harnesses.
 - Runtime-owned invocation telemetry is harness-neutral: both MAF and Copilot
   use `agent.run {slug}` spans and the shared `af.agent.*` attributes, with
   `af.agent.harness=maf|copilot` identifying the selected app-level harness. The
-  runtime does not create a synthetic harness span and does not add
-  Copilot-only GenAI invocation fields when the shared fields carry the same
-  stable facts.
+  outer boundary remains unchanged. The semantic execution child described
+  in the runtime-owned GenAI invocation amendment below supplies Copilot's
+  adapter-owned invocation fields.
 - Keep `ASSISTANT_USAGE` as a custom `af.agent.model.usage` event on the owning
   Copilot invocation span. Reuse standard `gen_ai.usage.*` fields only where
   the reported SDK semantics match exactly, keep the existing once-only
@@ -389,6 +389,81 @@ path. The shared run-log sensitive-data gate applies to both harnesses.
   results, errors, cancellation, or SSE termination.
 - Coverage is turn-scoped. Do not fabricate model spans or missing timing,
   claim complete native hierarchy, or promise recovery of lost events.
+
+### 4.10 Runtime-owned GenAI invocation amendment
+
+**Amendment status: Finalized.** larohra approved the detailed plan on
+2026-10-16, including the clarification that invocation usage totals are optional
+enrichment, not a semantic-conventions or discovery prerequisite.
+
+Copilot execution emits one runtime-owned semantic agent invocation beneath
+the existing `agent.run {slug}` boundary. This extends the telemetry addendum:
+the outer invocation remains harness-neutral, while the Copilot adapter supplies
+the GenAI execution boundary that MAF already supplies through its framework
+instrumentation. MAF instrumentation is unchanged.
+
+#### Boundaries and ownership
+
+- Keep `agent.run {slug}`, its shared `af.agent.*` fields, and
+  `af.agent.harness=maf|copilot`. Do not mark the outer span as `invoke_agent`.
+- Emit exactly one `invoke_agent {readable-agent-name}` semantic span for each
+  actual Copilot execution, including streaming, delegates, and workflow leaves.
+  Start it at the adapter execution boundary after the request identity is
+  resolved, before native session acquisition and turn execution. Its duration
+  includes adapter-owned setup and cleanup, not just model inference.
+- Use `gen_ai.operation.name=invoke_agent` and an `INTERNAL` span kind.
+  This is the host-observed execution boundary, not a claim that the native
+  subprocess runs in the Python process.
+- Parent the semantic invocation to the active caller context. Registered
+  ingress and streaming surfaces retain their outer runtime span. Direct runner
+  calls without an outer runtime span still emit the semantic invocation under
+  the available caller context; do not fabricate an ingress span.
+- Capture the semantic invocation context explicitly for custom-wrapper and
+  event-derived tool spans. Native callback context must not introduce parents
+  whose spans are not exported. Preserve the delegate tool -> specialist
+  execution relationship and isolation between concurrently running agents.
+- Keep runtime summaries and lifecycle events on their existing runtime span.
+  Keep SDK usage/skill observations on their existing owning runtime span where
+  one exists; when no runtime span exists, attach them to the semantic invocation.
+  Do not mutate an unrelated caller span to supply missing runtime telemetry.
+
+#### Attributes, usage, and failures
+
+- Reuse the existing stable agent ID and app-qualified readable name for
+  `gen_ai.agent.id` and `gen_ai.agent.name`. Set `gen_ai.conversation.id` from
+  the resolved public session ID, never the native storage/session identifier.
+  Emit the configured `gen_ai.request.model` when known. Agent description is
+  optional and follows the existing content/privacy policy.
+- Provider attributes describe proven provider semantics, not the harness name.
+  Omit unavailable values. Any legacy Azure compatibility attribute must have
+  documented semantics and exporter evidence; its presence alone is not proof
+  of Agents-view compatibility.
+- Invocation-level token totals are recommended optional enrichment, not required
+  for semantic invocation discovery or compatibility. Defer this enrichment:
+  retain the existing deduplicated public usage events and internal usage recorder
+  without changing public results or accounting. Do not infer missing usage or
+  recursively aggregate child invocation totals.
+- Record actual invocation failures with error status, `error.type`, and
+  existing fault-domain/exception policy. Recovered tool errors remain on tool
+  spans without making a successful invocation fail. Cancellation remains a
+  distinct nonfailure outcome, and original failures remain authoritative over
+  cleanup errors.
+- Preserve the existing sensitive-data gate and exception-diagnostics carve-out.
+  Emit no new prompt, response, tool arguments/results, credentials, reasoning,
+  or skill content merely to satisfy a monitoring view.
+
+#### Compatibility and non-goals
+
+Discovery, configuration translation, and registration contracts do not change.
+Execution instrumentation belongs to the Copilot adapter; shared helpers remain
+SDK-neutral. Use the existing provider, sampling policy, resource, processors,
+and exporter, and remain no-op when observability is inactive.
+
+This amendment adds no native file bridge, OTLP receiver, exporter, telemetry
+setting, native telemetry opt-in, or dependency upgrade. It does not fabricate
+model-call spans, inference latency, standard model metrics, cost estimates,
+or complete native topology. The existing native session-telemetry policy stays
+unchanged. Agent-level compatibility does not imply inference-level parity.
 
 ## 5. Decisions log
 
@@ -446,6 +521,16 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | 28 | Bound-runner responsibilities | separate adapter strategy and forwarding facade / one app-bound runner contract | Use one concrete runner per immutable app binding for execution, pre-registration qualification, defaults, history support, and observability policy. Runner creation is resource-free; SDK imports and acquired resources stay lazy. Same-root apps and binding clones retain independent runners and native owners, and shutdown preserves existing error/cancellation precedence. | Human (larohra) | 2026-10-14 |
 | 29 | Harness discriminator namespace | `af.harness` / shared `af.agent.*` namespace | Refine the harness-neutral telemetry decision to use `af.agent.harness=maf\|copilot`; invocation names, other attributes, exception policy, privacy, and truthful tool/usage evidence stay unchanged. | Human (larohra) | 2026-10-14 |
 
+### Runtime-owned GenAI amendment decisions
+
+The amendment below was approved by larohra on 2026-10-16.
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 30 | Copilot GenAI compatibility approach | native file bridge / runtime-owned semantic spans | Use runtime-owned GenAI spans for now, preserve the shared outer runtime contract, and defer native trace import. | Human (larohra) | 2026-10-16 |
+| 31 | Semantic invocation ownership | annotate both outer and framework spans / one semantic child per execution | Preserve `agent.run` as the outer runtime boundary; add one Copilot `invoke_agent` execution span, explicitly parent tool spans to it, and leave MAF's existing semantic instrumentation unchanged. | Human (larohra) | 2026-10-16 |
+| 32 | Usage and model-detail scope | required invocation totals / optional observed enrichment | Invocation totals are optional enrichment, not a standards requirement or discovery prerequisite; preserve existing event/accounting contracts and defer totals, inference spans, standard model metrics, and cost parity. | Human (larohra), optional-enrichment deferral by Agent | 2026-10-16 |
+
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |
@@ -462,11 +547,17 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, and errors without replacement sessions. Real-host transport and system-key auth qualification remains separate. |
 | Harness cleanup | Verify resource-free runner creation/qualification, per-binding and clone isolation, concurrent runner caching, selected-harness-only provider/warning/observability/history ownership, legacy compaction warning/default behavior, public shutdown, and failed-turn session IDs on HTTP, chat, and SSE. |
 | Copilot telemetry | Cover direct/SSE, delegates, workflow leaves, non-HTTP and UI ingress; usage deduplication/accounting, tool ownership and ordering, incomplete timing, cancellation/error cleanup, both privacy modes, and unchanged MAF behavior. |
+| Semantic invocation ownership | Assert exactly one Copilot `invoke_agent` per actual execution, correct outer/tool/delegate parent IDs and trace IDs, direct runner behavior without an outer span, concurrent isolation, and no extra MAF semantic invocation. |
+| Semantic identity and usage | Verify public versus native session IDs, stable agent identity, configured/default model, and unchanged existing usage events/accounting. Invocation token totals are deferred optional enrichment and not an acceptance prerequisite. |
+| Semantic lifecycle and privacy | Cover setup/send/tool/cleanup failures, recovered tool errors, timeout, cancellation, SSE disconnect, no-provider behavior, both content-capture modes, and no mutation of unrelated caller spans. |
+| Azure compatibility | Inspect locally exported envelopes using the supported dependency combination, then qualify Agents-view invocation identity, counts, duration, errors, tool attribution, and available usage with synthetic MAF/Copilot traffic in an approved live resource. Offline spans alone do not establish portal parity; model and cost views are not acceptance requirements. |
 
 ## 7. Docs impact
 
 - `docs/architecture.md` documents the harness boundary, neutral capability
-  model, selected-harness persistence split, and Copilot telemetry ownership.
+  model, selected-harness persistence split, and Copilot telemetry ownership,
+  including the module map and semantic invocation lifecycle; pipeline boundaries
+  and MAF instrumentation remain unchanged.
 - `docs/front-matter-spec.md` documents unchanged authoring surfaces and calls
   out that Copilot reuses the same MCP/skill filtering fields.
 - The cleanup amendment removes public custom-client injection, documents the
@@ -483,6 +574,11 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 ## 8. Status & sign-off
 
 - **Status:** Finalized
+- **Runtime-owned GenAI amendment:** Finalized. larohra approved the detailed
+  plan on 2026-10-16 and requested implementation. Dedicated architecture review
+  confirmed adapter ownership and unchanged pipeline/MAF boundaries; its findings
+  on optional usage totals and architecture module-map documentation are resolved.
+  Offline verification does not establish live Azure portal parity.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.

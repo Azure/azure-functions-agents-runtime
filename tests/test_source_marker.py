@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from azure_functions_agents._source_marker import source_marker
 
 
@@ -35,3 +37,15 @@ def test_source_marker_case_insensitive_agents_folder() -> None:
 def test_source_marker_handles_path_objects() -> None:
     path = Path("/path/to/agents/report.agent.md")
     assert source_marker(str(path)) == "agents_report.agent.md"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (r"\\server\private\agents\report.agent.md", "agents_report.agent.md"),
+        (r"C:\private/Agents\report.agent.md", "Agents_report.agent.md"),
+        (r"agents\weekly\report.agent.md", "report.agent.md"),
+    ],
+)
+def test_source_marker_does_not_expose_foreign_path_directories(path, expected) -> None:
+    assert source_marker(path) == expected

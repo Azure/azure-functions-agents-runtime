@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..._agent_identity import agent_id
 from ..._observability import (
+    ATTR_AGENT_OUTCOME,
     ATTR_GEN_AI_AGENT_ID,
     ATTR_GEN_AI_AGENT_NAME,
     ATTR_GEN_AI_CONVERSATION_ID,
@@ -20,19 +24,78 @@ from ..._observability import (
     ATTR_GEN_AI_USAGE_INPUT_TOKENS,
     ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
     ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
+    ATTR_LIFECYCLE_STAGE,
     ATTR_TOOL_SOURCE,
+    FaultDomain,
     GenAiOperationName,
+    LifecycleStage,
     RuntimeSpan,
+    SpanOutcome,
     TelemetryAttributeValue,
     ToolSpanSource,
+    agent_run_span_name,
+    current_span,
     gen_ai_agent_name,
     safe_telemetry_name,
+    start_span,
 )
+from .._harness_binding import HarnessKind
 
 if TYPE_CHECKING:
     from copilot.session_events import AssistantUsageData
 
+    from .._harness_binding import HarnessRequest
+
 _USAGE_EVENT_NAME = "af.agent.model.usage"
+
+
+def _owning_run_span(request: HarnessRequest) -> RuntimeSpan | None:
+    """Select the active runtime invocation only when its identity matches."""
+    from opentelemetry import trace
+
+    span = trace.get_current_span()
+    # The OTel API also admits remote/no-op spans without readable local attributes.
+    attributes = getattr(span, "attributes", None)
+    if attributes is None:
+        return None
+    if (
+        getattr(span, "name", None) != agent_run_span_name(agent_name=request.agent_slug)
+        or attributes.get(ATTR_LIFECYCLE_STAGE) != LifecycleStage.AGENT_RUN
+        or attributes.get("af.agent.name") != request.agent_slug
+        or attributes.get("af.agent.session_id") not in (None, request.session_id)
+        or attributes.get("af.agent.harness") not in (None, HarnessKind.COPILOT.value)
+    ):
+        return None
+    return current_span()
+
+
+@contextmanager
+def invocation_span(request: HarnessRequest) -> Iterator[RuntimeSpan]:
+    """Own one semantic execution while preserving runtime observation ownership."""
+    runtime_span = _owning_run_span(request)
+    name = gen_ai_agent_name(request.agent_slug)
+    with start_span(
+        f"invoke_agent {name}",
+        record_exception=False,
+        attributes={
+            ATTR_GEN_AI_OPERATION_NAME: GenAiOperationName.INVOKE_AGENT,
+            ATTR_GEN_AI_AGENT_ID: agent_id(request.agent_slug),
+            ATTR_GEN_AI_AGENT_NAME: name,
+            ATTR_GEN_AI_CONVERSATION_ID: request.session_id,
+            ATTR_GEN_AI_REQUEST_MODEL: request.model,
+        },
+    ) as span:
+        try:
+            yield runtime_span if runtime_span is not None else span
+        except asyncio.CancelledError:
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
+            raise
+        except Exception as exc:
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
+            span.record_exception(exc, fault_domain=FaultDomain.RUNTIME, infer_error_type=True)
+            raise
+        else:
+            span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.SUCCESS)
 
 
 def _duration_ms(value: timedelta | None) -> float | None:

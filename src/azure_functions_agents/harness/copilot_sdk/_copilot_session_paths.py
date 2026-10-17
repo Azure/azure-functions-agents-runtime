@@ -87,7 +87,8 @@ class WindowsSessionPathPolicy(SessionPathPolicy):
             raise _path_error(errno.EINVAL)
 
     def write_flags(self, append: bool) -> int:
-        return os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC) | os.O_BINARY
+        binary_flag: int = getattr(os, "O_BINARY", 0)
+        return os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC) | binary_flag
 
     def replace_empty_directory(self, target: Path) -> None:
         target.rmdir()
