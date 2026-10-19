@@ -4,7 +4,7 @@ title: Harness-neutral Durable Agent Loop
 status: In review
 author: harshivcodes
 created: 2026-10-14
-updated: 2026-10-14
+updated: 2026-10-19
 issues: []
 pull_requests: [#266]
 branch: harshivcodes/durable-agent-loop-changes
@@ -78,6 +78,8 @@ runtime-owned common transcript.
 - Keep DTS replay and scheduling mechanics outside harness-neutral contracts.
 - Preserve opaque MAF and Copilot continuation without serializing SDK objects
   into orchestration or Entity payloads.
+- Store user, conversation and external-work content by reference so DTS and
+  Entity state contain control metadata only.
 - Reuse `AppHarness`, `HarnessRequest`, `ToolDescriptor`, provider resolution,
   capability catalogs, auth and observability.
 - Support opt-in HTTP/chat Durable turns with owner-scoped sessions,
@@ -242,6 +244,9 @@ Every outcome includes:
 - bounded usage and tool-call evidence available at that boundary; and
 - sanitized failure or retry metadata when applicable.
 
+Any prompt, question, answer, tool payload or terminal result associated with an
+outcome is represented by `ContentRef`, not embedded content.
+
 The checkpoint protocol never includes live SDK clients, credentials, callbacks,
 Python callables or raw transcript objects.
 
@@ -299,6 +304,37 @@ integrity_metadata
   versions. Operators own breaking migrations and drain strategy.
 - Continuation envelopes, excluding the opaque native state, are limited to
   16 KiB serialized. Native state is always stored by reference.
+
+All non-control content uses the same bounded `ContentRef` rule:
+
+```text
+schema_version
+storage_kind
+opaque_content_key
+content_digest
+content_length
+content_type
+created_at
+expires_at
+integrity_metadata
+```
+
+- User prompts, committed public conversation entries, human-input questions
+  and answers, external-work arguments and external-work results are always
+  written to the qualified content store. They are never embedded in
+  orchestration history or Entity state, regardless of size.
+- Azure hosting profiles use Azure Blob Storage under the dedicated Durable
+  namespace. A reference contains an opaque runtime-minted key, never a raw
+  service URL, credential or client-controlled path.
+- The writer fully persists the content and its integrity metadata before a
+  `ContentRef` may be committed. Referenced content is immutable; updates use a
+  new key.
+- Activities and authorized management endpoints resolve content only when
+  needed. They verify the declared length, digest and scope before use.
+- DTS and the Entity store only bounded references, identity, versions,
+  lifecycle state, deadlines and receipts.
+- A `ContentRef` is limited to 16 KiB serialized. Capacity, integrity or lookup
+  failure is explicit and never produces truncated or success-shaped content.
 
 ### 4.5 Harness connectors
 
@@ -385,7 +421,7 @@ session_incarnation_id
 run_id
 turn_generation
 tool_name
-arguments
+arguments_ref
 adapter_kind
 adapter_version
 canonical_schema_digest
@@ -396,6 +432,10 @@ policy_snapshot
 idempotency_key
 deadline
 ```
+
+`ExternalWorkResult` carries the same operation, call, session, run and
+generation identity plus terminal status, bounded diagnostic metadata and a
+`result_ref`. Tool arguments and results are never inline.
 
 The command identity is the tuple of adapter kind/version, canonical tool name,
 canonical input schema digest, policy digest, execution placement and declared
@@ -410,7 +450,8 @@ The activity:
 1. reauthorizes the current owner and agent policy;
 2. resolves `tool_name` from the immutable capability catalog;
 3. verifies the persisted command identity against the resolved adapter;
-4. validates arguments through `ToolDescriptor`;
+4. resolves and integrity-checks `arguments_ref`, then validates the content
+   through `ToolDescriptor`;
 5. passes the stable operation/idempotency identity to a qualified adapter and
    invokes `ToolDescriptor.invoke()` or the qualified remote/sandbox adapter;
 6. records a bounded structured result or truthful unknown outcome; and
@@ -480,8 +521,7 @@ versioned business state:
 - accepted request receipts;
 - one active turn and monotonically increasing generation;
 - run lifecycle and absolute deadline;
-- committed conversation entries or bounded references to native offloaded
-  content;
+- ordered `ContentRef` values for committed public conversation entries;
 - current continuation metadata;
 - external-work dispatch/result receipts;
 - pending human question and accepted answer receipt;
@@ -490,10 +530,10 @@ versioned business state:
 - terminal result/error metadata.
 
 Harness-native continuation remains in harness-owned storage. The Entity stores
-only the `ContinuationRef` and bounded public conversation projection required
-by the runtime. Ordinary MAF Blob/file history is not attached to Durable MAF
-turns. Copilot SessionFs remains native continuation storage, not owner/session
-authority.
+only the `ContinuationRef`, ordered conversation `ContentRef` values and bounded
+control metadata required by the runtime. Ordinary MAF Blob/file history is not
+attached to Durable MAF turns. Copilot SessionFs remains native continuation
+storage, not owner/session authority.
 
 Entity generation fencing rejects late connector, tool, answer and terminal
 commits from an older turn. Late external effects may still occur; fencing
@@ -514,6 +554,9 @@ and inbound Durable MCP are outside this contract.
 - The runtime hashes the normalized complete request body plus originating entry
   identity into the request fingerprint. The idempotency key alone is not the
   fingerprint.
+- After validation and fingerprinting, request content is persisted before
+  durable admission and represented by `ContentRef`; raw prompt content is not
+  stored in the Entity or orchestration input.
 - Identity is scoped within the bound backend/task hub by
   `(agent_slug, normalized_owner_id, entry_id)`.
 - `entry_id` is assigned by registration and cannot be supplied by the request.
@@ -593,9 +636,11 @@ before app mutation.
 tool-action approval system.
 
 - The connector returns `HumanInputRequested` before continuing the turn.
-- The Entity stores one pending question, its schema and a stable question ID.
+- The Entity stores one pending question reference, its schema and a stable
+  question ID.
 - The wait is bounded by the existing whole-turn deadline.
-- Answers are owner-authorized, idempotent and ordered through the same Entity.
+- Answers are owner-authorized, persisted as `ContentRef`, idempotent and
+  ordered through the same Entity.
 - Each answer requires a question-scoped `Idempotency-Key`; its complete answer
   body is fingerprinted. The same key/body returns the original receipt and the
   same key with a different body returns `409 idempotency_conflict`.
@@ -663,17 +708,19 @@ profile, but never higher limits than this contract:
 | Boundary | Maximum serialized content |
 | --- | --- |
 | Continuation envelope | 16 KiB |
-| External-work request metadata and inline arguments | 64 KiB |
-| Inline external-work result | 64 KiB |
-| One ordered result-batch envelope | 128 KiB |
-| Entity hydrated state | 512 KiB |
+| Content reference envelope | 16 KiB |
+| External-work request envelope, including references | 64 KiB |
+| External-work result envelope, including references | 64 KiB |
+| One ordered result-batch metadata envelope | 128 KiB |
+| Entity hydrated control state | 512 KiB |
 | One management response page | 256 KiB and 100 items |
 
 Metadata headroom is reserved inside each limit. Size is checked before
-scheduling and before Entity commit. Larger native state, conversation content,
-arguments or results use a qualified integrity-checked storage/offload reference
-whose envelope still fits the applicable limit. History is server-side
-paginated. Capacity/offload failure is explicit and cannot partially replace
+scheduling and before Entity commit. Native state, prompts, conversation
+content, human input, arguments and results always use qualified
+integrity-checked storage references whose envelopes fit the applicable limit.
+History is server-side paginated and hydrates only the authorized page.
+Capacity or reference failure is explicit and cannot partially replace
 authoritative state or silently truncate content.
 
 ### 4.14 Sandbox and remote execution
@@ -743,6 +790,8 @@ The feature contract is satisfied when:
 - tool identity, generation, deadline and idempotency survive replay;
 - incompatible continuation and harness mismatch fail explicitly;
 - duplicate delivery cannot create a second authoritative result;
+- prompts, conversation entries, human input and external-work payloads never
+  appear inline in DTS history or Entity state;
 - unknown external effects remain unknown rather than being reported as
   success or blindly retried;
 - unsupported Copilot/MAF capabilities fail before registration;
@@ -781,6 +830,7 @@ The feature contract is satisfied when:
 | 24 | Deadline authority | Orchestrator-only timer / Entity signal | Start at acknowledged turn, preserve unchanged and enforce with generation-tagged Entity signal | Architecture review | 2026-10-14 |
 | 25 | State limits | Unspecified bounded payloads / explicit upper bounds | Contractual envelope, Entity, batch and response limits with integrity-checked offload | Architecture review | 2026-10-14 |
 | 26 | Cancellation cleanup | Unbounded best effort / fixed budget | Five-second total cleanup budget after worker observation; unconfirmed effects remain unknown | Architecture review | 2026-10-14 |
+| 27 | Content placement | Inline below size thresholds / always by reference | Store prompts, conversation entries, human input and external-work payloads in qualified content storage; keep only bounded references and control metadata in DTS and Entities | Human; review recommendation | 2026-10-19 |
 
 ## 6. Test plan
 
@@ -826,9 +876,12 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   cancellation and late-result fencing.
 - [ ] TTL/deletion: stale signals, no read renewal, revocation, stable deletion
   receipt, cleanup failure and tombstone retention.
-- [ ] State bounds: large low-compressibility outputs, continuation indirection,
-  every contractual size limit, pagination, native offload/storage-reference
-  failure, integrity checks and no silent truncation.
+- [ ] Content references: prompts, conversation entries, human input and
+  external-work payloads are never inline; verify write-before-commit,
+  immutability, scope/digest/length checks and missing/corrupt content failure.
+- [ ] State bounds: large low-compressibility outputs, continuation and content
+  indirection, every contractual envelope limit, metadata-only Entity growth,
+  pagination, storage-reference failure and no silent truncation.
 - [ ] Debug UI: one submission, stable idempotency key, polling without
   resubmission, pending question, terminal result and authorized history.
 - [ ] Deployed qualification: supported Python/hosting/provider matrix, process
