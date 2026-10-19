@@ -1,5 +1,5 @@
 ---
-frd: 0012
+frd: 0013
 title: Harness-neutral Durable Agent Loop
 status: In review
 author: harshivcodes
@@ -10,7 +10,7 @@ pull_requests: [#266]
 branch: harshivcodes/durable-agent-loop-changes
 ---
 
-# FRD 0012 - Harness-neutral Durable Agent Loop
+# FRD 0013 - Harness-neutral Durable Agent Loop
 
 ## 1. Summary
 
@@ -23,11 +23,11 @@ recovery. The runtime owns agent semantics, session authority, tool policy and
 terminal outcomes. Existing direct execution remains unchanged.
 
 This FRD is the proposed harness-neutral replacement for the MAF-specific
-execution architecture in FRD 0011. It retains the established product contract
+execution architecture in FRD 0012. It retains the established product contract
 where compatible: explicit opt-in, HTTP/chat ingress, owner-scoped sessions,
 idempotent admission, one active turn per session, Entity-backed authority,
 management APIs, durable human input, cancellation fencing, TTL and explicit
-failure instead of silent fallback. FRD 0011 remains the historical record until
+failure instead of silent fallback. FRD 0012 remains the historical record until
 this FRD is finalized.
 
 ## 2. Motivation / problem
@@ -39,7 +39,7 @@ whole-turn backends:
 - `_CopilotHarnessRunner` executes the Copilot SDK-owned loop.
 
 Both consume `HarnessRequest` and `ToolDescriptor`, but neither exposes every
-model/tool boundary as a durable protocol. FRD 0011 instead designed a separate
+model/tool boundary as a durable protocol. FRD 0012 instead designed a separate
 MAF-specific Durable loop with one model or tool invocation per activity.
 Adding Copilot to that design would produce four execution paths:
 
@@ -161,7 +161,7 @@ adapters as direct execution.
 
 ### 4.2 Authoring and inheritance
 
-The public authoring surface remains the Durable surface proposed by FRD 0011:
+The public authoring surface remains the Durable surface proposed by FRD 0012:
 
 ```yaml
 # agents.config.yaml
@@ -947,7 +947,7 @@ The feature contract is satisfied when:
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
-| 1 | Feature relationship to FRD 0011 | Edit historical finalized design / new superseding FRD | Preserve FRD 0011 and draft a new harness-neutral replacement | Agent process requirement | 2026-10-14 |
+| 1 | Feature relationship to FRD 0012 | Edit historical finalized design / new superseding FRD | Preserve FRD 0012 and draft a new harness-neutral replacement | Agent process requirement | 2026-10-14 |
 | 2 | Shared abstraction | Shared replacement agent loop / narrow checkpoint protocol | Narrow, versioned checkpoint protocol | Human; Agent recommendation | 2026-10-14 |
 | 3 | Existing direct execution | Rewrite through checkpoint protocol / preserve | Preserve direct MAF and Copilot whole-turn behavior | Agent recommendation | 2026-10-14 |
 | 4 | Harness structure | Direct and Durable connector variants / one checkpoint connector per harness | One MAF and one Copilot checkpoint connector | Agent recommendation | 2026-10-14 |
