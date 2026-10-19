@@ -468,6 +468,20 @@ deployment that cannot do so is unsupported.
 Any capability capable of executing an effect before the connector returns a
 checkpoint is rejected, even if the SDK later emits telemetry for that effect.
 
+When `durable.sandbox_group` is configured, registration builds one
+harness-neutral set of runtime-owned sandbox tool descriptors from the
+qualified sandbox adapter. Both checkpoint connectors adapt those descriptors
+to declaration-only model schemas. They do not expose native SDK shell, general
+file or code-execution tools on the Functions worker.
+
+A model invocation of a sandbox descriptor returns `ExternalWorkRequested`
+with `execution_placement: sandbox`, the stable sandbox adapter identity and the
+session/incarnation/generation-scoped workspace identity. The connector never
+executes the operation. A Durable activity resolves the authoritative workspace,
+reauthorizes policy, validates the descriptor and package/policy digests, then
+dispatches the operation to that workspace. Its result returns through the
+normal `result_ref` contract before connector resume.
+
 ### 4.6 External work contract
 
 `ExternalWorkRequest` is serializable data, not a `ToolDescriptor`:
@@ -490,6 +504,7 @@ adapter_version
 canonical_schema_digest
 policy_digest
 execution_placement
+workspace_ref
 implementation_compatibility_version
 policy_snapshot
 idempotency_key
@@ -499,6 +514,9 @@ deadline
 `ExternalWorkResult` carries the same operation, call, session, run and
 generation identity plus terminal status, bounded diagnostic metadata and a
 `result_ref`. Tool arguments and results are never inline.
+
+`workspace_ref` is required only for session-bound sandbox placement. It is a
+bounded runtime-minted workspace identity, not a credential or endpoint.
 
 The command identity is the tuple of adapter kind/version, canonical tool name,
 canonical input schema digest, policy digest, execution placement and declared
@@ -812,7 +830,16 @@ The optional session-bound sandbox contract remains independent of the harness:
 
 - the customer provisions an approved Sandbox Group;
 - the runtime allocates and binds one session workspace;
-- local tool activities execute in fresh guest processes while files persist;
+- registration exposes qualified sandbox operations to both harnesses as the
+  same runtime-owned declaration-only tool schemas;
+- native MAF/Copilot shell, general file and code-execution tools remain
+  unavailable on the Functions worker;
+- each model invocation checkpoints as `ExternalWorkRequested` with
+  `execution_placement: sandbox`; no connector executes it inline;
+- the Durable activity resolves the generation-fenced session workspace and
+  verifies adapter, schema, policy, package and workspace identity before
+  dispatch;
+- sandbox tool activities execute in fresh guest processes while files persist;
 - package and policy digests are captured and verified;
 - credentials remain worker-side;
 - remote MCP executes from worker activities with existing auth/egress policy;
@@ -821,7 +848,8 @@ The optional session-bound sandbox contract remains independent of the harness:
 - deletion/expiry performs actual owned cleanup with visible progress.
 
 Sandbox execution still uses the same `ExternalWorkRequest` and result receipt
-contract. It does not introduce a third harness connector.
+contract, including referenced arguments/results and unknown-outcome handling.
+It does not introduce a third harness connector.
 
 ### 4.15 Compatibility
 
@@ -886,6 +914,9 @@ The feature contract is satisfied when:
 - unsupported Copilot/MAF capabilities fail before registration;
 - selected prompt-only skills load and read only approved assets across cold
   resume, while every skill-script or general worker-filesystem path is denied;
+- qualified sandbox tools appear as identical declaration-only schemas in both
+  harnesses and execute only through the authoritative session workspace
+  activity;
 - one active turn, owner isolation and idempotent admission hold across workers;
 - management, input, cancellation, TTL and deletion remain authorized and
   generation-fenced; and
@@ -925,6 +956,7 @@ The feature contract is satisfied when:
 | 28 | Continuation lifecycle | Mutable/local checkpoints / immutable durable snapshots with a terminal cross-turn seed | Seal Blob-backed snapshots before commit, retain the terminal continuation as the next-turn seed and garbage-collect superseded snapshots only after generation-safe replacement | Human; review recommendation | 2026-10-19 |
 | 29 | Harness setup reuse | Separate direct/Durable setup stacks / shared per-harness preparation | Share provider, credential, instruction, capability-schema, usage and telemetry helpers; diverge only at execution dispatch and checkpoint persistence | Human; review recommendation | 2026-10-19 |
 | 30 | Prompt-only skills | Reject all skills / allow scoped reads / allow scripts | Support selected read-only skill instructions and resources in V1; deny MAF script execution, Copilot `builtin:bash` and general filesystem access | Human; review recommendation | 2026-10-19 |
+| 31 | Sandbox tool exposure | Harness-native worker tools / runtime declaration-only schemas | Expose qualified sandbox operations as shared declaration-only tools and dispatch every invocation through a generation-fenced session workspace activity | Human; review recommendation | 2026-10-19 |
 
 ## 6. Test plan
 
@@ -967,6 +999,10 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
 - [ ] External work: descriptor re-resolution, operation-identity
   compatibility, unrelated catalog changes, argument validation, parallel
   ordering and policy reauthorization.
+- [ ] Sandbox tool exposure: MAF and Copilot receive equivalent declaration-only
+  schemas; native worker execution is absent; requests carry sandbox placement
+  and workspace identity; stale generation, adapter/schema/policy/package
+  mismatch and lost workspace fail explicitly.
 - [ ] Effect safety: lost activity response, duplicate delivery, downstream
   receipt reuse, known-not-dispatched and `outcome_unknown`.
 - [ ] Entity fencing: stale connector/tool/input/terminal commits cannot mutate
