@@ -37,7 +37,7 @@ The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.co
 | [0006](0006-endpoint-authentication.md) | Endpoint & HTTP trigger authentication (API key / Entra ID) | Finalized |
 | [0007](0007-multi-agent-delegation.md) | Multi-agent delegation (agent-as-tool) | In review |
 | [0008](0008-harness-only-agent-configuration.md) | Harness-only agent configuration | Finalized |
-| [0009](0009-copilot-sdk-harness.md) | Copilot SDK agent harness | Finalized |
+| [0009](0009-copilot-sdk-harness.md) | Copilot SDK agent harness | In review (supplied-ID amendment; prior contract finalized) |
 | [0010](0010-agent-evaluations.md) | Vally-first agent evaluations | Finalized |
 | [0011](0011-hosted-skill-binding.md) | HostedSkill binding | Finalized |
 
