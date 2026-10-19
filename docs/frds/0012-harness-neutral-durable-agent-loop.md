@@ -75,6 +75,8 @@ runtime-owned common transcript.
   harness.
 - Use one MAF checkpoint connector and one Copilot checkpoint connector for
   Durable execution.
+- Reuse one shared preparation/adaptation layer per harness across direct and
+  checkpoint execution.
 - Keep DTS replay and scheduling mechanics outside harness-neutral contracts.
 - Preserve opaque MAF and Copilot continuation without serializing SDK objects
   into orchestration or Entity payloads.
@@ -120,8 +122,9 @@ runtime-owned common transcript.
 | translate | `config/{schema,merge,validation,loader}.py` | Add Durable settings, inheritance and capability compatibility validation. |
 | compose | `app.py`, `registration/{catalog,capabilities}.py`, new `durable/policy.py` | Freeze a slug-keyed Durable policy catalog before app mutation; select one `DFApp` when workflow or Durable policies exist. |
 | register | `registration/{triggers,endpoints,_handlers,_auth}.py`, new `durable/integration.py` | Register per-entry admission/management dispatchers and the shared Durable Entity, orchestrator and activity bindings once. |
-| execute: direct | Existing `runner.py` and selected `harness/*` runners | No behavior change. Continue whole-turn MAF or Copilot execution. |
-| execute: checkpoint | New `harness/_checkpoint.py`; selected MAF/Copilot execution modules | Define and implement the private checkpoint protocol without importing DTS. |
+| execute: shared harness preparation | Existing selected `harness/agent_framework/*` and `harness/copilot_sdk/*` helpers | Share provider/model construction, credentials, instructions, capability schemas and telemetry between direct runners and checkpoint connectors. |
+| execute: direct | Existing `runner.py` and selected `harness/*` runners | No behavior change. Continue whole-turn MAF or Copilot execution and attach executable handlers at the final adaptation boundary. |
+| execute: checkpoint | New `harness/_checkpoint.py`; selected MAF/Copilot execution modules | Define and implement the private checkpoint protocol without importing DTS; use declaration-only capabilities or pending-work interception at the final adaptation boundary. |
 | execute: Durable | New `durable/{engine,activities,contracts}.py` | Interpret checkpoint outcomes through replay-safe orchestration and side-effecting activities. |
 | session/lifecycle | New `durable/{session,intake,lifecycle}.py` | Own Entity authority, admission, receipts, cancellation fencing, TTL and deletion. |
 | UI | Existing `public/index.html` and endpoint adapter | Submit Durable work and poll authorized status/history when the selected agent is Durable-enabled. |
@@ -134,6 +137,25 @@ sessions remain lazy execution concerns.
 side-effect-free `DurableAgentPolicyCatalog` before creating or mutating the
 Function App. Activities resolve an agent by slug from those immutable catalogs;
 they never reparse YAML/front matter or rediscover tools.
+
+Each harness has one preparation/adaptation layer shared by its direct runner
+and checkpoint connector. Provider/model client construction, credential
+resolution, base instructions and runtime addenda, capability filtering,
+`ToolDescriptor` schema generation, SDK-neutral request adaptation, usage
+decoding and telemetry recording must not be reimplemented for Durable
+execution. Shared helpers remain harness-local where SDK types require it.
+
+The execution paths diverge only at the final dispatch boundary:
+
+- direct execution attaches executable handlers and invokes the existing
+  whole-turn or streaming SDK operation; and
+- checkpoint execution presents declaration-only capabilities or intercepts
+  pending work, then returns a checkpoint before external effects.
+
+The checkpoint connector may add continuation persistence and checkpoint
+translation, but it must consume the same prepared provider, instructions,
+capability definitions, observability configuration and result/evidence
+adapters as direct execution.
 
 ### 4.2 Authoring and inheritance
 
@@ -353,6 +375,11 @@ integrity_metadata
   failure is explicit and never produces truncated or success-shaped content.
 
 ### 4.5 Harness connectors
+
+Both connectors use their harness's shared preparation/adaptation layer. A
+connector does not introduce a second provider factory, credential path,
+instruction builder, tool-schema generator, usage decoder or telemetry
+pipeline. This reuse requirement is part of connector qualification.
 
 #### MAF connector
 
@@ -820,6 +847,8 @@ The feature contract is satisfied when:
 - direct MAF and Copilot characterization tests remain unchanged and green;
 - no direct request uses the checkpoint protocol unless separately approved;
 - each Durable harness has exactly one checkpoint connector;
+- direct and checkpoint execution use the same per-harness provider,
+  credential, instruction, capability-schema, usage and telemetry helpers;
 - both connectors pass cold-worker start/resume tests;
 - Azure profiles persist immutable native snapshots in Blob Storage and never
   depend on worker-local continuation state;
@@ -872,6 +901,7 @@ The feature contract is satisfied when:
 | 26 | Cancellation cleanup | Unbounded best effort / fixed budget | Five-second total cleanup budget after worker observation; unconfirmed effects remain unknown | Architecture review | 2026-10-14 |
 | 27 | Content placement | Inline below size thresholds / always by reference | Store prompts, conversation entries, human input and external-work payloads in qualified content storage; keep only bounded references and control metadata in DTS and Entities | Human; review recommendation | 2026-10-19 |
 | 28 | Continuation lifecycle | Mutable/local checkpoints / immutable durable snapshots with a terminal cross-turn seed | Seal Blob-backed snapshots before commit, retain the terminal continuation as the next-turn seed and garbage-collect superseded snapshots only after generation-safe replacement | Human; review recommendation | 2026-10-19 |
+| 29 | Harness setup reuse | Separate direct/Durable setup stacks / shared per-harness preparation | Share provider, credential, instruction, capability-schema, usage and telemetry helpers; diverge only at execution dispatch and checkpoint persistence | Human; review recommendation | 2026-10-19 |
 
 ## 6. Test plan
 
@@ -886,6 +916,10 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   inventories remain unchanged when Durable is absent.
 - [ ] Direct execution characterization: MAF and Copilot whole-turn,
   streaming, history, tool evidence, deadlines and cleanup remain unchanged.
+- [ ] Shared harness preparation: direct and checkpoint paths produce
+  equivalent provider targets, credentials, instructions/addenda, capability
+  schemas, observability settings, usage and tool evidence from the same
+  helpers; only handler binding and dispatch differ.
 - [ ] Checkpoint contract codec: every outcome and continuation version,
   bounded size, unknown fields, incompatible versions and sanitized errors.
 - [ ] MAF connector: tool-free completion, one/many tool calls, ordered resume,
