@@ -255,7 +255,7 @@ Names are illustrative; the contract requirements are normative.
 | `ExternalWorkRequested` | The harness suspended before one or more side effects and returned serializable work requests plus a continuation reference. |
 | `HumanInputRequested` | The logical turn is waiting for authenticated user input and can resume from the returned continuation. |
 | `RetryRequested` | The connector classified a sanitized transient failure and supplied bounded retry guidance. |
-| `TurnFailed` | The turn cannot continue; the outcome includes a stable error category and no success-shaped fallback. |
+| `TurnFailed` | The turn cannot continue; the outcome includes a stable error category, does not replace the last successful terminal session seed and provides no success-shaped fallback. |
 
 Every outcome includes:
 
@@ -324,10 +324,19 @@ integrity_metadata
 - MAF and Copilot may use different storage representations.
 - DTS and the Entity compare versions and identity fields but never parse native
   harness state.
-- A continuation is valid only when backend namespace, harness, connector
-  profile, agent, owner scope, entry, session/incarnation, run, turn generation
-  and every declared protocol/state version match the authoritative Entity
-  record.
+- A mid-turn continuation is valid only when backend namespace, harness,
+  connector profile, agent, owner scope, entry, session/incarnation, run, turn
+  generation and every declared protocol/state version match the Entity's
+  active turn.
+- A terminal session seed is valid only when its backend namespace, harness,
+  connector profile, agent, owner scope, entry, session/incarnation and every
+  declared protocol/state version match the Entity's authoritative seed from
+  the immediately preceding successfully completed turn. Its prior run ID and
+  turn generation must match that committed seed rather than the new active
+  turn.
+- A terminal session seed may be consumed only by the next turn's initial
+  `CheckpointRequest`. It cannot be passed to `resume_from_checkpoint()` or
+  reused after that turn commits its first authoritative checkpoint.
 - Resuming through a different harness is rejected.
 - Incompatible protocol, connector or state-format versions fail explicitly as
   `continuation_incompatible`; the runtime does not reset history or silently
@@ -342,6 +351,10 @@ integrity_metadata
   initial `CheckpointRequest`. The connector consumes it to construct the new
   turn but does not resume or mutate turn `N`. Its first new checkpoint is
   minted with turn `N+1`'s run ID and generation.
+- A failed, cancelled or timed-out turn does not replace the authoritative
+  terminal session seed. A later accepted turn starts from the last
+  successfully completed turn and does not treat partial or failed work as
+  committed conversation state.
 - Continuation envelopes, excluding the opaque native state, are limited to
   16 KiB serialized. Native state is always stored by reference.
 
@@ -638,6 +651,9 @@ Continuation cleanup follows authoritative state:
   next-turn seed. The previous turn's terminal seed remains until the first
   authoritative checkpoint of the new turn is committed, then becomes eligible
   for cleanup.
+- If the new turn fails, is cancelled or times out before committing its first
+  checkpoint, the previous terminal seed remains authoritative and is not
+  eligible for cleanup.
 - The current terminal session continuation and committed conversation content
   remain until session TTL expiry or authorized deletion.
 - Cleanup is receipt-backed and retryable. A cleanup failure does not remove
@@ -902,6 +918,11 @@ The feature contract is satisfied when:
   depend on worker-local continuation state;
 - a completed turn's terminal continuation seeds the next turn, and superseded
   snapshots are removed only after generation-safe replacement;
+- mid-turn continuation validation uses the active run/generation, while
+  terminal-seed validation uses the Entity's authoritative prior completed
+  run/generation;
+- failed, cancelled and timed-out turns retain the last successful terminal
+  seed and cannot commit partial conversation state;
 - the orchestrator performs no side-effecting work;
 - the same external-work/result contract is used for MAF and Copilot;
 - tool identity, generation, deadline and idempotency survive replay;
@@ -957,6 +978,7 @@ The feature contract is satisfied when:
 | 29 | Harness setup reuse | Separate direct/Durable setup stacks / shared per-harness preparation | Share provider, credential, instruction, capability-schema, usage and telemetry helpers; diverge only at execution dispatch and checkpoint persistence | Human; review recommendation | 2026-10-19 |
 | 30 | Prompt-only skills | Reject all skills / allow scoped reads / allow scripts | Support selected read-only skill instructions and resources in V1; deny MAF script execution, Copilot `builtin:bash` and general filesystem access | Human; review recommendation | 2026-10-19 |
 | 31 | Sandbox tool exposure | Harness-native worker tools / runtime declaration-only schemas | Expose qualified sandbox operations as shared declaration-only tools and dispatch every invocation through a generation-fenced session workspace activity | Human; review recommendation | 2026-10-19 |
+| 32 | Cross-turn seed validation | Require the new active run/generation / validate the prior committed seed separately / replace the seed after every terminal outcome | Validate a terminal seed against the Entity's prior successfully completed turn, permit it only on the next initial request and retain it across failed, cancelled or timed-out turns | Human; Agent recommendation | 2026-10-19 |
 
 ## 6. Test plan
 
@@ -1019,8 +1041,10 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   external-work payloads are never inline; verify write-before-commit,
   immutability, scope/digest/length checks and missing/corrupt content failure.
 - [ ] Continuation lifecycle: Azure Blob backing, seal-before-return,
-  immutable snapshot keys, session-seed handoff, generation-safe superseded
-  snapshot cleanup, TTL/deletion retention and cleanup retry receipts.
+  immutable snapshot keys, role-specific mid-turn versus terminal-seed
+  validation, one-time next-turn seed consumption, retention across failure,
+  cancellation and timeout, generation-safe superseded snapshot cleanup,
+  TTL/deletion retention and cleanup retry receipts.
 - [ ] State bounds: large low-compressibility outputs, continuation and content
   indirection, every contractual envelope limit, metadata-only Entity growth,
   pagination, storage-reference failure and no silent truncation.
