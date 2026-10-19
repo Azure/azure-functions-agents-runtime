@@ -10,7 +10,7 @@ pull_requests: [226, 234]
 branch: larohra/durable-agent-loop
 ---
 
-# FRD 0011 - Public Durable Agent Loop
+# FRD 0012 - Public Durable Agent Loop
 
 ## 1. Summary
 

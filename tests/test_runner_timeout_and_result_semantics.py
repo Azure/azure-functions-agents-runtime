@@ -1,9 +1,9 @@
-"""FRD 0011 C0: characterization tests locking `runner.py`'s current timeout
+"""FRD 0012 C0: characterization tests locking `runner.py`'s current timeout
 precedence and result/stream semantics.
 
 No product changes. These exist as a regression baseline before the C1
 dependency bump (Durable b2->b3, `durabletask`, MAF trio) — see
-docs/frds/0011-durable-agent-loop.md §4.14 (C0) and its test-plan §6 "Model/
+docs/frds/0012-durable-agent-loop.md §4.14 (C0) and its test-plan §6 "Model/
 replay" row ("whole-run timeout across replay/retry/human wait").
 
 Scope deliberately excludes what's already covered elsewhere:
@@ -37,12 +37,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from azure_functions_agents import runner
-from azure_functions_agents.client_manager import InferenceTarget
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._provider_config import InferenceTarget
+from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 
 
 class _FakeAgent:
@@ -123,20 +126,25 @@ def test_run_agent_timeout_none_uses_module_default_timeout_for_its_deadline(
     monkeypatch.setattr(runner, "DEFAULT_TIMEOUT", 12_345.0)
     captured: list[tuple[dict[str, Any], float]] = []
 
-    async def fake_build_agent_session(
-        **kwargs: Any,
-    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
-        captured.append((kwargs, asyncio.get_running_loop().time()))
-        return _FakeAgent(), object(), "s", None, InferenceTarget()
+    class _SelectedRunner:
+        async def run_agent(self, _prompt: str, **kwargs: Any) -> runner.AgentResult:
+            captured.append((kwargs, asyncio.get_running_loop().time()))
+            return runner.AgentResult("s", "hello")
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _harness: _SelectedRunner())
 
-    result = asyncio.run(runner.run_agent("hello", timeout=None))
+    result = asyncio.run(
+        runner.run_agent(
+            "hello",
+            timeout=None,
+            _harness=AppHarness(HarnessKind.MAF, Path.cwd()),
+        )
+    )
 
     assert len(captured) == 1
-    kwargs, builder_loop_time = captured[0]
-    coordinator_deadline = kwargs["coordinator_deadline"]
-    assert coordinator_deadline - builder_loop_time == pytest.approx(12_345.0)
+    kwargs, dispatch_loop_time = captured[0]
+    assert kwargs["timeout"] == 12_345.0
+    assert kwargs["deadline"] - dispatch_loop_time == pytest.approx(12_345.0, abs=0.1)
     assert result.content == "hello"
 
 
@@ -146,20 +154,33 @@ def test_run_agent_stream_timeout_none_uses_module_default_timeout_for_its_deadl
     monkeypatch.setattr(runner, "DEFAULT_TIMEOUT", 6_789.0)
     captured: list[tuple[dict[str, Any], float]] = []
 
-    async def fake_build_agent_session(
-        **kwargs: Any,
-    ) -> tuple[_FakeStreamingAgent, object, str, None, InferenceTarget]:
-        captured.append((kwargs, asyncio.get_running_loop().time()))
-        return _FakeStreamingAgent(), object(), "s", None, InferenceTarget()
+    class _SelectedRunner:
+        def run_agent_stream(self, _prompt: str, **kwargs: Any) -> AsyncIterator[str]:
+            captured.append((kwargs, asyncio.get_running_loop().time()))
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+            async def _stream() -> AsyncIterator[str]:
+                yield 'data: {"type": "session", "session_id": "s"}\n\n'
+                yield 'data: {"type": "delta", "content": "hello"}\n\n'
+                yield 'data: {"type": "done"}\n\n'
 
-    events = asyncio.run(_collect_stream(runner.run_agent_stream("hello", timeout=None)))
+            return _stream()
+
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _harness: _SelectedRunner())
+
+    events = asyncio.run(
+        _collect_stream(
+            runner.run_agent_stream(
+                "hello",
+                timeout=None,
+                _harness=AppHarness(HarnessKind.MAF, Path.cwd()),
+            )
+        )
+    )
 
     assert len(captured) == 1
-    kwargs, builder_loop_time = captured[0]
-    coordinator_deadline = kwargs["coordinator_deadline"]
-    assert coordinator_deadline - builder_loop_time == pytest.approx(6_789.0)
+    kwargs, dispatch_loop_time = captured[0]
+    assert kwargs["timeout"] == 6_789.0
+    assert kwargs["deadline"] - dispatch_loop_time == pytest.approx(6_789.0, abs=0.1)
     # `_FakeAgent` (used by every other test in this module) has no `stream`
     # parameter on its `run()`, so it cannot stand in here: `run_agent_stream`
     # calls `agent.run(prompt, stream=True, ...)`, which would raise
@@ -188,10 +209,17 @@ def test_run_agent_raises_runtime_error_reporting_timeout_when_the_model_call_it
     ) -> tuple[_StallingAgent, object, str, None, InferenceTarget]:
         return _StallingAgent(), object(), "slow-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     with pytest.raises(RuntimeError, match=r"Agent run timed out after 0\.05s"):
-        asyncio.run(runner.run_agent("hello", timeout=0.05, session_id="slow-session"))
+        asyncio.run(
+            runner.run_agent(
+                "hello",
+                timeout=0.05,
+                session_id="slow-session",
+                _harness=AppHarness(HarnessKind.MAF, Path.cwd()),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +244,14 @@ def test_run_agent_result_leaves_intermediate_reasoning_and_events_fields_at_the
     ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         return _FakeAgent("plain text reply"), object(), "plain-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
-    result = asyncio.run(runner.run_agent("hello"))
+    result = asyncio.run(
+        runner.run_agent(
+            "hello",
+            _harness=AppHarness(HarnessKind.MAF, Path.cwd()),
+        )
+    )
 
     assert result.session_id == "plain-session"
     assert result.content == "plain text reply"
@@ -266,7 +299,9 @@ class _FullVocabularyAgent:
         yield _Update(
             [_Content("function_call", call_id="call_1", name="lookup", arguments="{}")]
         )
-        yield _Update([_Content("function_result", call_id="call_1", result="42")])
+        yield _Update(
+            [_Content("function_result", call_id="call_1", name="lookup", result="42")]
+        )
 
 
 def test_run_agent_stream_happy_path_emits_the_locked_event_vocabulary_in_order(
@@ -277,9 +312,16 @@ def test_run_agent_stream_happy_path_emits_the_locked_event_vocabulary_in_order(
     ) -> tuple[_FullVocabularyAgent, object, str, None, InferenceTarget]:
         return _FullVocabularyAgent(), object(), "vocab-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
-    events = asyncio.run(_collect_stream(runner.run_agent_stream("hello")))
+    events = asyncio.run(
+        _collect_stream(
+            runner.run_agent_stream(
+                "hello",
+                _harness=AppHarness(HarnessKind.MAF, Path.cwd()),
+            )
+        )
+    )
 
     assert events == [
         {"type": "session", "session_id": "vocab-session"},
@@ -295,7 +337,7 @@ def test_run_agent_stream_happy_path_emits_the_locked_event_vocabulary_in_order(
         {
             "type": "tool_end",
             "tool_call_id": "call_1",
-            "tool_name": None,
+            "tool_name": "lookup",
             "result": "42",
         },
         {"type": "done"},

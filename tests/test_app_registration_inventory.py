@@ -1,4 +1,4 @@
-"""FRD 0011 C0: characterization tests locking the *existing* (pre-Durable)
+"""FRD 0012 C0: characterization tests locking the *existing* (pre-Durable)
 ordinary/workflow app-selection and registration-inventory behavior.
 
 These tests make no product changes. They exist purely as a regression
@@ -11,7 +11,7 @@ capabilities.py` changes) so any accidental drift in:
   a given ``builtin_endpoints`` combination, including a mixed
   ordinary + workflow-enabled app,
 
-...is caught immediately. See docs/frds/0011-durable-agent-loop.md §4.14 (C0).
+...is caught immediately. See docs/frds/0012-durable-agent-loop.md §4.14 (C0).
 """
 
 from __future__ import annotations
@@ -216,7 +216,7 @@ def test_mixed_ordinary_and_workflow_agents_share_one_durable_app_with_scoped_bi
       binding,
 
     while keeping the exact overall function-name inventory stable — the
-    regression baseline this C0 slice exists to lock down before FRD 0011's
+    regression baseline this C0 slice exists to lock down before FRD 0012's
     dependency bump (C1) or later Durable-specific registration additions.
     """
     _write_agent(
