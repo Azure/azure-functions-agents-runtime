@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import textwrap
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +25,8 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents._agent_run_diagnostics import AgentExecutionSurface
+from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.config import paths
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 from azure_functions_agents.harness import _harness_execution as shared
@@ -34,6 +38,13 @@ from azure_functions_agents.harness._harness_binding import (
 from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 from azure_functions_agents.streaming_events import HostedSkillEventKind
+from tests._harness_helpers import make_copilot_harness
+
+
+def _harness_for(kind: HarnessKind, root: Path) -> AppHarness:
+    if kind is HarnessKind.COPILOT:
+        return make_copilot_harness(root, default_model="fixture-model")
+    return AppHarness(HarnessKind.MAF, root)
 
 
 def test_common_stream_echoes_supplied_id_and_gates_generated_ids(
@@ -215,6 +226,121 @@ async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound
         workflow_policy=None,
     )
     assert resolved_disabled == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+async def test_streaming_runner_skips_authored_tool_discovery_without_active_runtime_tools(
+    kind: HarnessKind, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness_for(kind, Path.cwd())
+    seen: dict[str, Any] = {}
+
+    class _Runner:
+        def run_agent_stream(self, prompt: str, **kwargs: Any) -> Any:
+            seen["prompt"] = prompt
+            seen["kwargs"] = kwargs
+
+            async def _stream() -> Any:
+                yield 'data: {"type": "done"}\n\n'
+
+            return _stream()
+
+    def fail_discovery(_root: Path) -> Any:
+        raise AssertionError("discover_user_tools should stay lazy when no runtime tools are active")
+
+    monkeypatch.setattr(runner, "discover_user_tools", fail_discovery)
+    monkeypatch.setattr(runner, "get_harness", lambda: harness)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _Runner())
+
+    events = [chunk async for chunk in runner.run_agent_stream("prompt", tools=None, mcp_tools=[], _harness=harness)]
+
+    assert events == ['data: {"type": "done"}\n\n']
+    assert seen["prompt"] == "prompt"
+    assert seen["kwargs"]["tools"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sandbox_tools", "expect_warning"),
+    [
+        ([tool(lambda: "ok", name="sandbox_tool")], False),
+        ([object()], True),
+    ],
+)
+async def test_streaming_runner_only_reserves_canonical_sandbox_runtime_tool(
+    sandbox_tools: list[object],
+    expect_warning: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+    seen: dict[str, Any] = {}
+
+    def fail_discovery(_root: Path) -> Any:
+        raise AssertionError("discover_user_tools should stay lazy without active runtime tools")
+
+    class _Runner:
+        def run_agent_stream(self, prompt: str, **kwargs: Any) -> Any:
+            seen["prompt"] = prompt
+            seen["kwargs"] = kwargs
+
+            async def _stream() -> Any:
+                yield 'data: {"type": "done"}\n\n'
+
+            return _stream()
+
+    monkeypatch.setattr(runner, "discover_user_tools", fail_discovery)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _selected: _Runner())
+
+    with caplog.at_level(logging.WARNING):
+        events = [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt",
+                tools=None,
+                mcp_tools=[],
+                sandbox_tools=sandbox_tools,  # type: ignore[arg-type]
+                _harness=harness,
+            )
+        ]
+
+    assert events == ['data: {"type": "done"}\n\n']
+    assert seen["prompt"] == "prompt"
+    assert ("Ignoring unsupported custom tool" in caplog.text) is expect_warning
+
+
+@pytest.mark.asyncio
+async def test_streaming_runner_emits_error_for_canonical_sandbox_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    def discovered(_root: Path) -> Any:
+        return SimpleNamespace(
+            tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)]
+        )
+
+    class _Runner:
+        def run_agent_stream(self, prompt: str, **kwargs: Any) -> Any:
+            raise AssertionError("collision must fail before backend execution")
+
+    monkeypatch.setattr(runner, "discover_user_tools", discovered)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda _selected: _Runner())
+
+    events = [
+        chunk
+        async for chunk in runner.run_agent_stream(
+            "prompt",
+            tools=None,
+            mcp_tools=[],
+            sandbox_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
+            _harness=harness,
+        )
+    ]
+
+    assert len(events) == 1
+    assert FHS_EXECUTE_PYTHON_TOOL_NAME in events[0]
 
 
 class _Content:

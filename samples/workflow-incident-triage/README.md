@@ -209,17 +209,17 @@ The agent should:
    a `wait` task with `duration: PT30S` that depends on all three, and a
    final `summarize_findings` task that depends on the wait and consumes
    the three fetch results via `${...result}` templates.
-2. Call `start_workflow`, return the `workflow_id` to the chat, and let the
+2. Call `fhs_start_workflow`, return the `workflow_id` to the chat, and let the
    built-in live-progress card take over.
 3. Within ~35 seconds, the workflow should reach `Completed`. The chat UI
    then auto-injects a synthetic user message containing a
    `<workflow-notification>` envelope; the agent
-   calls `get_workflow_status` once and writes a short natural-language
+   calls `fhs_get_workflow_status` once and writes a short natural-language
    summary inline as a normal Copilot turn — closing the loop without you
    typing anything.
 
 If you want to see cooperative cancellation, ask "actually cancel that"
-while the workflow is mid-wait — the agent will call `cancel_workflow`,
+while the workflow is mid-wait — the agent will call `fhs_cancel_workflow`,
 the orchestration unwinds at the next wave boundary, the live card flips
 to `Canceled`, and the auto-notification kicks in so the agent
 acknowledges the cancellation in its own turn (with whatever partial
@@ -242,7 +242,7 @@ The agent should:
    (using `${item.name}` / `${index}` for its args), and a final
    `summarize_scan` task that depends on the logical `inspect` id and consumes
    its whole ordered aggregate via `${inspect.result}`.
-2. Call `start_workflow` and hand off to the live-progress card. The card's
+2. Call `fhs_start_workflow` and hand off to the live-progress card. The card's
    structured status shows the fan-out expanding (e.g. `inspect: expanded (3/4)`)
    with one instance `skipped` — the out-of-scope low-tier service.
 3. `summarize_scan` receives the ordered `{index, status, result}` envelopes

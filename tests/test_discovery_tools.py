@@ -11,6 +11,10 @@ import pytest
 from pydantic import ValidationError
 
 from azure_functions_agents._function_tool import tool, workflow_tool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_EXECUTE_PYTHON_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.discovery.tools import (
     _workflow_tool_from_member,
@@ -284,15 +288,27 @@ def test_runtime_and_callable_authoring_scenario(copilot, monkeypatch) -> None:
     assert sorted(tool.name for tool in discovered.user_tools) == [
         "authored",
         "callable_constructed",
+        "execute_python",
         "first_local",
+        "start_workflow",
     ]
-    assert sorted(item.name for item in discovered.workflow_tools) == ["authored", "workflow_only"]
+    assert sorted(item.name for item in discovered.workflow_tools) == [
+        "authored",
+        "start_workflow",
+        "workflow_only",
+    ]
     resolved = compose(
         load_agent_specs(root)[0],
         load_global_config(root),
         discovered_mcp_names=[],
         discovered_skill_names=[],
     )
+    assert resolved.sandbox_config is not None
+    assert resolved.sandbox_config.endpoint == "https://eastus.dynamicsessions.io"
+    assert resolved.workflows is not None
+    assert resolved.workflows.enabled is True
+    assert resolved.workflows.exclude == (FHS_START_WORKFLOW_TOOL_NAME,)
+    assert resolved.tool_filter.exclude == [FHS_EXECUTE_PYTHON_TOOL_NAME]
     capabilities = build_capabilities(
         resolved,
         discovered_user_tools=discovered.user_tools,
@@ -303,9 +319,20 @@ def test_runtime_and_callable_authoring_scenario(copilot, monkeypatch) -> None:
     assert sorted(tool.name for tool in capabilities.filtered_user_tools) == [
         "authored",
         "callable_constructed",
+        "execute_python",
         "first_local",
+        "start_workflow",
     ]
-    assert create_function_app(root).get_functions()
+    assert sorted(item.name for item in capabilities.filtered_workflow_tools) == [
+        "authored",
+        "start_workflow",
+        "workflow_only",
+    ]
+    function_names = {
+        function.get_function_name() for function in create_function_app(root).get_functions()
+    }
+    assert "agent_agent_builtin_chat" in function_names
+    assert "agent_agent_builtin_debug_chat_ui" not in function_names
 
 
 def test_metadata_shaped_noncallable_does_not_suppress_local_fallback(tmp_path: Path) -> None:

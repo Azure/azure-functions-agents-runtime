@@ -378,6 +378,46 @@ def test_create_function_app_catalogs_inert_agent_for_hosted_skill(
     assert app.get_functions() == []
 
 
+def test_create_function_app_allows_authored_canonical_sandbox_name_when_endpoint_is_ineligible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("UNSET_DYNAMIC_SESSIONS", raising=False)
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Main
+        description: Main agent
+        builtin_endpoints:
+          chat_api: true
+        """,
+    )
+    (tmp_path / "agents.config.yaml").write_text(
+        "system_tools:\n"
+        "  dynamic_sessions_code_interpreter:\n"
+        "    endpoint: https://$UNSET_DYNAMIC_SESSIONS/api\n",
+        encoding="utf-8",
+    )
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "runtime_tool.py").write_text(
+        "from azure_functions_agents import tool\n\n"
+        "@tool(name='fhs_execute_python')\n"
+        "def runtime_tool(code: str) -> str:\n"
+        "    return code\n",
+        encoding="utf-8",
+    )
+
+    app = create_function_app(tmp_path)
+
+    assert _function_names(app.get_functions()) == [
+        "agent_main_builtin_chat",
+        "agent_main_builtin_chatstream",
+        "agent_main_builtin_history",
+    ]
+
+
 def test_hosted_skill_function_app_composes_without_internal_arguments(
     tmp_path: Path,
 ) -> None:

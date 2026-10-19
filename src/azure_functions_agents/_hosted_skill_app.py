@@ -15,7 +15,9 @@ from ._agent_run_diagnostics import AgentExecutionSurface
 from ._logger import logger
 from .harness._harness_binding import AppHarness, UnsupportedCapabilityError
 from .hosted_skill_binding import HostedSkill
+from .registration.capabilities import validate_runtime_tool_name_collisions
 from .registration.catalog import AgentCatalog, CatalogEntry
+from .system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 
 type _Handler = Callable[..., Any]
 _F = TypeVar("_F", bound=_Handler)
@@ -96,6 +98,18 @@ def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
         raise UnsupportedCapabilityError(
             f"HostedSkill agent {resolved.slug!r} cannot enable Dynamic Workflows."
         )
+    try:
+        validate_runtime_tool_name_collisions(
+            resolved,
+            authored_tools=entry.capabilities.filtered_user_tools or (),
+            workflow_enabled=False,
+            sandbox_enabled=sandbox_runtime_tool_enabled(
+                resolved.sandbox_config,
+                tools_disabled=resolved.tools_disabled,
+            ),
+        )
+    except ValueError as exc:
+        raise UnsupportedCapabilityError(str(exc)) from exc
     validator = get_agent_runner(harness).validate_hosted_skill
     if validator is not None:
         validator(resolved)

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +19,14 @@ from azure.functions.timer import TimerRequest
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_CANCEL_WORKFLOW_TOOL_NAME,
+    FHS_EXECUTE_PYTHON_TOOL_NAME,
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_LIST_WORKFLOWS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+    FHS_TERMINATE_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ApprovalMode, ToolDescriptor
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
@@ -435,10 +444,23 @@ def test_sandbox_name_collision_fails_during_registration(preview):
     })
     capabilities = replace(
         capabilities,
-        filtered_user_tools=[tool(name="execute_python")(lambda code: code)],
+        filtered_user_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
     )
-    with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
+    with pytest.raises(UnsupportedCapabilityError, match="collides with an enabled runtime-owned"):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+
+def test_unresolved_sandbox_endpoint_allows_authored_runtime_name(preview):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(update={
+        "sandbox_config": DynamicSessionsCodeInterpreterConfig(endpoint="$MISSING_POOL"),
+    })
+    capabilities = replace(
+        capabilities,
+        filtered_user_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)],
+    )
+
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
 def test_maf_keeps_authored_approval_that_copilot_cannot_adapt(tmp_path):
@@ -613,7 +635,11 @@ def test_workflow_management_requires_bound_policy(preview):
         durable_client=durable_client,
     )
     assert [function.name for function in _capabilities.prepare_tools(workflow_tools)] == [
-        "start_workflow", "get_workflow_status", "list_workflows", "cancel_workflow", "terminate_workflow",
+        FHS_START_WORKFLOW_TOOL_NAME,
+        FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+        FHS_LIST_WORKFLOWS_TOOL_NAME,
+        FHS_CANCEL_WORKFLOW_TOOL_NAME,
+        FHS_TERMINATE_WORKFLOW_TOOL_NAME,
     ]
     with pytest.raises(UnsupportedCapabilityError, match="per-agent workflow policy"):
         asyncio.run(runner.run_agent(
@@ -992,6 +1018,109 @@ async def test_concurrent_startup_shares_one_client(runtime_preview, monkeypatch
         release.set()
         await owner.close()
     assert copilot_state(runtime_preview).runtime is None
+
+
+@pytest.mark.asyncio
+async def test_blocking_constructor_runs_off_the_event_loop(runtime_preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+    ticked = asyncio.Event()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    async def tick():
+        await asyncio.sleep(0)
+        ticked.set()
+
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(side_effect=blocking_factory))
+    owner = runtime.get_runtime(runtime_preview)
+    request = asyncio.create_task(owner.client())
+    ticker = asyncio.create_task(tick())
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        await asyncio.wait_for(ticked.wait(), timeout=1)
+        release.set()
+        assert await request is client
+        client.start.assert_awaited_once()
+    finally:
+        release.set()
+        await ticker
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_constructor_cancellation_reuses_one_late_client(runtime_preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+    factory = Mock()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    factory.side_effect = blocking_factory
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    owner = runtime.get_runtime(runtime_preview)
+    first = asyncio.create_task(owner.client())
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert owner._client is None
+        assert owner._client_task is not None
+        release.set()
+        assert await owner.client() is client
+        factory.assert_called_once()
+        client.start.assert_awaited_once()
+    finally:
+        release.set()
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_late_constructor_cleanup_without_duplicate_owner(
+    runtime_preview, monkeypatch
+):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(side_effect=blocking_factory))
+    owner = runtime.get_runtime(runtime_preview)
+    startup = asyncio.create_task(owner.client())
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        close_task = asyncio.create_task(owner.close())
+        await asyncio.sleep(0)
+        assert runtime.get_runtime(runtime_preview) is owner
+        release.set()
+        await close_task
+        with pytest.raises(asyncio.CancelledError):
+            await startup
+        client.start.assert_not_awaited()
+        client.stop.assert_awaited_once()
+        assert copilot_state(runtime_preview).runtime is None
+        assert owner._close_callback not in lifecycle._SHUTDOWN_CALLBACKS
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio

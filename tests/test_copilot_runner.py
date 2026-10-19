@@ -12,6 +12,13 @@ import pytest
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_CANCEL_WORKFLOW_TOOL_NAME,
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_LIST_WORKFLOWS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+    FHS_TERMINATE_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     ResolvedAgent,
@@ -224,8 +231,11 @@ async def test_workflow_management_uses_native_skill_loading_without_prompt_inje
     assert [skill.name for skill in request.skills] == expected_skill_names
     assert [skill.name for skill in request.skill_catalog] == expected_skill_names
     assert {function.name for function in request.tools} == {
-        "start_workflow", "get_workflow_status", "list_workflows",
-        "cancel_workflow", "terminate_workflow",
+        FHS_START_WORKFLOW_TOOL_NAME,
+        FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+        FHS_LIST_WORKFLOWS_TOOL_NAME,
+        FHS_CANCEL_WORKFLOW_TOOL_NAME,
+        FHS_TERMINATE_WORKFLOW_TOOL_NAME,
     }
     assert request.instructions == "Base instructions.\n\nShort workflow guidance."
     assert "Collection fan-out" not in request.instructions

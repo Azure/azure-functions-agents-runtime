@@ -221,13 +221,13 @@ class AzureOpenAIProvider(CopilotProvider):
     ) -> ProviderConfig:
         from copilot.session import ProviderConfig
 
-        optional: ProviderConfig = _provider_output_limit(max_output_tokens)
+        optional_configs: ProviderConfig = _provider_output_limit(max_output_tokens)
         if self.api_version is not None:
-            optional["azure"] = {"api_version": self.api_version}
+            optional_configs["azure"] = {"api_version": self.api_version}
         if self.api_key:
-            optional["api_key"] = self.api_key
+            optional_configs["api_key"] = self.api_key
         else:
-            optional["bearer_token_provider"] = tokens.bearer_token_provider(
+            optional_configs["bearer_token_provider"] = tokens.bearer_token_provider(
                 _AZURE_OPENAI_SCOPE,
                 "Copilot Azure OpenAI could not acquire an Entra token. "
                 "Check the approved Azure credential configuration and deployment access.",
@@ -238,7 +238,7 @@ class AzureOpenAIProvider(CopilotProvider):
             base_url=self.endpoint,
             model_id=model,
             wire_model=model,
-            **optional,
+            **optional_configs,
         )
 
 

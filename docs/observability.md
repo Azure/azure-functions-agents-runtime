@@ -211,7 +211,7 @@ These expectations apply to runtime-captured turn telemetry:
 
 ### Span `dynamic_session.execute`
 
-One per `execute_python` call, as a child of the runtime-owned invocation span.
+One per `fhs_execute_python` call, as a child of the runtime-owned invocation span.
 
 | Attribute | Meaning |
 | --- | --- |
@@ -292,7 +292,7 @@ Namespace `azure_functions_agents.*`:
 
 | Metric | Meaning |
 | --- | --- |
-| `azure_functions_agents.dynamic_session.executions` | Count of `execute_python` calls. |
+| `azure_functions_agents.dynamic_session.executions` | Count of `fhs_execute_python` calls. |
 | `azure_functions_agents.dynamic_session.errors` | Count that failed or produced stderr. |
 | `azure_functions_agents.web_request.requests` | Count of `web_request` tool calls. |
 | `azure_functions_agents.web_request.errors` | Count that were blocked by the SSRF validator, timed out, or otherwise failed. |

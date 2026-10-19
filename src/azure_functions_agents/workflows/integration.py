@@ -27,6 +27,13 @@ import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents._logger import logger
+from azure_functions_agents._runtime_tool_names import (
+    FHS_CANCEL_WORKFLOW_TOOL_NAME,
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_LIST_WORKFLOWS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+    FHS_TERMINATE_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents.config.schema import (
     TRIGGER_TYPES,
     ResolvedAgent,
@@ -71,8 +78,9 @@ _ALLOWED_WORKFLOWS_KEYS: frozenset[str] = frozenset({
 _SHARED_ADDENDUM = (
     "\n\n"
     "## Long-running work: workflows\n\n"
-    "You have access to workflow tools (`start_workflow`, `get_workflow_status`, "
-    "`list_workflows`, `cancel_workflow`, `terminate_workflow`).\n\n"
+    f"You have access to workflow tools (`{FHS_START_WORKFLOW_TOOL_NAME}`, "
+    f"`{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}`, `{FHS_LIST_WORKFLOWS_TOOL_NAME}`, "
+    f"`{FHS_CANCEL_WORKFLOW_TOOL_NAME}`, `{FHS_TERMINATE_WORKFLOW_TOOL_NAME}`).\n\n"
     "Prefer starting a workflow when the user's request involves work that:\n"
     "- would take longer than a single chat turn, or\n"
     "- has steps that can run in parallel and you want them to, or\n"
@@ -97,45 +105,45 @@ _CHAT_NOTIFICATION_ADDENDUM = (
     "  <summary>Workflow abc-123 finished with status Completed.</summary>\n"
     "</workflow-notification>\n"
     "```\n"
-    "Treat that message as: call `get_workflow_status` once with **each** "
+    f"Treat that message as: call `{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}` once with **each** "
     "`<workflow-id>`, then write a short, clear natural-language summary of "
     "the result(s) for the user. Notification turns are summary-only — do "
     "not start new workflows or call additional tools to investigate "
     "further unless the user later asks for a deeper look. If a workflow "
     "ended without a usable final output (e.g. Terminated, or Canceled "
     "with no partial result), say so plainly rather than implying a result "
-    "exists. If `get_workflow_status` happens to return a non-terminal "
+    f"exists. If `{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}` happens to return a non-terminal "
     "status (a brief race between the chat client and the management "
     "API), tell the user the detailed result isn't available yet and end "
     "the turn — do not poll again."
 )
 
 _CHAT_ADDENDUM = (
-    "`start_workflow` is fire-and-forget. It returns a `workflow_id` immediately "
+    f"`{FHS_START_WORKFLOW_TOOL_NAME}` is fire-and-forget. It returns a `workflow_id` immediately "
     "and the orchestration runs in the background. After it returns, briefly "
     "tell the user that work is in flight (include the `workflow_id`) and end "
-    "your turn — **do not call `get_workflow_status` to wait for completion.** "
+    f"your turn — **do not call `{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}` to wait for completion.** "
     "The chat client renders live per-task progress next to the conversation "
     "and will notify you when the workflow reaches a terminal state.\n\n"
     + _CHAT_NOTIFICATION_ADDENDUM
     + "\n\n"
     "Outside of `<workflow-notification>` turns, only call "
-    "`get_workflow_status` "
-    "(or `list_workflows`) when the user explicitly asks about a previously-"
+    f"`{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}` "
+    f"(or `{FHS_LIST_WORKFLOWS_TOOL_NAME}`) when the user explicitly asks about a previously-"
     "started workflow — for example *\"is workflow X still running?\"*. Polling "
     "on your own initiative wastes turns and tokens.\n\n"
-    "If the user changes their mind, prefer `cancel_workflow` (cooperative; "
-    "preserves partial results) over `terminate_workflow` (abrupt). For short, "
+    f"If the user changes their mind, prefer `{FHS_CANCEL_WORKFLOW_TOOL_NAME}` (cooperative; "
+    f"preserves partial results) over `{FHS_TERMINATE_WORKFLOW_TOOL_NAME}` (abrupt). For short, "
     "latency-sensitive work that fits comfortably in a single turn, keep using "
     "direct tool calls — workflows add overhead."
 )
 
 _TRIGGER_ADDENDUM = (
     "This agent invocation came from a declared Azure Functions trigger. "
-    "`start_workflow` is fire-and-forget: it returns a `workflow_id` immediately "
+    f"`{FHS_START_WORKFLOW_TOOL_NAME}` is fire-and-forget: it returns a `workflow_id` immediately "
     "while the Durable orchestration continues independently. After it returns, "
     "retain or report the `workflow_id` as the trigger's response contract allows, "
-    "then end this agent turn promptly. Do not poll `get_workflow_status` or wait "
+    f"then end this agent turn promptly. Do not poll `{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}` or wait "
     "for terminal workflow status inside this trigger invocation.\n\n"
     "There is no built-in chat poller, synthetic `<workflow-notification>` turn, "
     "or automatic agent reactivation for declared triggers. For timer, queue, "

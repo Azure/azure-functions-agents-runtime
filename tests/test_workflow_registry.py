@@ -21,6 +21,12 @@ from types import SimpleNamespace
 import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_CANCEL_WORKFLOW_TOOL_NAME,
+    FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+    FHS_TERMINATE_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents.config.schema import WorkflowSubagentRef
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
@@ -177,6 +183,12 @@ def test_reserved_names_match_management_tools():
     """
     actual = {tool.name for tool in tools.build_workflow_tools()}
     assert actual == set(registry.RESERVED_TOOL_NAMES)
+
+
+def test_previous_management_names_are_no_longer_reserved_workflow_targets():
+    for legacy_name in ("start_workflow", "get_workflow_status", "execute_python"):
+        registry.register_workflow_tool(legacy_name, "legacy-compatible authored tool", _noop)
+        assert registry.get_entry(legacy_name) is not None
 
 
 def test_register_workflow_tool_accepts_async_handler():
@@ -481,6 +493,10 @@ def test_addendum_includes_per_tool_descriptions():
     assert "### Available workflow tools" in addendum
     assert "`demo_evidence_tool`" in addendum
     assert "Sample tool for the addendum-rendering test." in addendum
+    assert FHS_START_WORKFLOW_TOOL_NAME in addendum
+    assert FHS_GET_WORKFLOW_STATUS_TOOL_NAME in addendum
+    assert "`start_workflow`" not in addendum
+    assert "`get_workflow_status`" not in addendum
 
 
 def test_data_driven_control_flow_grammar_uses_progressive_skill_disclosure():
@@ -619,22 +635,25 @@ def test_addendum_enforces_fire_and_forget_no_poll_guidance():
     addendum = result.chat_system_addendum
     assert "fire-and-forget" in addendum
     assert "end your turn" in addendum
-    assert "do not call `get_workflow_status` to wait" in addendum
+    assert f"do not call `{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}` to wait" in addendum
     assert "End workflows with a small summary task" in addendum
     assert "Do not return large raw evidence" in addendum
     trigger_addendum = result.trigger_system_addendum
     assert "fire-and-forget" in trigger_addendum
     assert "end this agent turn promptly" in trigger_addendum
-    assert "do not poll `get_workflow_status`" in trigger_addendum.lower()
+    assert f"do not poll `{FHS_GET_WORKFLOW_STATUS_TOOL_NAME}`" in trigger_addendum.lower()
     # Tool descriptions must not encourage polling either, otherwise the
     # tool-call contract overrides the addendum.
     descriptions = {tool.name: tool.description for tool in result.workflow_tools}
-    assert "fire-and-forget" in descriptions["start_workflow"]
-    assert "do not poll get_workflow_status" in descriptions["start_workflow"]
-    assert "only when the user explicitly asks" in descriptions["get_workflow_status"]
+    assert "fire-and-forget" in descriptions[FHS_START_WORKFLOW_TOOL_NAME]
+    assert (
+        f"do not poll {FHS_GET_WORKFLOW_STATUS_TOOL_NAME}"
+        in descriptions[FHS_START_WORKFLOW_TOOL_NAME]
+    )
+    assert "only when the user explicitly asks" in descriptions[FHS_GET_WORKFLOW_STATUS_TOOL_NAME]
     # Negative checks: the prior wording must not creep back in.
-    assert "Poll this" not in descriptions["get_workflow_status"]
-    assert "call get_workflow_status to check progress" not in descriptions["start_workflow"]
+    assert "Poll this" not in descriptions[FHS_GET_WORKFLOW_STATUS_TOOL_NAME]
+    assert "call get_workflow_status to check progress" not in descriptions[FHS_START_WORKFLOW_TOOL_NAME]
 
 
 def test_addendum_documents_workflow_notification_contract():
@@ -688,8 +707,8 @@ def test_addendum_documents_workflow_notification_contract():
     assert "do not poll again" in addendum
     assert "without a usable final output" in addendum
     assert "say so plainly" in addendum
-    assert "cancel_workflow" in addendum
-    assert "terminate_workflow" in addendum
+    assert FHS_CANCEL_WORKFLOW_TOOL_NAME in addendum
+    assert FHS_TERMINATE_WORKFLOW_TOOL_NAME in addendum
     # The legacy free-form prefix must not creep back in — it would
     # produce conflicting guidance and confuse the agent.
     assert "[Workflow notification]" not in addendum
@@ -701,10 +720,12 @@ def test_addendum_documents_workflow_notification_contract():
     # Tool descriptions must reinforce the same envelope so the LLM
     # sees it both at system-prompt time and at tool-call selection time.
     descriptions = {tool.name: tool.description for tool in result.workflow_tools}
-    assert "<workflow-notification>" in descriptions["start_workflow"]
-    assert "<workflow-notification>" in descriptions["get_workflow_status"]
-    assert "[Workflow notification]" not in descriptions["start_workflow"]
-    assert "[Workflow notification]" not in descriptions["get_workflow_status"]
+    assert "<workflow-notification>" in descriptions[FHS_START_WORKFLOW_TOOL_NAME]
+    assert "<workflow-notification>" in descriptions[FHS_GET_WORKFLOW_STATUS_TOOL_NAME]
+    assert "[Workflow notification]" not in descriptions[FHS_START_WORKFLOW_TOOL_NAME]
+    assert "[Workflow notification]" not in descriptions[FHS_GET_WORKFLOW_STATUS_TOOL_NAME]
+    assert "start_workflow" not in descriptions[FHS_START_WORKFLOW_TOOL_NAME]
+    assert "get_workflow_status" not in descriptions[FHS_GET_WORKFLOW_STATUS_TOOL_NAME]
 
 
 # ---- workflow activity failure handling -------------------------------------

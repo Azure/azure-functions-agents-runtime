@@ -5,7 +5,7 @@ the authored `/preview` HTTP route with `make_receipt` and `web_request`
 (limited to `example.com`). The SDK owns sessions and their opaque files;
 the host supplies filesystem callbacks backed by local files or Blob.
 This checked-in walkthrough stays local for a reproducible demo; that does not
-by itself define the broader preview contract. ACA `execute_python` is
+by itself define the broader preview contract. ACA `fhs_execute_python` is
 disabled in the checked-in configuration.
 
 Requires Python 3.13/3.14, Azure Functions Core Tools 4, and `uv`. Model calls

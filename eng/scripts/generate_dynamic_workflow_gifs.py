@@ -33,6 +33,7 @@ PURPLE = "#a576ff"
 GREEN = "#3ee6a8"
 AMBER = "#ffbc57"
 RED = "#ff6384"
+WORKFLOW_START_TOOL_LABEL: Final = "fhs_start_workflow(plan)"
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -424,7 +425,7 @@ def _dynamic_workflow_frame(frame: int) -> Image.Image:
         [
             ("AGENT + LLM", FONT_HEADING, TEXT),
             ("author one DAG", FONT_BODY, BLUE),
-            ("start_workflow(plan)", FONT_SMALL, MUTED),
+            (WORKFLOW_START_TOOL_LABEL, FONT_SMALL, MUTED),
         ],
     )
     _centered_lines(

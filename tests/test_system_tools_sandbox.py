@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.system_tools import sandbox
 from azure_functions_agents.system_tools.sandbox import create_sandbox_tools
 
@@ -35,7 +36,7 @@ def test_create_sandbox_tools_accepts_resolved_inline_endpoint(
 
 def _run_with_streams(
     monkeypatch: pytest.MonkeyPatch, *, stdout: str, stderr: str
-) -> tuple[str, list[bool]]:
+) -> tuple[str, list[bool], str]:
     """Run execute_python with a faked ACA response and capture the error-metric calls."""
     errors: list[bool] = []
 
@@ -64,11 +65,12 @@ def _run_with_streams(
     # (added in #83) still returns the tool.
     tool = create_sandbox_tools({"endpoint": "https://eastus.dynamicsessions.io"})[0]
     result = asyncio.run(tool.func(code="print('hi')"))
-    return result, errors
+    return result, errors, tool.name
 
 
 def test_sandbox_clean_run_records_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    result, errors = _run_with_streams(monkeypatch, stdout="ok", stderr="")
+    result, errors, tool_name = _run_with_streams(monkeypatch, stdout="ok", stderr="")
+    assert tool_name == FHS_EXECUTE_PYTHON_TOOL_NAME
     assert '"stdout": "ok"' in result
     assert errors == [False]
 
@@ -76,9 +78,10 @@ def test_sandbox_clean_run_records_success(monkeypatch: pytest.MonkeyPatch) -> N
 def test_sandbox_stderr_is_surfaced_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
     # A "successful" tool call whose stderr is non-empty must be recorded as an error, even though
     # the tool still returns the payload string to the model.
-    result, errors = _run_with_streams(
+    result, errors, tool_name = _run_with_streams(
         monkeypatch, stdout="", stderr="TesseractNotFoundError: tesseract is not installed"
     )
+    assert tool_name == FHS_EXECUTE_PYTHON_TOOL_NAME
     assert "TesseractNotFoundError" in result
     assert errors == [True]
 

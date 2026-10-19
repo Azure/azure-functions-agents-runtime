@@ -14,6 +14,7 @@ import pytest
 
 from azure_functions_agents._agent_run_diagnostics import _tool_error_count, _total_tool_error_count
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -479,7 +480,7 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
 
     def fake_create_sandbox_tools(config: dict[str, Any], *, fallback_session_id: str) -> list[ToolDescriptor]:
         create_calls.append((config, fallback_session_id))
-        return [tool(lambda: "ok", name="execute_python")]
+        return [tool(lambda: "ok", name=FHS_EXECUTE_PYTHON_TOOL_NAME)]
 
     monkeypatch.setattr(
         "azure_functions_agents.system_tools.sandbox.create_sandbox_tools",
@@ -503,7 +504,7 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
     )
 
     assert disabled is None
-    assert [descriptor.name for descriptor in enabled] == ["execute_python"]
+    assert [descriptor.name for descriptor in enabled] == [FHS_EXECUTE_PYTHON_TOOL_NAME]
     assert create_calls == [
         (
             {"endpoint": "https://sandbox.example", "client_id": None},
@@ -517,7 +518,7 @@ def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypa
 
     def fake_create_sandbox_tools(config: dict[str, Any], *, fallback_session_id: str) -> list[ToolDescriptor]:
         create_calls.append(fallback_session_id)
-        return [tool(lambda: fallback_session_id, name="execute_python")]
+        return [tool(lambda: fallback_session_id, name=FHS_EXECUTE_PYTHON_TOOL_NAME)]
 
     monkeypatch.setattr(
         "azure_functions_agents.system_tools.sandbox.create_sandbox_tools",

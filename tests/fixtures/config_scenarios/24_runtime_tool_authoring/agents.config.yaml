@@ -1,0 +1,3 @@
+system_tools:
+  dynamic_sessions_code_interpreter:
+    endpoint: https://eastus.dynamicsessions.io

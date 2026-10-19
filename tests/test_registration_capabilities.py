@@ -10,8 +10,16 @@ from typing import Any
 import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._runtime_tool_names import (
+    FHS_EXECUTE_PYTHON_TOOL_NAME,
+    FHS_START_WORKFLOW_TOOL_NAME,
+)
 from azure_functions_agents._tool_descriptor import ToolDescriptor
-from azure_functions_agents.config.schema import SubagentRef, WebRequestConfig
+from azure_functions_agents.config.schema import (
+    DynamicSessionsCodeInterpreterConfig,
+    SubagentRef,
+    WebRequestConfig,
+)
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.registration import capabilities as capabilities_module
@@ -19,6 +27,7 @@ from azure_functions_agents.registration.capabilities import (
     AgentCapabilities,
     build_capabilities,
     existing_tool_names,
+    validate_runtime_tool_name_collisions,
     validate_subagent_tool_names,
 )
 
@@ -342,7 +351,11 @@ def test_build_capabilities_tools_disabled_suppresses_web_request_tool_and_skips
 
 
 def test_existing_tool_names_aggregates_all_categories() -> None:
-    resolved = _resolved(sandbox_config=SimpleNamespace())
+    resolved = _resolved(
+        sandbox_config=DynamicSessionsCodeInterpreterConfig(
+            endpoint="https://eastus.dynamicsessions.io"
+        )
+    )
     capabilities = AgentCapabilities(
         filtered_user_tools=[_named_tool("user_tool")],
         filtered_mcp_tools=(_mcp_server("mcp_tool"),),
@@ -352,21 +365,43 @@ def test_existing_tool_names_aggregates_all_categories() -> None:
 
     names = existing_tool_names(resolved, capabilities)
 
-    assert names == {"user_tool", "mcp_tool", "workflow_tool", "web_request", "execute_python"}
+    assert names == {
+        "user_tool",
+        "mcp_tool",
+        "workflow_tool",
+        "web_request",
+        FHS_EXECUTE_PYTHON_TOOL_NAME,
+    }
 
 
 def test_existing_tool_names_omits_sandbox_when_no_sandbox_config() -> None:
     resolved = _resolved(sandbox_config=None)
     capabilities = AgentCapabilities()
 
-    assert "execute_python" not in existing_tool_names(resolved, capabilities)
+    assert FHS_EXECUTE_PYTHON_TOOL_NAME not in existing_tool_names(resolved, capabilities)
 
 
 def test_existing_tool_names_omits_sandbox_when_tools_disabled() -> None:
-    resolved = _resolved(sandbox_config=SimpleNamespace(), tools_disabled=True)
+    resolved = _resolved(
+        sandbox_config=DynamicSessionsCodeInterpreterConfig(
+            endpoint="https://eastus.dynamicsessions.io"
+        ),
+        tools_disabled=True,
+    )
     capabilities = AgentCapabilities()
 
-    assert "execute_python" not in existing_tool_names(resolved, capabilities)
+    assert FHS_EXECUTE_PYTHON_TOOL_NAME not in existing_tool_names(resolved, capabilities)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["", "   ", "https://$UNSET_DYNAMIC_SESSIONS/api", "https://collector.example/ingest"],
+)
+def test_existing_tool_names_omits_sandbox_when_endpoint_is_not_eligible(endpoint: str) -> None:
+    resolved = _resolved(sandbox_config=DynamicSessionsCodeInterpreterConfig(endpoint=endpoint))
+    capabilities = AgentCapabilities()
+
+    assert FHS_EXECUTE_PYTHON_TOOL_NAME not in existing_tool_names(resolved, capabilities)
 
 
 def test_existing_tool_names_ignores_unnamed_tools() -> None:
@@ -381,6 +416,43 @@ def test_validate_subagent_tool_names_noop_when_no_subagents() -> None:
     capabilities = AgentCapabilities(filtered_user_tools=[_named_tool("delegate_billing")])
 
     validate_subagent_tool_names(resolved, capabilities)
+
+
+@pytest.mark.parametrize(
+    ("workflow_enabled", "sandbox_enabled", "tool_name"),
+    [
+        (True, False, FHS_START_WORKFLOW_TOOL_NAME),
+        (False, True, FHS_EXECUTE_PYTHON_TOOL_NAME),
+    ],
+)
+def test_validate_runtime_tool_name_collisions_rejects_exact_active_names(
+    workflow_enabled: bool, sandbox_enabled: bool, tool_name: str
+) -> None:
+    with pytest.raises(ValueError, match=tool_name):
+        validate_runtime_tool_name_collisions(
+            source_file="agent.agent.md",
+            authored_tools=[_named_tool(tool_name)],
+            workflow_enabled=workflow_enabled,
+            sandbox_enabled=sandbox_enabled,
+        )
+
+
+def test_validate_runtime_tool_name_collisions_allows_old_internal_names() -> None:
+    validate_runtime_tool_name_collisions(
+        source_file="agent.agent.md",
+        authored_tools=[_named_tool("start_workflow"), _named_tool("execute_python")],
+        workflow_enabled=True,
+        sandbox_enabled=True,
+    )
+
+
+def test_validate_runtime_tool_name_collisions_allows_disabled_runtime_name() -> None:
+    validate_runtime_tool_name_collisions(
+        source_file="agent.agent.md",
+        authored_tools=[_named_tool(FHS_START_WORKFLOW_TOOL_NAME)],
+        workflow_enabled=False,
+        sandbox_enabled=False,
+    )
 
 
 def test_validate_subagent_tool_names_passes_when_no_collision() -> None:
