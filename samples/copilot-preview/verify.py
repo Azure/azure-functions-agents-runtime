@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -73,10 +74,97 @@ def negative(client: httpx.Client) -> None:
     print("PASS negative: invalid session, streaming and history fail without model calls")
 
 
+def skill(client: httpx.Client) -> None:
+    response = client.post("/agents/main/chat", json={
+        "prompt": "Run the preview-check skill test. Load the skill, then use view to read "
+        "its references/check.txt. Return the skill marker and the exact file marker. "
+        "Do not guess, use a network tool, or run a shell command.",
+    })
+    response.raise_for_status()
+    result = response.json()
+    assert "SKILL_LOADED_PREVIEW_CHECK" in result["response"], "Skill marker is missing"
+    assert "REFERENCE_READ_7C42A9" in result["response"], "Reference marker is missing"
+    calls = result["tool_calls"]
+    assert {call["tool_name"] for call in calls} == {"skill", "view"}, "Expected skill and view only"
+    assert all(call.get("success") is True for call in calls), "A native skill tool failed"
+    reference = Path(__file__).resolve().parent / "src" / "skills" / "preview-check" / "references" / "check.txt"
+    for call in calls:
+        if call["tool_name"] != "view":
+            continue
+        arguments = call["arguments"]
+        if isinstance(arguments, str):
+            arguments = json.loads(arguments)
+        assert Path(arguments["path"]).resolve() == reference.resolve(), "View read an unexpected file"
+        assert "REFERENCE_READ_7C42A9" in call["result"], "View did not return the reference marker"
+    print("PASS skill: native skill and view read the exact sample reference")
+
+
+def _learn_links(text: str) -> set[str]:
+    return {
+        link.rstrip(".,;")
+        for link in re.findall(r"""https://learn\.microsoft\.com/[^\s"'<>()\[\]]+""", text)
+    }
+
+
+def _session_output_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    assert normalized.startswith("/session-state/temp/"), "View is outside the session temp directory"
+    assert all(
+        part not in {"", ".", ".."} for part in normalized.split("/")[3:]
+    ), "The saved output path is invalid"
+    return normalized
+
+
+def mcp(client: httpx.Client) -> None:
+    response = client.post("/agents/main/chat", json={
+        "prompt": "For an MCP check, use microsoft_docs_search on microsoft-learn to search "
+        "for the Azure Functions Python programming model. Include a Microsoft Learn link "
+        "from the result. If the search output is saved to the session temp directory, "
+        "use view to read that file. Do not use web_request, make_receipt, a skill, or a shell command.",
+    })
+    response.raise_for_status()
+    result = response.json()
+    calls = result["tool_calls"]
+    assert calls, "The response has no MCP tool evidence"
+    assert all(call.get("success") is True for call in calls), "An MCP check tool failed"
+    saved_paths: set[str] = set()
+    evidence: list[str] = []
+    searches = 0
+    for call in calls:
+        if call["tool_name"].endswith("microsoft_docs_search"):
+            searches += 1
+            if call["result"].startswith("Output too large to read at once"):
+                saved = re.match(
+                    r"Output too large to read at once[^\r\n]*? Saved to: ([^\r\n]+)",
+                    call["result"],
+                )
+                assert saved is not None, "The large MCP result has no saved output path"
+                saved_paths.add(_session_output_path(saved.group(1)))
+        else:
+            assert call["tool_name"] == "view", "An unexpected MCP check tool was called"
+            arguments = call["arguments"]
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            assert _session_output_path(arguments["path"]) in saved_paths, "View did not read saved MCP output"
+        evidence.append(call["result"])
+    assert searches, "The response has no Microsoft Learn search"
+    links = {
+        link
+        for text in evidence
+        for link in _learn_links(text)
+    }
+    assert links, "MCP returned no Learn link"
+    assert links & _learn_links(result["response"]), "The response has no link from the MCP result"
+    print("PASS mcp: Microsoft Learn search returned a documentation link")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:7071")
-    parser.add_argument("--phase", choices=("first", "followup", "negative", "all"), default="all")
+    parser.add_argument(
+        "--phase", choices=("first", "followup", "negative", "all", "skill", "mcp", "capabilities"),
+        default="all",
+    )
     parser.add_argument("--evidence", type=Path, default=Path(".preview-evidence.json"))
     parser.add_argument(
         "--restart-host", action="store_true",
@@ -150,13 +238,17 @@ def main() -> None:
     url = urlsplit(args.base_url)
     if url.scheme != "http" or url.hostname not in {"localhost", "127.0.0.1", "::1"}:
         parser.error("This sample driver targets an isolated local Functions host only.")
-    with httpx.Client(base_url=args.base_url, timeout=75, trust_env=False) as client:
+    with httpx.Client(base_url=args.base_url, timeout=180, trust_env=False) as client:
         if args.phase in {"first", "all"}:
             first(client, args.evidence)
         if args.phase in {"followup", "all"}:
             followup(client, args.evidence)
         if args.phase in {"negative", "all"}:
             negative(client)
+        if args.phase in {"skill", "capabilities"}:
+            skill(client)
+        if args.phase in {"mcp", "capabilities"}:
+            mcp(client)
 
 
 if __name__ == "__main__":
