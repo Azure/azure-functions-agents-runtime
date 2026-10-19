@@ -944,11 +944,11 @@ async def test_mcp_session_failure_does_not_drop_capabilities_reset_or_retry(
     method.side_effect = RuntimeError("private MCP connection detail")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="No fallback") as caught:
+        with pytest.raises(RuntimeError, match="private MCP connection detail") as caught:
             await _copilot.run(preview, replace(
                 _request(new_session=new_session), mcp_servers=(server,)
             ))
-        assert "private MCP connection detail" not in str(caught.value)
+        assert caught.value is method.side_effect
         method.assert_awaited_once()
         other = client.resume_session if new_session else client.create_session
         other.assert_not_awaited()
@@ -1568,7 +1568,7 @@ async def test_concurrent_entra_failure_diagnostic_is_request_scoped(preview, mo
     assert good_result.content == "synthetic reply"
 
 
-def _registered_azure_chat(monkeypatch, tmp_path, *, blob_setting=None):
+def _registered_azure_chat(monkeypatch, tmp_path, *, blob_setting=None, surface="chat"):
     root = tmp_path / "app"
     shutil.copytree(SAMPLE, root)
     monkeypatch.setattr(_harness, "_HARNESSES", {})
@@ -1589,7 +1589,7 @@ def _registered_azure_chat(monkeypatch, tmp_path, *, blob_setting=None):
     return next(
         function.get_user_function()
         for function in app.get_functions()
-        if function.get_function_name() == "agent_main_builtin_chat"
+        if function.get_function_name() == f"agent_main_builtin_{surface}"
     )
 
 
@@ -1715,7 +1715,7 @@ async def test_credential_callback_failure_is_sanitized_at_public_route(
 
 
 @pytest.mark.asyncio
-async def test_provider_auth_failure_is_sanitized_at_public_route(
+async def test_provider_auth_failure_preserves_sdk_details_at_public_route(
     monkeypatch, tmp_path, caplog
 ):
     import copilot
@@ -1742,10 +1742,9 @@ async def test_provider_auth_failure_is_sanitized_at_public_route(
 
     body = response.body.decode()
     assert response.status_code == 500
-    assert "provider authentication" in body
-    assert sentinel not in body
+    assert json.loads(body)["error"] == sentinel
     assert "sentinel-private-api-key" not in body
-    assert sentinel not in caplog.text
+    assert sentinel in caplog.text
     assert "sentinel-private-api-key" not in caplog.text
     maf.assert_not_awaited()
 
@@ -1771,8 +1770,137 @@ async def test_provider_config_is_resupplied_on_resume(preview, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [True, False])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_session_open_preserves_native_exception_and_cause(
+    preview, monkeypatch, caplog, new_session, cleanup_fails
+):
+    import copilot
+
+    client = _fake_client()
+    original = RuntimeError("native session open failed")
+    cause = OSError("native transport failed")
+
+    async def fail_open(*_args, **_kwargs):
+        raise original from cause
+
+    method = client.create_session if new_session else client.resume_session
+    method.side_effect = fail_open
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    close = AsyncMock(side_effect=RuntimeError("secondary close failed") if cleanup_fails else None)
+    monkeypatch.setattr(_copilot, "_close_storage", close)
+    request = _request(new_session=new_session)
+    try:
+        with pytest.raises(RuntimeError, match="native session open failed") as caught:
+            await _copilot.run(preview, request)
+        assert caught.value is original
+        assert caught.value.__cause__ is cause
+        frames = []
+        traceback = caught.value.__traceback__
+        while traceback is not None:
+            frames.append(traceback.tb_frame.f_code.co_name)
+            traceback = traceback.tb_next
+        assert "fail_open" in frames
+        assert not request.session_state.resumable
+        method.assert_awaited_once()
+        other = client.resume_session if new_session else client.create_session
+        other.assert_not_awaited()
+        close.assert_awaited_once()
+        [record] = [
+            record for record in caplog.records
+            if record.getMessage().startswith("Copilot execution failed:")
+        ]
+        assert record.exc_info[1] is original
+        assert f"operation={'create_session' if new_session else 'resume_session'}" in record.message
+        if cleanup_fails:
+            [cleanup_record] = [
+                record for record in caplog.records
+                if record.getMessage() == "Copilot session storage could not be closed."
+            ]
+            assert str(cleanup_record.exc_info[1]) == "secondary close failed"
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [True, False])
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+@pytest.mark.parametrize("surface", ["chat", "chatstream"])
+async def test_native_session_open_failure_reaches_endpoint_and_shared_telemetry(
+    monkeypatch, tmp_path, caplog, new_session, capture_sensitive_data, surface
+):
+    import copilot
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    monkeypatch.setattr(
+        observability, "get_tracer", lambda: provider.get_tracer("native-session-failure")
+    )
+    client = _fake_client()
+
+    async def fail_open(*_args, **_kwargs):
+        raise RuntimeError("native session open failed") from OSError("native transport failed")
+
+    method = client.create_session if new_session else client.resume_session
+    method.side_effect = fail_open
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    chat = _registered_azure_chat(monkeypatch, tmp_path, surface=surface)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "fixture-key-not-to-log")
+    payload = {"prompt": "fixture prompt not to log"}
+    headers = {} if new_session else {"x-ms-session-id": "continued"}
+    try:
+        response = await chat(SimpleNamespace(headers=headers, json=AsyncMock(return_value=payload)))
+        if surface == "chat":
+            assert response.status_code == 500
+            assert json.loads(response.body)["error"] == "native session open failed"
+        else:
+            chunks = [chunk async for chunk in response.body_iterator]
+            assert response.status_code == 200
+            expected = [] if new_session else [
+                'data: {"type": "session", "session_id": "continued"}\n\n'
+            ]
+            assert chunks == [
+                *expected,
+                'data: {"type": "error", "content": "native session open failed"}\n\n'
+            ]
+        [span] = [span for span in exporter.get_finished_spans() if span.name == "agent.run main"]
+        assert span.attributes["error.type"] == "RuntimeError"
+        assert span.status.description == "RuntimeError('native session open failed')"
+        [event] = [event for event in span.events if event.name == "exception"]
+        assert event.attributes["exception.message"] == "native session open failed"
+        assert "fail_open" in event.attributes["exception.stacktrace"]
+        assert "OSError: native transport failed" in event.attributes["exception.stacktrace"]
+        assert "fixture-key-not-to-log" not in caplog.text
+        assert "fixture prompt not to log" not in caplog.text
+        assert "fixture-key-not-to-log" not in str(event.attributes)
+        assert "fixture prompt not to log" not in str(event.attributes)
+        method.assert_awaited_once()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_timeout_keeps_cleanup_diagnostic_and_cause():
+    original = TimeoutError("cleanup bound expired")
+    close = AsyncMock(side_effect=original)
+    with pytest.raises(CopilotPreviewError, match="cleanup failed") as caught:
+        async with _copilot._bounded_cleanup(close, "cleanup failed"):
+            pass
+    assert caught.value.__cause__ is original
+    close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["session not found", "malformed session state"])
-async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, monkeypatch, failure):
+async def test_sdk_resume_failure_is_preserved_and_never_creates_a_session(preview, monkeypatch, failure):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
@@ -1780,10 +1908,9 @@ async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, m
     client.resume_session.side_effect = RuntimeError(f"{failure}: private-sdk-details")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError) as error:
+        with pytest.raises(RuntimeError, match=failure) as error:
             await _copilot.run(preview, _request(new_session=False))
-        assert "private-sdk-details" not in str(error.value)
-        assert "session" in str(error.value).lower() or "conversation" in str(error.value).lower()
+        assert error.value is client.resume_session.side_effect
         client.resume_session.assert_awaited_once()
         client.create_session.assert_not_awaited()
     finally:
@@ -1813,7 +1940,7 @@ async def test_resume_retry_preserves_opaque_sdk_files(preview, monkeypatch):
     client.resume_session.side_effect = [RuntimeError("temporary native error"), session]
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError):
+        with pytest.raises(RuntimeError, match="temporary native error"):
             await _copilot.run(preview, _request(new_session=False))
         assert await _sdk_file(preview) == "\x00opaque\r\n"
 
@@ -1843,7 +1970,7 @@ async def test_create_rpc_failure_preserves_sdk_writes_without_host_rollback(pre
     client.create_session.side_effect = fail_after_sdk_write
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError):
+        with pytest.raises(RuntimeError, match="private create failure"):
             await _copilot.run(preview, _request())
         assert await _sdk_file(preview) == "SDK owns this write"
 
@@ -1874,7 +2001,7 @@ async def test_startup_failure_closes_the_open_filesystem(preview, monkeypatch):
     monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError):
+        with pytest.raises(RuntimeError, match="private startup failure"):
             await _copilot.run(preview, _request())
         assert len(providers) == 1
         assert providers[0]._closed
@@ -1899,8 +2026,9 @@ async def test_public_run_reports_startup_failure_without_cleanup_masking(
         client.force_stop.side_effect = RuntimeError("private force-stop failure")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="runtime startup failed"):
+        with pytest.raises(RuntimeError, match="private startup failure") as caught:
             await _copilot.run(preview, _request())
+        assert caught.value is client.start.side_effect
         client.stop.assert_awaited_once()
         if cleanup_fails:
             client.force_stop.assert_awaited_once()
@@ -1967,7 +2095,7 @@ async def test_detach_failure_does_not_mask_the_original_failure(preview, monkey
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
     session = client.create_session.return_value
-    original_failure = CopilotPreviewError("original failure")
+    original_failure = RuntimeError("original failure")
     providers = []
     original_open = _copilot.open_session_fs
 
@@ -1985,7 +2113,8 @@ async def test_detach_failure_does_not_mask_the_original_failure(preview, monkey
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         diagnostic = "original failure" if boundary == "send" else "model-visible tool catalog"
-        with pytest.raises(CopilotPreviewError, match=diagnostic) as caught:
+        failure_type = RuntimeError if boundary == "send" else CopilotPreviewError
+        with pytest.raises(failure_type, match=diagnostic) as caught:
             await _copilot.run(preview, _request())
         if boundary == "send":
             assert caught.value is original_failure
@@ -2020,8 +2149,9 @@ async def test_detach_failure_alone_still_fails_the_turn(preview, monkeypatch):
     monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="could not be disconnected"):
+        with pytest.raises(RuntimeError, match="disconnect failed") as caught:
             await _copilot.run(preview, _request())
+        assert caught.value is client.create_session.return_value.disconnect.side_effect
         assert providers[0]._closed
     finally:
         await _lifecycle._shutdown_harnesses()
@@ -2251,8 +2381,9 @@ async def test_failed_adapter_close_is_reported_without_owner_retention(preview,
     monkeypatch.setattr(_copilot, "open_session_fs", open_with_close_fault)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     owner = _runtime.get_runtime(preview)
-    with pytest.raises(CopilotPreviewError, match="storage"):
+    with pytest.raises(OSError, match="Native session filesystem operation failed") as caught:
         await _copilot.run(preview, _request())
+    assert caught.value.errno == errno.EIO
     assert owner._client is client
     client.create_session.return_value.disconnect.assert_awaited_once()
     providers[0].backend.close.assert_awaited()
@@ -2408,12 +2539,13 @@ async def test_send_scope_observes_usage_once_and_unsubscribes(preview, monkeypa
         else:
             diagnostic = {
                 "sdk_timeout": "deadline",
-                "send_failure": "No fallback",
+                "send_failure": "private send failure",
                 "empty": "no final model reply",
                 "no_reply": "no final model reply",
                 "late_token": "Entra token",
             }[outcome]
-            with pytest.raises(CopilotPreviewError, match=diagnostic):
+            failure_type = RuntimeError if outcome == "send_failure" else CopilotPreviewError
+            with pytest.raises(failure_type, match=diagnostic):
                 await _copilot.run(selected, _request())
         assert "on_event" not in client.create_session.call_args.kwargs
         session.on.assert_called_once()
@@ -2447,7 +2579,13 @@ async def test_failures_before_send_do_not_publish_usage_or_abort(preview, monke
     else:
         session.on.side_effect = RuntimeError("private observer failure")
     try:
-        with pytest.raises((CopilotPreviewError, CopilotSessionError)):
+        failure_type = {
+            "filesystem": CopilotSessionError,
+            "create": RuntimeError,
+            "catalog": CopilotPreviewError,
+            "subscribe": RuntimeError,
+        }[boundary]
+        with pytest.raises(failure_type):
             await _copilot.run(preview, _request())
         session.send_and_wait.assert_not_awaited()
         session.abort.assert_not_awaited()
@@ -2502,19 +2640,19 @@ async def test_observer_cleanup_failure_does_not_replace_send_failure(preview, m
     session = client.create_session.return_value
     unsubscribe = Mock(side_effect=RuntimeError("private unsubscribe failure"))
     session.on = Mock(return_value=unsubscribe)
-    original = CopilotPreviewError("Original request failure.")
+    original = RuntimeError("Original request failure.")
     if send_fails:
         session.send_and_wait.side_effect = original
     recorder = Mock()
     monkeypatch.setattr(_execution, "_AgentUsageRecorder", Mock(return_value=recorder))
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError) as caught:
+        with pytest.raises(RuntimeError) as caught:
             await _copilot.run(preview, _request())
         if send_fails:
             assert caught.value is original
         else:
-            assert "private unsubscribe" not in str(caught.value)
+            assert caught.value is unsubscribe.side_effect
         unsubscribe.assert_called_once()
         recorder.emit_counts.assert_called_once_with(input_tokens=None, output_tokens=None)
         session.disconnect.assert_awaited_once()

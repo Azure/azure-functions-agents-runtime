@@ -457,6 +457,13 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | --- | --- | --- | --- | --- | --- |
 | 30 | Hosted worker/storage contract amendment | keep local-only/single-worker FRD guard / mirror the existing MAF storage and process-local concurrency contract | Remove the local-only and single-worker FRD restriction. Keep MAF as the default harness, preserve the existing storage-selection and no-fallback-on-configured-error contract, keep the existing registered surfaces enabled, and describe same-session overlap across workers/instances as the same process-local coordination limit already present on the MAF path rather than as a Copilot-only carve-out. | Human (larohra) | 2026-10-14 |
 | 31 | Copilot native reasoning/output settings | ignore invalid reasoning overrides / pass through verified SDK-native settings | Freeze valid `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`) and `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` (`none`, `concise`, `detailed`) once in the Copilot app binding and pass them through to native create/resume calls. If either environment value is invalid, emit a warning and omit the override so the SDK/provider default applies. Map `agent_configuration.max_output_tokens` into the request-local Copilot `ProviderConfig.max_output_tokens` override without mutating the shared app-level provider configuration. MAF remains unchanged. | Human (larohra) | 2026-10-16 |
+
+### Approved original-exception handling
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 32 | Native failure detail preservation | generic public Copilot errors with suppressed native details / original-exception parity with MAF | Preserve unexpected native startup, create/resume, turn, and cleanup exceptions with their Python type, traceback, and causality through existing runtime error handling. Accept that standard HTTP/SSE/MCP errors use original exception text and logs/telemetry can contain sensitive text embedded in exceptions regardless of `ENABLE_SENSITIVE_DATA`. Keep explicit configuration diagnostics, timeout/cancellation behavior, cleanup precedence, and disabled native SDK logging unchanged; do not add request, credential, or payload dumps. | Human (larohra) | 2026-10-19 |
+
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |

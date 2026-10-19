@@ -377,6 +377,16 @@ cleanup errors. Shared code normalizes only the public `AgentResult` and
 tool-call accounting contracts; MAF usage decoding remains local to MAF, and
 Copilot result/event conversion remains local to Copilot.
 
+Unexpected native startup, create/resume, and turn failures propagate as the
+original Python exception, retaining traceback and causality like MAF. The
+Copilot execution boundary logs the exception with the operation name; shared
+ingress/leaf boundaries record it through the existing exception telemetry.
+HTTP/SSE/MCP errors therefore use the original error text, not a generic
+Copilot replacement. Secondary cleanup failures are logged separately without
+replacing the active execution error or cancellation. Explicit configuration
+diagnostics and request/startup timeout behavior remain unchanged; native SDK
+logging and telemetry remain disabled.
+
 The preview keeps the shared authoring, registration, and policy surfaces while
 leaving SDK-specific execution, persistence, and native-session behavior inside
 the selected Copilot harness. Unsupported capabilities still fail explicitly

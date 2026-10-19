@@ -148,8 +148,9 @@ async def test_leaf_delete_failure_preserves_body_outcome(preview, native, failu
             with pytest.raises(TimeoutError, match="specialist timed out"):
                 await task
         elif delete_fails:
-            with pytest.raises(CopilotPreviewError, match="ephemeral specialist"):
+            with pytest.raises(RuntimeError, match="private deletion detail") as caught:
                 await task
+            assert caught.value is native.delete_session.side_effect
         else:
             assert await task == "synthetic reply"
         native.delete_session.assert_awaited_once()
