@@ -31,6 +31,9 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   define a `TypedDict` or dataclass for trusted internal payloads and use
   Pydantic for untrusted documents. Avoid ad hoc string-keyed dictionaries and
   parallel schemas for values that already have a declared type.
+- Reuse an existing SDK or shared runtime type directly when no translation or
+  semantic distinction is needed; do not add a custom alias that only renames
+  the same shape.
 - Prefer SDK-exported enums and constants for SDK-owned names and values when
   available. Do not invent SDK exports or depend on private symbols merely to
   avoid a literal.

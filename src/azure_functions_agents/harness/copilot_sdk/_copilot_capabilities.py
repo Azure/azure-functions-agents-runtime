@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
+from ..._function_tool import normalize_tool
 from ..._logger import logger
 from ..._mcp_auth import materialize_mcp_headers
-from ._copilot_preview import CopilotPreviewError
+from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput
+from ...config.schema import ResolvedAgent
+from ...registration.capabilities import validate_runtime_tool_name_collisions
+from ...system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
+from .._harness_binding import AppHarness, UnsupportedCapabilityError
+from ._copilot_runtime import CopilotPreviewError
 
 if TYPE_CHECKING:
     from copilot.session import MCPServerConfig, PermissionInvocation, PermissionRequestResult
@@ -16,7 +23,52 @@ if TYPE_CHECKING:
 
     from ..._skill_policy import SkillPolicy
     from ...discovery.mcp import MCPServerDescriptor
+    from ...registration.capabilities import AgentCapabilities
     from .._harness_binding import HarnessRequest
+
+
+def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
+    """Preserve existing schemas and invocation without silently dropping policy."""
+    prepared = tuple(map(normalize_tool, tools))
+    names: set[str] = set()
+    for function in prepared:
+        if function.policy.approval_mode != ApprovalMode.NEVER_REQUIRE:
+            raise UnsupportedCapabilityError(
+                "Copilot preview supports ordinary runtime @tool declarations only when "
+                f'approval_mode="{ApprovalMode.NEVER_REQUIRE.value}".'
+            )
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", function.name):
+            raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")
+        if function.name in names:
+            raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
+        names.add(function.name)
+    return prepared
+
+
+def validate_copilot_agent(
+    harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
+) -> None:
+    """Reject unsupported effective configuration before registration or execution."""
+    if not (resolved.model or harness.default_model):
+        raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
+    prepared = prepare_tools(
+        [
+            *list(capabilities.filtered_user_tools or []),
+            *list(capabilities.web_request_tools or []),
+        ]
+    )
+    try:
+        validate_runtime_tool_name_collisions(
+            resolved,
+            authored_tools=prepared,
+            workflow_enabled=resolved.workflows is not None and resolved.workflows.enabled,
+            sandbox_enabled=sandbox_runtime_tool_enabled(
+                resolved.sandbox_config,
+                tools_disabled=resolved.tools_disabled,
+            ),
+        )
+    except ValueError as error:
+        raise UnsupportedCapabilityError(str(error)) from error
 
 
 _SKILL_TOOLS = ("builtin:skill", "builtin:view", "builtin:bash")

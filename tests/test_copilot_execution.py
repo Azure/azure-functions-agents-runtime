@@ -4,6 +4,7 @@ import asyncio
 import errno
 import json
 import shutil
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -34,24 +35,23 @@ from azure_functions_agents.harness import (
 from azure_functions_agents.harness._harness_binding import (
     HarnessRequest,
     ProviderKind,
-    UnsupportedCapabilityError,
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_capabilities as _preview,
+)
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_execution as _copilot,
 )
 from azure_functions_agents.harness.copilot_sdk import (
-    _copilot_preview as _preview,
-)
-from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as _runtime,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     AzureOpenAIProvider,
     FoundryProvider,
     OpenAIProvider,
 )
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
 from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     CopilotSessionError,
@@ -1418,10 +1418,14 @@ async def test_provider_options_use_sdk_declared_types(
     import copilot
     from copilot.session import ProviderConfig
 
+    real_client_type = copilot.CopilotClient
+
     selected = make_copilot_harness(
         preview.app_root,
         storage_root=copilot_state(preview).storage_root,
         provider=provider,
+        reasoning_effort="high",
+        reasoning_summary="detailed",
         session_storage=copilot_state(preview).session_storage,
     )
     credential = SimpleNamespace(
@@ -1432,15 +1436,17 @@ async def test_provider_options_use_sdk_declared_types(
     client = _fake_client()
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        result = await _copilot.run(selected, _request())
-        resumed = await _copilot.run(selected, _request(new_session=False))
+        result = await _copilot.run(selected, replace(_request(), max_output_tokens=256))
+        resumed = await _copilot.run(selected, replace(_request(new_session=False), max_output_tokens=512))
         assert result.content == "synthetic reply"
         assert resumed.content == "synthetic reply"
         assert result.model == "gpt-4.1-mini"
         allowed = get_type_hints(ProviderConfig)
-        for options in (
-            client.create_session.call_args.kwargs,
-            client.resume_session.call_args.kwargs,
+        expected_limits = (256, 512)
+        for options, expected_limit in zip(
+            (client.create_session.call_args.kwargs, client.resume_session.call_args.kwargs),
+            expected_limits,
+            strict=True,
         ):
             provider_options = options["provider"]
             assert provider_options["type"] in get_args(allowed["type"])
@@ -1449,13 +1455,56 @@ async def test_provider_options_use_sdk_declared_types(
             assert provider_options["wire_api"] == wire_api
             assert provider_options["model_id"] == "gpt-4.1-mini"
             assert provider_options["wire_model"] == "gpt-4.1-mini"
+            assert provider_options["max_output_tokens"] == expected_limit
             assert options["model"] == "gpt-4.1-mini"
             assert options["available_tools"] == []
-            assert "max_output_tokens" not in provider_options
+            assert options["reasoning_effort"] == "high"
+            assert options["reasoning_summary"] == "detailed"
             if provider.kind is ProviderKind.AZURE_OPENAI:
                 assert "azure" not in provider_options
+
+        wire_provider = object.__new__(real_client_type)._convert_provider_to_wire_format(
+            client.create_session.call_args.kwargs["provider"]
+        )
+        assert wire_provider["maxOutputTokens"] == 256
+        assert "limits" not in wire_provider
     finally:
         await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_direct_execution_omits_unset_reasoning_and_output_limit(preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(preview, _request())
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    assert result.content == "synthetic reply"
+    assert "max_output_tokens" not in client.create_session.call_args.kwargs["provider"]
+    assert client.create_session.call_args.kwargs["reasoning_effort"] is None
+    assert client.create_session.call_args.kwargs["reasoning_summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_output_limit_is_isolated_per_turn(preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        await _copilot.run(preview, replace(_request(), max_output_tokens=128))
+        await _copilot.run(preview, replace(_request(new_session=False), max_output_tokens=384))
+        await _copilot.run(preview, _request())
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    assert client.create_session.call_args_list[0].kwargs["provider"]["max_output_tokens"] == 128
+    assert client.resume_session.call_args_list[0].kwargs["provider"]["max_output_tokens"] == 384
+    assert "max_output_tokens" not in client.create_session.call_args_list[1].kwargs["provider"]
 
 
 @pytest.mark.asyncio
@@ -1892,6 +1941,40 @@ async def test_public_run_distinguishes_startup_timeout_from_request_deadline(
 
 
 @pytest.mark.asyncio
+async def test_public_run_cancellation_during_constructor_reuses_late_client(preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+    factory = Mock()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    factory.side_effect = blocking_factory
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    owner = _runtime.get_runtime(preview)
+    first = asyncio.create_task(_copilot.run(preview, _request()))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        result = await _copilot.run(preview, replace(_request(), session_id="peer"))
+        assert result.content == "synthetic reply"
+        factory.assert_called_once()
+        client.start.assert_awaited_once()
+        assert owner._client is client
+    finally:
+        release.set()
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
 async def test_filesystem_failure_stops_before_native_start_without_fallback(preview, monkeypatch):
     import copilot
 
@@ -2003,7 +2086,9 @@ async def test_maf_history_does_not_block_or_get_loaded_by_copilot(preview, monk
         await _lifecycle._shutdown_harnesses()
 
 
-def test_portable_output_limit_is_rejected_during_registration(tmp_path, monkeypatch):
+def test_portable_output_limit_preserves_registration_without_starting_native_runtime(
+    tmp_path, monkeypatch, caplog
+):
     import copilot
 
     root = tmp_path / "app"
@@ -2027,8 +2112,10 @@ def test_portable_output_limit_is_rejected_during_registration(tmp_path, monkeyp
     factory = Mock(side_effect=AssertionError("Native runtime must not start"))
     monkeypatch.setattr(copilot, "CopilotClient", factory)
 
-    with pytest.raises(UnsupportedCapabilityError, match="max_output_tokens"):
-        create_function_app(root)
+    with caplog.at_level("WARNING"):
+        app = create_function_app(root)
+    assert app.get_functions()
+    assert caplog.text == ""
     factory.assert_not_called()
 
 

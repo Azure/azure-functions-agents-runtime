@@ -28,7 +28,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness import _harness_execution, _harness_lifecycle
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runner
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from azure_functions_agents.registration.capabilities import (
     AgentCapabilities,
     with_runtime_skill_paths,

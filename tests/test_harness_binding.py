@@ -5,7 +5,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, fields, replace
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -29,12 +29,20 @@ def binding_root(monkeypatch):
 
 @pytest.fixture
 def preview_module(monkeypatch):
-    module = ModuleType("azure_functions_agents.harness.copilot_sdk._copilot_preview")
-    module.select_copilot_harness = Mock(
+    runtime_module = ModuleType("azure_functions_agents.harness.copilot_sdk._copilot_runtime")
+    capabilities_module = ModuleType("azure_functions_agents.harness.copilot_sdk._copilot_capabilities")
+    select_copilot_harness = Mock(
         side_effect=lambda root: make_copilot_harness(root)
     )
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-    return module
+    validate_copilot_agent = Mock()
+    runtime_module.select_copilot_harness = select_copilot_harness
+    capabilities_module.validate_copilot_agent = validate_copilot_agent
+    monkeypatch.setitem(sys.modules, runtime_module.__name__, runtime_module)
+    monkeypatch.setitem(sys.modules, capabilities_module.__name__, capabilities_module)
+    return SimpleNamespace(
+        select_copilot_harness=select_copilot_harness,
+        validate_copilot_agent=validate_copilot_agent,
+    )
 
 
 @pytest.mark.parametrize("value", [None, "false", "FALSE", "fAlSe", "0", " false "])

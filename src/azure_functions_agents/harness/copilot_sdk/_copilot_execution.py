@@ -20,7 +20,7 @@ from ..._observability import (
 from ..._skill_policy import SkillPolicy
 from ..._tool_descriptor import ToolDescriptor
 from .. import _harness_execution
-from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
+from .._harness_binding import AppHarness, HarnessRequest
 from .._provider_config import InferenceTarget
 from .._stream_events import ContentEvent, SessionEvent, StreamEvent
 from ._copilot_capabilities import (
@@ -29,8 +29,12 @@ from ._copilot_capabilities import (
     permission_handler,
 )
 from ._copilot_observability import CopilotEventTelemetry
-from ._copilot_preview import CopilotPreviewError
-from ._copilot_runtime import CopilotRuntime, get_runtime
+from ._copilot_runtime import (
+    _CLEANUP_TIMEOUT_SECONDS,
+    CopilotPreviewError,
+    CopilotRuntime,
+    get_runtime,
+)
 from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
 from ._copilot_session_local import LocalSessionFileBackend
@@ -47,6 +51,8 @@ if TYPE_CHECKING:
         PermissionRequestResult,
         ProviderConfig,
         ProviderTokenArgs,
+        ReasoningEffort,
+        ReasoningSummary,
         SystemMessageConfig,
         ToolSearchConfig,
     )
@@ -225,10 +231,20 @@ def _tool(
     )
 
 
-def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
+def _provider(
+    harness: AppHarness,
+    tokens: ProviderTokenSource,
+    model: str,
+    *,
+    max_output_tokens: int | None = None,
+) -> ProviderConfig:
     provider = get_runtime(harness)._runner.provider
     try:
-        return provider.sdk_config(model, tokens)
+        config = provider.sdk_config(
+            model,
+            tokens,
+            max_output_tokens=max_output_tokens,
+        )
     except CopilotPreviewError:
         raise
     except Exception:
@@ -239,17 +255,18 @@ def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> P
             provider.auth_label,
         )
         raise CopilotPreviewError(provider.setup_diagnostic()) from None
+    return config
 
 
 async def _abort(session: CopilotSession) -> None:
     try:
-        await asyncio.wait_for(session.abort(), timeout=5)
+        await asyncio.wait_for(session.abort(), timeout=_CLEANUP_TIMEOUT_SECONDS)
     except BaseException:
         logger.error("Copilot session abort failed.")
 
 
 async def _close_storage(storage: CopilotSessionFs) -> None:
-    await asyncio.wait_for(storage.close(), timeout=5)
+    await asyncio.wait_for(storage.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
 
 
 async def _delete_leaf(
@@ -272,13 +289,13 @@ async def _bounded_cleanup(
         yield
     except BaseException:
         try:
-            await asyncio.wait_for(operation(), timeout=5)
+            await asyncio.wait_for(operation(), timeout=_CLEANUP_TIMEOUT_SECONDS)
         except BaseException:
             logger.error("%s", diagnostic)
         raise
     else:
         try:
-            await asyncio.wait_for(operation(), timeout=5)
+            await asyncio.wait_for(operation(), timeout=_CLEANUP_TIMEOUT_SECONDS)
         except Exception:
             logger.error("%s", diagnostic)
             raise CopilotPreviewError(diagnostic) from None
@@ -307,18 +324,26 @@ async def _open_session(
     *,
     new_session: bool,
     options: _SessionOptions,
+    reasoning_effort: ReasoningEffort | None,
+    reasoning_summary: ReasoningSummary | None,
     on_permission_request: Callable[
         [PermissionRequest, PermissionInvocation], PermissionRequestResult
     ],
 ) -> CopilotSession:
     if new_session:
         return await client.create_session(
-            session_id=session_id, on_permission_request=on_permission_request, **options
+            session_id=session_id,
+            on_permission_request=on_permission_request,
+            reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
+            **options,
         )
     return await client.resume_session(
         session_id,
         on_permission_request=on_permission_request,
         continue_pending_work=False,
+        reasoning_effort=reasoning_effort,
+        reasoning_summary=reasoning_summary,
         **options,
     )
 
@@ -441,11 +466,6 @@ async def _run_session_turn(
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
-    if request.max_output_tokens is not None:
-        raise UnsupportedCapabilityError(
-            "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
-            "Remove the cap or use the MAF harness."
-        )
     from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
     from copilot.session_events import (
         AssistantMessageData,
@@ -528,7 +548,12 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     sdk_tools = [_tool(function, calls, request.event_sink) for function in request.tools]
     token_source = _RequestTokenSource(owner)
     try:
-        provider = _provider(harness, token_source, request.model)
+        provider = _provider(
+            harness,
+            token_source,
+            request.model,
+            max_output_tokens=request.max_output_tokens,
+        )
         async with lifecycle.session_lock(request), asyncio.timeout_at(request.deadline):
             route = lifecycle.session_storage
             if route is None:
@@ -585,6 +610,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     new_session=request.new_session,
                     options=options,
                     on_permission_request=on_permission_request,
+                    reasoning_effort=owner._runner.reasoning_effort,
+                    reasoning_summary=owner._runner.reasoning_summary,
                 )
                 request.session_state.resumable = True
                 async with _bounded_cleanup(
