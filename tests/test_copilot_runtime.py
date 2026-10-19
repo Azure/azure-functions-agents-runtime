@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -1017,6 +1018,109 @@ async def test_concurrent_startup_shares_one_client(runtime_preview, monkeypatch
         release.set()
         await owner.close()
     assert copilot_state(runtime_preview).runtime is None
+
+
+@pytest.mark.asyncio
+async def test_blocking_constructor_runs_off_the_event_loop(runtime_preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+    ticked = asyncio.Event()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    async def tick():
+        await asyncio.sleep(0)
+        ticked.set()
+
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(side_effect=blocking_factory))
+    owner = runtime.get_runtime(runtime_preview)
+    request = asyncio.create_task(owner.client())
+    ticker = asyncio.create_task(tick())
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        await asyncio.wait_for(ticked.wait(), timeout=1)
+        release.set()
+        assert await request is client
+        client.start.assert_awaited_once()
+    finally:
+        release.set()
+        await ticker
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_constructor_cancellation_reuses_one_late_client(runtime_preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+    factory = Mock()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    factory.side_effect = blocking_factory
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    owner = runtime.get_runtime(runtime_preview)
+    first = asyncio.create_task(owner.client())
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert owner._client is None
+        assert owner._client_task is not None
+        release.set()
+        assert await owner.client() is client
+        factory.assert_called_once()
+        client.start.assert_awaited_once()
+    finally:
+        release.set()
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_late_constructor_cleanup_without_duplicate_owner(
+    runtime_preview, monkeypatch
+):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(side_effect=blocking_factory))
+    owner = runtime.get_runtime(runtime_preview)
+    startup = asyncio.create_task(owner.client())
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        close_task = asyncio.create_task(owner.close())
+        await asyncio.sleep(0)
+        assert runtime.get_runtime(runtime_preview) is owner
+        release.set()
+        await close_task
+        with pytest.raises(asyncio.CancelledError):
+            await startup
+        client.start.assert_not_awaited()
+        client.stop.assert_awaited_once()
+        assert copilot_state(runtime_preview).runtime is None
+        assert owner._close_callback not in lifecycle._SHUTDOWN_CALLBACKS
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio

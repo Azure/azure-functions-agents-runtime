@@ -169,12 +169,22 @@ class CopilotRuntime:
         self.native_root = runner.storage_root / "native"
         self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
+        self._client_task: asyncio.Task[CopilotClient] | None = None
         self._start_lock = asyncio.Lock()
         self._credential: AsyncTokenCredential | None = None
         self._close_callback = self.close
+        self._close_requested = False
 
     def _register_resources(self) -> None:
         _harness_lifecycle._register_shutdown(self._close_callback)
+
+    def _should_release_runtime(self) -> bool:
+        return (
+            self._close_requested
+            and self._client_task is None
+            and self._client is None
+            and self._credential is None
+        )
 
     async def _stop_client(self, client: CopilotClient, timeout: float = 10) -> None:
         try:
@@ -188,42 +198,67 @@ class CopilotRuntime:
             except Exception:
                 raise CopilotPreviewError("Copilot forced SDK shutdown failed.") from None
 
+    def _build_client(self) -> CopilotClient:
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        from copilot import CopilotClient, RuntimeConnection
+
+        from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
+
+        return CopilotClient(
+            connection=RuntimeConnection.for_stdio(),
+            # Let this runtime own provider, tool, and session-fs wiring.
+            mode=_EMPTY_CLIENT_MODE,
+            base_directory=str(self.native_root),
+            working_directory=str(self.native_root),
+            use_logged_in_user=False,
+            log_level="none",
+            telemetry=None,
+            session_fs={
+                "initial_working_directory": str(self.workspace),
+                "session_state_path": SESSION_STATE_ROOT,
+                "conventions": HOST_PATH_CONVENTIONS,
+            },
+        )
+
+    async def _construct_and_start_client(self) -> CopilotClient:
+        client = await asyncio.to_thread(self._build_client)
+        try:
+            async with self._start_lock:
+                if self._close_requested:
+                    raise asyncio.CancelledError
+            await asyncio.wait_for(client.start(), timeout=_START_TIMEOUT_SECONDS)
+            async with self._start_lock:
+                if self._close_requested:
+                    raise asyncio.CancelledError
+                self._client = client
+            logger.info("Agent harness ready: harness=copilot transport=stdio")
+            return client
+        except BaseException:
+            try:
+                await self._stop_client(client, timeout=_CLEANUP_TIMEOUT_SECONDS)
+            except BaseException:
+                logger.error("Copilot native startup cleanup failed.")
+            raise
+        finally:
+            release_runtime = False
+            async with self._start_lock:
+                if self._client_task is asyncio.current_task():
+                    self._client_task = None
+                release_runtime = self._should_release_runtime()
+            if release_runtime:
+                self._release_runtime()
+
     async def client(self) -> CopilotClient:
         async with self._start_lock:
             if self._client is not None:
                 return self._client
-            self.workspace.mkdir(parents=True, exist_ok=True)
-            from copilot import CopilotClient, RuntimeConnection
-
-            from ._copilot_session_paths import HOST_PATH_CONVENTIONS, SESSION_STATE_ROOT
-
-            client = CopilotClient(
-                connection=RuntimeConnection.for_stdio(),
-                # Let this runtime own provider, tool, and session-fs wiring.
-                mode=_EMPTY_CLIENT_MODE,
-                base_directory=str(self.native_root),
-                working_directory=str(self.native_root),
-                use_logged_in_user=False,
-                log_level="none",
-                telemetry=None,
-                session_fs={
-                    "initial_working_directory": str(self.workspace),
-                    "session_state_path": SESSION_STATE_ROOT,
-                    "conventions": HOST_PATH_CONVENTIONS,
-                },
-            )
-            self._register_resources()
-            try:
-                await asyncio.wait_for(client.start(), timeout=_START_TIMEOUT_SECONDS)
-            except BaseException:
-                try:
-                    await self._stop_client(client, timeout=_CLEANUP_TIMEOUT_SECONDS)
-                except BaseException:
-                    logger.error("Copilot native startup cleanup failed.")
-                raise
-            self._client = client
-            logger.info("Agent harness ready: harness=copilot transport=stdio")
-            return client
+            task = self._client_task
+            if task is None:
+                self._close_requested = False
+                self._register_resources()
+                task = asyncio.create_task(self._construct_and_start_client())
+                self._client_task = task
+        return await asyncio.shield(task)
 
     async def _close_credential(self, credential: AsyncTokenCredential) -> None:
         await asyncio.wait_for(credential.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
@@ -237,12 +272,29 @@ class CopilotRuntime:
     async def close(self) -> None:
         """Close acquired handles once, then discard them regardless of cleanup outcome."""
         failure = False
+        release_runtime = False
         try:
             async with self._start_lock:
+                self._close_requested = True
+                client_task = self._client_task
                 client = self._client
                 credential = self._credential
                 self._client = None
                 self._credential = None
+                release_runtime = client_task is None
+            if client is None and client_task is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(client_task),
+                        timeout=_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                except asyncio.CancelledError:
+                    pass
+                except TimeoutError:
+                    failure = True
+                    logger.error("Copilot runtime client startup cleanup timed out.")
+                except Exception:
+                    pass
             if client is not None:
                 try:
                     await self._stop_client(client)
@@ -256,7 +308,8 @@ class CopilotRuntime:
                     failure = True
                     logger.error("Copilot runtime credential cleanup failed.")
         finally:
-            self._release_runtime()
+            if release_runtime:
+                self._release_runtime()
         if failure:
             raise CopilotPreviewError("Copilot preview shutdown did not complete cleanly.") from None
 

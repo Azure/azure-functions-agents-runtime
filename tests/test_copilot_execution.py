@@ -4,6 +4,7 @@ import asyncio
 import errno
 import json
 import shutil
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -1936,6 +1937,40 @@ async def test_public_run_distinguishes_startup_timeout_from_request_deadline(
         if cleanup_fails:
             client.force_stop.assert_awaited_once()
     finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_public_run_cancellation_during_constructor_reuses_late_client(preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    entered = threading.Event()
+    release = threading.Event()
+    factory = Mock()
+
+    def blocking_factory(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        return client
+
+    factory.side_effect = blocking_factory
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    owner = _runtime.get_runtime(preview)
+    first = asyncio.create_task(_copilot.run(preview, _request()))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        result = await _copilot.run(preview, replace(_request(), session_id="peer"))
+        assert result.content == "synthetic reply"
+        factory.assert_called_once()
+        client.start.assert_awaited_once()
+        assert owner._client is client
+    finally:
+        release.set()
         await _lifecycle._shutdown_harnesses()
 
 
