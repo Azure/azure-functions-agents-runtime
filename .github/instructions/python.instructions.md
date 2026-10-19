@@ -77,6 +77,10 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   runtime identity or member access. Use frozensets or mappings when membership
   or value lookup is the runtime operation. Consumers reuse these symbols rather
   than redeclaring raw strings.
+- When a public API accepts strings for an enum-valued domain, normalize them
+  once at the authoring boundary. Use enum members in runtime defaults and
+  comparisons, and convert to the receiving API's string type at adapter
+  boundaries. Apply this consistently across similar domains.
 
 ## Documentation and logging
 

@@ -850,7 +850,8 @@ def _register_history_endpoint(
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
-        if message := get_agent_runner(selected_harness).session_history_unavailable_message:
+        selected_runner = get_agent_runner(selected_harness)
+        if message := selected_runner.session_history_unavailable_message:
             return _json_error(message, status_code=501)
         session_id = _request_header_value(req, _SESSION_ID_HEADER) or ""
         if not session_id:
@@ -869,9 +870,7 @@ def _register_history_endpoint(
             )
 
         try:
-            history = await get_agent_runner(selected_harness).get_session_history(
-                slug, session_id
-            )
+            history = await selected_runner.get_session_history(slug, session_id)
         except SessionHistoryUnavailableError as exc:
             return _json_error(str(exc), status_code=exc.status_code)
         except Exception:

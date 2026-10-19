@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from .._runtime_tool_names import RUNTIME_WORKFLOW_TOOL_NAMES
 from .schema import WorkflowRetryPolicy, workflow_timeout_ms
 
 
@@ -55,15 +56,7 @@ type WorkflowHandlerCatalog = Mapping[str, WorkflowToolEntry]
 # Names of LLM-facing workflow-management tools — these can never be
 # workflow node targets. Kept here (not in tools.py) to avoid pulling
 # the agent-facing workflow tool layer into modules that don't otherwise need it.
-RESERVED_TOOL_NAMES: frozenset[str] = frozenset(
-    {
-        "start_workflow",
-        "get_workflow_status",
-        "list_workflows",
-        "cancel_workflow",
-        "terminate_workflow",
-    }
-)
+RESERVED_TOOL_NAMES: frozenset[str] = RUNTIME_WORKFLOW_TOOL_NAMES
 
 
 _REGISTRY: dict[str, WorkflowToolEntry] = {}

@@ -9,10 +9,12 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
+from ..._function_tool import normalize_tool
+from ..._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
-from ...workflows.tools import build_workflow_tools
+from ...registration.capabilities import validate_runtime_tool_name_collisions
+from ...system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .._provider_config import resolve_inference_target
 
@@ -98,20 +100,21 @@ def validate_configuration(configuration: AgentConfiguration) -> None:
 
 
 def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
-    """Preserve existing schemas and invocation without silently dropping policy."""
-    prepared = describe_tools(tools)
+    """Check normalized tools against Copilot's approval and naming limits."""
+    prepared = tuple(map(normalize_tool, tools))
     names: set[str] = set()
     for function in prepared:
-        if function.policy.approval_mode != "never_require":
+        if function.policy.approval_mode != ApprovalMode.NEVER_REQUIRE:
             raise UnsupportedCapabilityError(
                 "Copilot preview supports ordinary runtime @tool declarations only when "
-                'approval_mode="never_require".'
+                f'approval_mode="{ApprovalMode.NEVER_REQUIRE.value}".'
             )
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", function.name):
+        name = function.name
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", name):
             raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")
-        if function.name in names:
+        if name in names:
             raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
-        names.add(function.name)
+        names.add(name)
     return prepared
 
 
@@ -119,26 +122,29 @@ def validate_copilot_agent(
     harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> None:
     """Reject unsupported effective configuration before registration or execution."""
-    from ...registration.capabilities import SANDBOX_TOOL_NAME
 
     validate_configuration(resolved.agent_configuration)
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-    prepared = prepare_tools(
-        [
-            *list(capabilities.filtered_user_tools or []),
-            *list(capabilities.web_request_tools or []),
-        ]
+    authored_tools = [
+        *list(capabilities.filtered_user_tools or []),
+        *list(capabilities.web_request_tools or []),
+    ]
+    builtin_endpoints = resolved.builtin_endpoints
+    has_direct_surface = resolved.trigger is not None or bool(
+        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
     )
-    if resolved.workflows is not None and resolved.workflows.enabled:
-        management_names = {function.name for function in build_workflow_tools()}
-        if management_names.intersection(function.name for function in prepared):
-            raise UnsupportedCapabilityError(
-                "Copilot preview workflow management tool names must not collide with authored tools."
+    if has_direct_surface:
+        try:
+            validate_runtime_tool_name_collisions(
+                resolved,
+                authored_tools=capabilities.filtered_user_tools or (),
+                workflow_enabled=bool(resolved.workflows is not None and resolved.workflows.enabled),
+                sandbox_enabled=sandbox_runtime_tool_enabled(
+                    resolved.sandbox_config,
+                    tools_disabled=resolved.tools_disabled,
+                ),
             )
-    if (
-        resolved.sandbox_config is not None
-        and not resolved.tools_disabled
-        and any(function.name == SANDBOX_TOOL_NAME for function in prepared)
-    ):
-        raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
+        except ValueError as exc:
+            raise UnsupportedCapabilityError(str(exc)) from exc
+    prepare_tools(authored_tools)

@@ -255,13 +255,29 @@ class _RecordingChatClient(ChatMiddlewareLayer, BaseChatClient):
 
 
 @pytest.mark.asyncio
-async def test_real_maf_loop_executes_runtime_tools(monkeypatch, tmp_path):
+@pytest.mark.parametrize("authored_kind", ["descriptor", "function", "callable"])
+async def test_real_maf_loop_executes_user_owned_tools(authored_kind, monkeypatch, tmp_path):
+    from azure_functions_agents._function_tool import tool
+
     effects = []
 
     def lookup(value: str) -> str:
         effects.append(value)
         return f"found:{value}"
-    authored = tool(name="lookup")(lookup)
+
+    class Lookup:
+        __name__ = name = "lookup"
+        description = "Authored callable"
+
+        def __call__(self, value: str) -> str:
+            return lookup(value)
+
+    authored = (
+        tool(lookup)
+        if authored_kind == "descriptor"
+        else lookup if authored_kind == "function"
+        else Lookup()
+    )
 
     class ToolCallingClient(FunctionInvocationLayer, BaseChatClient):
         def __init__(self):
@@ -274,10 +290,21 @@ async def test_real_maf_loop_executes_runtime_tools(monkeypatch, tmp_path):
 
             async def response():
                 if len(self.calls) == 1:
-                    return ChatResponse(messages=[Message("assistant", [
-                        Content("function_call", call_id="call", name="lookup",
-                                arguments={"value": "ok"}),
-                    ])])
+                    return ChatResponse(
+                        messages=[
+                            Message(
+                                "assistant",
+                                [
+                                    Content(
+                                        "function_call",
+                                        call_id="call",
+                                        name="lookup",
+                                        arguments={"value": "ok"},
+                                    ),
+                                ],
+                            )
+                        ]
+                    )
                 return ChatResponse(messages=[Message("assistant", ["done"])])
 
             return response()
@@ -286,7 +313,10 @@ async def test_real_maf_loop_executes_runtime_tools(monkeypatch, tmp_path):
     monkeypatch.setattr(maf, "build_chat_client", lambda model: (client, InferenceTarget()))
     monkeypatch.setattr(maf, "_build_history_provider", lambda slug: None)
     result = await runner.run_agent(
-        "lookup", tools=[authored], mcp_tools=[], timeout=5,
+        "lookup",
+        tools=[authored],
+        mcp_tools=[],
+        timeout=5,
         _harness=AppHarness(HarnessKind.MAF, tmp_path),
     )
 

@@ -611,7 +611,16 @@ system_tools:
 
 ##### `system_tools.dynamic_sessions_code_interpreter`
 - **Type:** `object` (global), `boolean` (agent)
-- **Description:** Configures the built-in `execute_python` tool using Azure Container Apps dynamic sessions. All agents inherit code interpreter access by default. Agents can opt out by setting to `false`.
+- **Description:** Configures the built-in `fhs_execute_python` tool using Azure Container Apps dynamic sessions. It is on by default. Agents can opt out with `false`.
+
+The `fhs_` prefix avoids collisions with user-authored functions. Runtime
+injection and its built-in guidance update automatically, so most users do not
+need a migration step. Only explicitly hardcoded references to the runtime
+sandbox in authored instructions, skills, or selectors need
+`fhs_execute_python` (or `custom:fhs_execute_python` in Copilot selectors).
+There is no old-name alias: an authored `execute_python` stays independent, and
+an authored `fhs_execute_python` collides only when the sandbox tool is enabled
+for that execution role.
 
 **Global configuration (in `agents.config.yaml`):**
 ```yaml
@@ -738,11 +747,28 @@ workflows:
 ```
 
 `workflows.enabled` is a strict boolean. When true, it injects
-workflow-management tools (`start_workflow`, `get_workflow_status`,
-`list_workflows`, `cancel_workflow`, `terminate_workflow`) and exposes the
+workflow-management tools (`fhs_start_workflow`, `fhs_get_workflow_status`,
+`fhs_list_workflows`, `fhs_cancel_workflow`, `fhs_terminate_workflow`) and exposes the
 agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
 workflow task targets. No new role or starter fields are required; workflow
 identity comes from the agent's canonical slug.
+
+The `fhs_` prefix avoids collisions with user-authored functions. Runtime
+injection and its built-in guidance update automatically, so most users do not
+need a migration step. Only explicitly hardcoded references to the runtime
+control-plane tools in authored instructions, skills, or selectors need
+`fhs_start_workflow`, `fhs_get_workflow_status`, `fhs_list_workflows`,
+`fhs_cancel_workflow`, and `fhs_terminate_workflow`
+(`custom:fhs_start_workflow` in Copilot selectors). There are no old-name
+aliases.
+
+Authored `start_workflow`, `get_workflow_status`, `list_workflows`,
+`cancel_workflow`, and `terminate_workflow` remain usable as authored names.
+Only exact collisions with enabled management tools are rejected, and
+`tools.exclude` / `workflows.exclude` entries still use literal authored names.
+The five prefixed control-plane names cannot be workflow task targets. Python helper APIs,
+HTTP routes, result envelopes, and historical tool records are unchanged.
+
 Workflow tool handlers can be synchronous (`def`) or asynchronous (`async def`).
 They must accept one dictionary argument and return a JSON-serializable value.
 The Activity awaits async handlers and runs synchronous handlers in a worker
@@ -750,13 +776,21 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools may be runtime `@tool` descriptors or local public
-functions in `tools/*.py`. Discovery selects one tool per module: runtime
-descriptors first, then the first local public function. It does not invoke
-authored functions or expose imported functions, classes, and unrelated
-globals. The convenience `@tool` accepts `name`, `description`, `schema`, and
-`approval_mode`; extra keyword arguments are warned and ignored. Runtime
-schemas and capability authorization still apply.
+Normal custom tools use the runtime's `@tool` or Python callables in
+`tools/*.py`. Discovery selects one tool per module:
+runtime `@tool` descriptors first, then named tool objects with public
+`name`/`description`, then the first local public function. Classes, imported
+functions, unrelated globals, and workflow-only declarations are not exposed as
+fallback tools, and discovery never invokes authored functions. Runtime `@tool`
+accepts only `name`, `description`, `schema`, and `approval_mode`; unexpected
+keyword arguments raise the normal Python `TypeError`. Authored functions and
+callable instances become runtime tool descriptors before either harness adapts
+them. Both use the same tool names, descriptions, and input schemas.
+The decorator accepts `"never_require"` and `"always_require"` approval strings
+and normalizes them to the runtime's `azure_functions_agents.ApprovalMode`
+enum; you may also pass `ApprovalMode.NEVER_REQUIRE` or
+`ApprovalMode.ALWAYS_REQUIRE` directly. Other values raise `ValueError` during
+authoring.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. Use `_`-prefixed helpers for

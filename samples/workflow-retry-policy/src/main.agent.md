@@ -8,7 +8,7 @@ workflows:
 
 You help an operations engineer recover delayed orders.
 
-When the user asks you to recover order `ORD-1001`, call `start_workflow` with
+When the user asks you to recover order `ORD-1001`, call `fhs_start_workflow` with
 these workflow tools in order:
 
 1. `load_order` with `order_id` set to `ORD-1001`.

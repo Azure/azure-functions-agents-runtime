@@ -11,13 +11,16 @@ import azure.functions as func
 import pytest
 
 from azure_functions_agents import HostedSkill
+from azure_functions_agents._function_tool import tool
 from azure_functions_agents._hosted_skill_app import (
     HostedSkillDFApp,
     HostedSkillFunctionApp,
 )
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     BuiltinEndpointsConfig,
+    DynamicSessionsCodeInterpreterConfig,
     ResolvedAgent,
     SubagentRef,
     ToolsFilter,
@@ -196,6 +199,30 @@ def test_decorator_rejects_unknown_agent(
 
     with pytest.raises(ValueError, match="Unknown HostedSkill agent 'missing'"):
         app.hosted_skill(arg_name="skill", agent_name="missing")
+
+
+def test_decorator_allows_authored_canonical_sandbox_name_when_endpoint_is_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    resolved = _entry(tmp_path).resolved.model_copy(
+        update={
+            "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+                endpoint="https://$UNSET_DYNAMIC_SESSIONS/api"
+            )
+        }
+    )
+    capabilities = AgentCapabilities(
+        filtered_user_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)]
+    )
+    entry = CatalogEntry(resolved, capabilities)
+    app, _ = _app(monkeypatch, tmp_path, entry=entry)
+
+    @app.hosted_skill(arg_name="skill", agent_name="internal")
+    async def handler(skill: HostedSkill) -> None:
+        pass
+
+    assert handler.__name__ == "handler"
 
 
 @pytest.mark.parametrize(

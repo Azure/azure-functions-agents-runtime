@@ -329,7 +329,10 @@ runner = get_agent_runner(harness)
 assert get_agent_runner(harness) is runner
 binding.validate_agent(
     harness, SimpleNamespace(agent_configuration=AgentConfiguration(), model=None, workflows=None,
-                             sandbox_config=None, tools_disabled=False),
+                             sandbox_config=None, tools_disabled=False, trigger=None,
+                             builtin_endpoints=SimpleNamespace(
+                                 debug_chat_ui=False, chat_api=False, mcp=False,
+                             )),
     AgentCapabilities(),
 )
 assert not lifecycle._SHUTDOWN_CALLBACKS

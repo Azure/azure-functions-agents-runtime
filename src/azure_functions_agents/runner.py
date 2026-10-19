@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from ._agent_run_diagnostics import AgentExecutionSurface
 from ._agent_validation import SESSION_ID_PATTERN, validate_session_id
-from ._function_tool import tool
+from ._function_tool import normalize_tool, tool
 from ._logger import logger
 from ._observability import (
     FaultDomain,
@@ -24,8 +24,9 @@ from ._observability import (
     current_span,
     record_delegate_call,
 )
+from ._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from ._slug import delegate_tool_name
-from ._tool_descriptor import ToolDescriptor, describe_tools
+from ._tool_descriptor import ApprovalMode, ToolDescriptor, ToolInput, tool_name
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
@@ -47,6 +48,7 @@ from .harness._history_identity import validate_agent_slug
 from .registration.capabilities import (
     AgentCapabilities,
     _merge_skill_descriptors,
+    validate_runtime_tool_name_collisions,
 )
 from .registration.catalog import AgentCatalog, CatalogEntry
 from .streaming_events import AgentStreamEvent
@@ -56,7 +58,7 @@ if TYPE_CHECKING:
 
     from .workflows.schema import WorkflowPlanPolicy
 
-type AgentFunctionTool = ToolDescriptor
+type AgentFunctionTool = ToolInput
 type AgentTool = ToolDescriptor | MCPServerDescriptor
 
 
@@ -221,7 +223,7 @@ def _build_delegate_tool(
         name=delegate_tool_name(slug),
         description=ref.when or resolved.description,
         schema=_DelegateTaskParams,
-        approval_mode="never_require",
+        approval_mode=ApprovalMode.NEVER_REQUIRE,
     )
     async def delegate(params: _DelegateTaskParams) -> str:
         task = params.task
@@ -291,13 +293,13 @@ def _request(
     instructions: str | None,
     session_id: str | None,
     session_is_new: bool,
-    tools: Sequence[ToolDescriptor] | None,
+    tools: Sequence[ToolInput] | None,
     mcp_tools: Sequence[MCPServerDescriptor] | None,
     skill_paths: Sequence[Path] | None,
     skills: Sequence[SkillDescriptor] | None,
     skill_catalog: Sequence[SkillDescriptor] | None,
-    sandbox_tools: Sequence[ToolDescriptor] | None,
-    web_request_tools: Sequence[ToolDescriptor] | None,
+    sandbox_tools: Sequence[ToolInput] | None,
+    web_request_tools: Sequence[ToolInput] | None,
     system_addendum: str | None,
     model: str | None,
     agent_name: str | None,
@@ -306,12 +308,10 @@ def _request(
     deadline: float,
     session_state: HarnessSessionState | None = None,
 ) -> HarnessRequest:
-    descriptors = describe_tools(
-        (
-            *(discover_user_tools(harness.app_root).tools if tools is None else tools),
-            *(sandbox_tools or ()),
-            *(web_request_tools or ()),
-        )
+    authored_tools = (
+        *(discover_user_tools(harness.app_root).tools if tools is None else tools),
+        *(sandbox_tools or ()),
+        *(web_request_tools or ()),
     )
     servers = (
         tuple(discover_mcp_servers(harness.app_root).servers.values())
@@ -339,7 +339,7 @@ def _request(
         session_id=validated_id or uuid.uuid4().hex,
         new_session=validated_id is None or session_is_new,
         model=model or harness.default_model or "",
-        tools=descriptors,
+        tools=tuple(normalize_tool(candidate) for candidate in authored_tools),
         mcp_servers=servers,
         skills=approved,
         skill_catalog=_merge_skill_descriptors(discovered, approved),
@@ -347,6 +347,40 @@ def _request(
         deadline=deadline,
         session_state=session_state
         or HarnessSessionState(caller_supplied=session_id is not None),
+    )
+
+
+def _validate_direct_runtime_name_collisions(
+    *,
+    harness: AppHarness,
+    tools: Sequence[ToolInput] | None,
+    workflow_enabled: bool,
+    sandbox_tools: Sequence[ToolInput] | None,
+) -> None:
+    sandbox_enabled = False
+    for candidate in sandbox_tools or ():
+        if isinstance(candidate, ToolDescriptor):
+            sandbox_enabled = sandbox_enabled or (
+                candidate.name == FHS_EXECUTE_PYTHON_TOOL_NAME
+            )
+            continue
+        if callable(candidate):
+            sandbox_enabled = sandbox_enabled or (
+                tool_name(candidate) == FHS_EXECUTE_PYTHON_TOOL_NAME
+            )
+            continue
+        logger.warning(
+            "Ignoring unsupported custom tool; use the runtime @tool decorator "
+            "or a local public function in tools/."
+        )
+    if not workflow_enabled and not sandbox_enabled:
+        return
+    authored_tools = discover_user_tools(harness.app_root).tools if tools is None else tools
+    validate_runtime_tool_name_collisions(
+        source_file=str(harness.app_root),
+        authored_tools=authored_tools,
+        workflow_enabled=workflow_enabled,
+        sandbox_enabled=sandbox_enabled,
     )
 
 
@@ -360,13 +394,13 @@ async def run_agent(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolDescriptor] | None = None,
+    sandbox_tools: Sequence[ToolInput] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
-    web_request_tools: Sequence[ToolDescriptor] | None = None,
+    web_request_tools: Sequence[ToolInput] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -382,6 +416,12 @@ async def run_agent(
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     coordinator_deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
+    _validate_direct_runtime_name_collisions(
+        harness=harness,
+        tools=tools,
+        workflow_enabled=workflow_enabled,
+        sandbox_tools=sandbox_tools,
+    )
     return await get_agent_runner(harness).run_agent(
         prompt,
         instructions=instructions,
@@ -420,14 +460,14 @@ async def run_agent_events(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolDescriptor] | None = None,
+    sandbox_tools: Sequence[ToolInput] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
-    web_request_tools: Sequence[ToolDescriptor] | None = None,
+    web_request_tools: Sequence[ToolInput] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -482,14 +522,14 @@ async def run_agent_stream(
     skill_paths: Sequence[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: Sequence[ToolDescriptor] | None = None,
+    sandbox_tools: Sequence[ToolInput] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
-    web_request_tools: Sequence[ToolDescriptor] | None = None,
+    web_request_tools: Sequence[ToolInput] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -511,6 +551,12 @@ async def run_agent_stream(
         if session_id is not None and session_state.caller_supplied:
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
         harness = _harness or get_harness()
+        _validate_direct_runtime_name_collisions(
+            harness=harness,
+            tools=tools,
+            workflow_enabled=workflow_enabled,
+            sandbox_tools=sandbox_tools,
+        )
         selected = get_agent_runner(harness)
         stream = selected.run_agent_stream(
             prompt,

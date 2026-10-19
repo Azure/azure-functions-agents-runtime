@@ -17,6 +17,7 @@ __version__ = "0.1.0b16"
 from ._agent_validation import validate_session_id
 from ._function_tool import tool, workflow_tool
 from ._hosted_skill_app import HostedSkillDFApp
+from ._tool_descriptor import ApprovalMode
 from .app import (
     HostedSkillApp,
     HostedSkillFunctionApp,
@@ -64,6 +65,7 @@ __all__ = [
     "AgentResult",
     "AgentStreamEvent",
     "AgentStreamEventKind",
+    "ApprovalMode",
     "HostedSkill",
     "HostedSkillApp",
     "HostedSkillDFApp",
