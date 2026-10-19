@@ -84,6 +84,8 @@ runtime-owned common transcript.
   Entity state contain control metadata only.
 - Reuse `AppHarness`, `HarnessRequest`, `ToolDescriptor`, provider resolution,
   capability catalogs, auth and observability.
+- Support selected prompt-only skill assets in both Durable harnesses without
+  enabling skill scripts or general worker filesystem access.
 - Support opt-in HTTP/chat Durable turns with owner-scoped sessions,
   idempotent admission, management APIs and durable human input.
 - Fail closed before registration when an effective capability cannot expose a
@@ -390,6 +392,8 @@ The MAF checkpoint connector:
 - performs one foreground model step with automatic executable tool loops
   disabled;
 - supplies tool schemas without executable wrappers at the model boundary;
+- configures selected skills for `load_skill` and `read_skill_resource` only;
+  `run_skill_script` is absent or denied;
 - translates complete compatible model output, reasoning items and tool calls
   into a checkpoint outcome;
 - persists the complete native continuation required for a later step;
@@ -405,11 +409,18 @@ Text-only reconstruction is insufficient. Qualification must preserve
 reasoning/encrypted items, call IDs and ordering, compaction state, usage and
 parallel calls through a cold-process resume.
 
+Loaded skill instructions and resources are part of the native continuation
+contract. A cold resume must preserve already loaded skill context rather than
+silently rebuilding a text-only approximation.
+
 #### Copilot connector
 
 The Copilot checkpoint connector:
 
 - creates custom tools as declaration-only tools with no executable handler;
+- exposes `builtin:skill` and `builtin:view` only for selected skill assets;
+  `builtin:view` remains constrained by `SkillPolicy.allows_read`, sandbox
+  bypass is denied and `builtin:bash` is not exposed;
 - observes pending external tool requests before execution;
 - persists SDK-native SessionFs state and a stable session/resume reference;
 - resumes with pending-work continuation enabled;
@@ -417,11 +428,19 @@ The Copilot checkpoint connector:
 - preserves SDK-owned session and transcript behavior; and
 - translates terminal SDK output and usage into the common `AgentResult`.
 
-Only capabilities with a verified pending-work boundary are allowed in Durable
-Copilot mode. Custom runtime tools are the initial required capability.
-Copilot-native MCP execution, shell/file tools, executable skills, native
-subagents and other SDK-owned effects remain direct-only until independently
-qualified.
+Only capabilities with a verified pending-work boundary, or qualified
+side-effect-free prompt-asset reads, are allowed in Durable Copilot mode.
+Custom runtime tools and prompt-only skills are the initial supported
+capabilities. Copilot-native MCP execution, general shell/file tools,
+executable skills, native subagents and other SDK-owned effects remain
+direct-only until independently qualified.
+
+For both harnesses, prompt-only skills mean deployment-packaged, selected skill
+directories exposed through the existing immutable `AgentCapabilities` and
+`SkillPolicy`. The connector profile binds the approved skill inventory and
+content digest. Further resource reads after resume require the same compatible
+asset digest; a deployment with incompatible skill assets cannot resume the
+continuation.
 
 Neither connector may interpret a post-execution telemetry event as a safe
 checkpoint.
@@ -441,8 +460,9 @@ deployment that cannot do so is unsupported.
 | Remote MCP | Qualification-dependent | Rejected initially | Must expose each request before network side effects. |
 | Session sandbox tools | Qualification-dependent | Qualification-dependent | Must dispatch through sandbox activities and preserve workspace identity. |
 | `request_human_input` | Qualification-dependent | Qualification-dependent | Must return `HumanInputRequested` before continuation. |
-| Executable skills | Rejected initially | Rejected initially | Prompt-only content may be qualified separately; executable effects may not be hidden in the harness. |
-| Harness-native shell/file/MCP tools | Rejected initially | Rejected initially | No verified universal pre-effect boundary. |
+| Prompt-only skills | Initial supported boundary | Initial supported boundary | MAF permits load/resource reads only; Copilot permits scoped `builtin:skill`/`builtin:view` only. Loaded context must survive cold resume. |
+| Executable skills | Rejected initially | Rejected initially | `run_skill_script`, `builtin:bash` and equivalent script execution remain unavailable. |
+| General harness-native shell/file/MCP tools | Rejected initially | Rejected initially | Scoped prompt-only skill reads are the sole V1 file-access exception; no general pre-effect boundary is qualified. |
 | Native/runtime subagents and workflows | Rejected initially | Rejected initially | Composition is outside the first contract. |
 
 Any capability capable of executing an effect before the connector returns a
@@ -864,6 +884,8 @@ The feature contract is satisfied when:
 - unknown external effects remain unknown rather than being reported as
   success or blindly retried;
 - unsupported Copilot/MAF capabilities fail before registration;
+- selected prompt-only skills load and read only approved assets across cold
+  resume, while every skill-script or general worker-filesystem path is denied;
 - one active turn, owner isolation and idempotent admission hold across workers;
 - management, input, cancellation, TTL and deletion remain authorized and
   generation-fenced; and
@@ -902,6 +924,7 @@ The feature contract is satisfied when:
 | 27 | Content placement | Inline below size thresholds / always by reference | Store prompts, conversation entries, human input and external-work payloads in qualified content storage; keep only bounded references and control metadata in DTS and Entities | Human; review recommendation | 2026-10-19 |
 | 28 | Continuation lifecycle | Mutable/local checkpoints / immutable durable snapshots with a terminal cross-turn seed | Seal Blob-backed snapshots before commit, retain the terminal continuation as the next-turn seed and garbage-collect superseded snapshots only after generation-safe replacement | Human; review recommendation | 2026-10-19 |
 | 29 | Harness setup reuse | Separate direct/Durable setup stacks / shared per-harness preparation | Share provider, credential, instruction, capability-schema, usage and telemetry helpers; diverge only at execution dispatch and checkpoint persistence | Human; review recommendation | 2026-10-19 |
+| 30 | Prompt-only skills | Reject all skills / allow scoped reads / allow scripts | Support selected read-only skill instructions and resources in V1; deny MAF script execution, Copilot `builtin:bash` and general filesystem access | Human; review recommendation | 2026-10-19 |
 
 ## 6. Test plan
 
@@ -929,8 +952,12 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   process/client restart, external result injection, pending-work continuation,
   terminal cross-turn seeding, denied permissions and cold restore.
 - [ ] Capability validation: native MCP, built-ins, executable skills and
-  subagents fail closed until individually qualified; prompt-only content is
-  distinguished from executable skills.
+  subagents fail closed until individually qualified; prompt-only skill reads
+  are distinguished from executable skills and general filesystem access.
+- [ ] Prompt-only skills: MAF exposes load/resource reads without
+  `run_skill_script`; Copilot exposes scoped `builtin:skill`/`builtin:view`
+  without `builtin:bash`; path escapes, sandbox bypass, asset-digest mismatch
+  and cold-resume context loss fail closed.
 - [ ] Harness mismatch: MAF continuation cannot resume through Copilot and vice
   versa.
 - [ ] Deployment compatibility: compatible connector/state versions resume;
