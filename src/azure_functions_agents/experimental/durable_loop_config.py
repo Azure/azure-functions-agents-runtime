@@ -115,9 +115,23 @@ DURABLE_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS_ENV = (
 DURABLE_LOOP_SANDBOX_REAPER_AGE_SECONDS_ENV = (
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS"
 )
+DURABLE_LOOP_DECISION_ROUTING_ENABLED_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_DECISION_ROUTING_ENABLED"
+)
+DURABLE_LOOP_FAST_MODEL_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_FAST_MODEL"
+)
+DURABLE_LOOP_DECISION_MODEL_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_DECISION_MODEL"
+)
+DURABLE_LOOP_DECISION_ENDPOINT_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_DECISION_ENDPOINT"
+)
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+_DEFAULT_FAST_MODEL = "gpt-4.1-mini"
+_DEFAULT_DECISION_MODEL = "msft-decision-1"
 _DEFAULT_MAX_MODEL_STEPS = 48
 _DEFAULT_MAX_TOOL_CALLS = 128
 _DEFAULT_MAX_TOTAL_TOKENS = 1_000_000
@@ -180,6 +194,10 @@ class DurableLoopSettings:
     )
     sandbox_reaper_age_seconds: int = _DEFAULT_SANDBOX_REAPER_AGE_SECONDS
     mixed_batch_repair_steps: int = 1
+    decision_routing_enabled: bool = False
+    fast_model: str = _DEFAULT_FAST_MODEL
+    decision_model: str = _DEFAULT_DECISION_MODEL
+    decision_endpoint: str = ""
 
     @classmethod
     def from_environment(
@@ -374,6 +392,22 @@ class DurableLoopSettings:
                 minimum=60,
                 maximum=24 * 60 * 60,
             ),
+            decision_routing_enabled=_optional_bool(
+                source,
+                DURABLE_LOOP_DECISION_ROUTING_ENABLED_ENV,
+            ),
+            fast_model=(
+                _optional_text(source, DURABLE_LOOP_FAST_MODEL_ENV)
+                or _DEFAULT_FAST_MODEL
+            ),
+            decision_model=(
+                _optional_text(source, DURABLE_LOOP_DECISION_MODEL_ENV)
+                or _DEFAULT_DECISION_MODEL
+            ),
+            decision_endpoint=_optional_text(
+                source,
+                DURABLE_LOOP_DECISION_ENDPOINT_ENV,
+            ),
         )
         settings.validate()
         return settings
@@ -426,7 +460,8 @@ def validate_durable_loop_application(
     resolved_agents: Sequence[ResolvedAgent],
 ) -> None:
     """Reject surfaces not implemented by the private foundation layer."""
-    if not durable_loop_enabled():
+    settings = DurableLoopSettings.from_environment()
+    if settings is None:
         return
     if global_config.session_runtime is not None:
         raise DurableLoopConfigurationError(
@@ -452,7 +487,11 @@ def validate_durable_loop_application(
             raise DurableLoopConfigurationError(
                 f"{source}: subagents are not supported by the durable-loop foundation."
             )
-        if resolved.workflows is not None and resolved.workflows.enabled:
+        if (
+            resolved.workflows is not None
+            and resolved.workflows.enabled
+            and not settings.decision_routing_enabled
+        ):
             raise DurableLoopConfigurationError(
                 f"{source}: Dynamic Workflows and the durable-loop foundation are "
                 "separate private engines and cannot be enabled together."

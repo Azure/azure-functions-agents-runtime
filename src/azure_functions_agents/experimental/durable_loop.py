@@ -232,6 +232,21 @@ class DurableLoopRunner:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._nonce_factory = nonce_factory or (lambda: uuid.uuid4().hex)
         self._plans: dict[str, DurableLoopPlan] = {}
+        self._optimizer: OneStepModelProvider | None = None
+
+    @property
+    def activity_journal(self) -> InMemoryActivityJournal:
+        """Return the local activity journal for replay inspection."""
+        return self._journal
+
+    @property
+    def segment_optimizer(self) -> OneStepModelProvider | None:
+        """Return the active segment optimizer when decision routing is used."""
+        from .durable_loop_optimizer import DurableSegmentOptimizer
+
+        if isinstance(self._model, DurableSegmentOptimizer):
+            return self._model
+        return self._optimizer
 
     async def start(
         self,
@@ -685,6 +700,18 @@ class DurableLoopRunner:
         timer = DurableLoopTimer(DurableLoopPhase.MODEL_STEP)
 
         async def invoke() -> ModelDecisionEnvelopeV1:
+            if plan.settings.decision_routing_enabled:
+                from .durable_loop_optimizer import DurableSegmentOptimizer
+
+                if isinstance(self._model, DurableSegmentOptimizer):
+                    return await self._model.run_one_step(request)
+                if self._optimizer is None:
+                    self._optimizer = DurableSegmentOptimizer(
+                        self._model,
+                        settings=plan.settings,
+                        clock=self._clock,
+                    )
+                return await self._optimizer.run_one_step(request)
             return await self._model.run_one_step(request)
 
         decision = await self._journal.execute_once(
@@ -719,6 +746,13 @@ class DurableLoopRunner:
                 )
                 break
             request = requests[index]
+            if plan.settings.decision_routing_enabled:
+                from .durable_loop_optimizer import COMPILE_SEGMENT_DAG_TOOL_NAME
+
+                if request.tool_name == COMPILE_SEGMENT_DAG_TOOL_NAME:
+                    results.append(await self._dispatch_dag_request(request, plan))
+                    index += 1
+                    continue
             descriptor = plan.catalog.by_name().get(request.tool_name)
             if (
                 descriptor is not None
@@ -747,6 +781,41 @@ class DurableLoopRunner:
             index += 1
         return tuple(sorted(results, key=lambda result: result.call_ordinal))
 
+    async def _dispatch_dag_request(
+        self,
+        request: ToolRequestV1,
+        plan: DurableLoopPlan,
+    ) -> ToolResultV1:
+        from .durable_loop_optimizer import execute_dag_waves
+
+        if (
+            len(canonical_json_bytes(request.arguments))
+            > request.argument_byte_limit
+        ):
+            return _tool_limit_result(
+                request,
+                code="tool_arguments_too_large",
+            )
+
+        async def is_cancelled() -> bool:
+            current = await self._state.get_run(request.run_id)
+            return current.checkpoint.cancellation_requested
+
+        result = await execute_dag_waves(
+            request,
+            dispatch_node=self._dispatch_one,
+            catalog=plan.catalog,
+            content=self._content,
+            max_parallel_reads=plan.settings.max_parallel_reads,
+            is_cancelled=is_cancelled,
+        )
+        if _tool_result_size(result) > request.result_byte_limit:
+            return _tool_limit_result(
+                request,
+                code="tool_result_too_large",
+            )
+        return result
+
     async def _dispatch_one(self, request: ToolRequestV1) -> ToolResultV1:
         timer = DurableLoopTimer(
             DurableLoopPhase.TOOL_STEP,
@@ -763,7 +832,28 @@ class DurableLoopRunner:
             )
 
         async def invoke() -> ToolResultV1:
-            result = await self._tools.dispatch(request)
+            from .durable_loop_optimizer import (
+                COMPILE_SEGMENT_DAG_TOOL_NAME,
+                SegmentDagToolDispatcher,
+            )
+
+            dispatcher: DurableToolDispatchPort = self._tools
+            if (
+                request.tool_name == COMPILE_SEGMENT_DAG_TOOL_NAME
+                and not isinstance(dispatcher, SegmentDagToolDispatcher)
+            ):
+                plan = self._plans.get(request.run_id)
+                dispatcher = SegmentDagToolDispatcher(
+                    self._tools,
+                    catalog_provider=(
+                        (lambda: plan.catalog) if plan is not None else None
+                    ),
+                    content=self._content,
+                    max_parallel_reads=(
+                        plan.settings.max_parallel_reads if plan is not None else 4
+                    ),
+                )
+            result = await dispatcher.dispatch(request)
             if _tool_result_size(result) > request.result_byte_limit:
                 return _tool_limit_result(
                     request,
@@ -1402,6 +1492,14 @@ def build_tool_requests(
     requests: list[ToolRequestV1] = []
     for ordinal, call in enumerate(decision.tool_calls):
         descriptor = descriptors.get(call.name)
+        if descriptor is None and plan.settings.decision_routing_enabled:
+            from .durable_loop_optimizer import (
+                COMPILE_SEGMENT_DAG_TOOL_NAME,
+                compile_segment_dag_tool_descriptor,
+            )
+
+            if call.name == COMPILE_SEGMENT_DAG_TOOL_NAME:
+                descriptor = compile_segment_dag_tool_descriptor()
         if descriptor is None:
             descriptor = _unknown_tool_descriptor(call.name)
         request_hash = tool_request_hash(

@@ -26,6 +26,7 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
     DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
     DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_DAG_WAVE_ACTIVITY_NAME,
     DURABLE_LOOP_FAULT_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME,
@@ -129,6 +130,7 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         "activityTrigger"
     ]
     assert functions[DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_DAG_WAVE_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_APPEND_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_HUMAN_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME] == [
@@ -157,6 +159,7 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         DURABLE_LOOP_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME,
+        DURABLE_LOOP_DAG_WAVE_ACTIVITY_NAME,
         DURABLE_LOOP_APPEND_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
@@ -238,6 +241,7 @@ def test_registered_durable_binding_annotations_are_worker_compatible(
         DURABLE_LOOP_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME,
+        DURABLE_LOOP_DAG_WAVE_ACTIVITY_NAME,
         DURABLE_LOOP_APPEND_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,

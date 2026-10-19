@@ -109,6 +109,7 @@ DURABLE_LOOP_MODEL_ACTIVITY_NAME = "durable_agent_model_step_v1"
 DURABLE_LOOP_TOOL_ACTIVITY_NAME = "durable_agent_tool_step_v1"
 DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME = "durable_agent_sandbox_tool_v1"
 DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME = "durable_agent_mcp_tool_v1"
+DURABLE_LOOP_DAG_WAVE_ACTIVITY_NAME = "durable_agent_dag_wave_v1"
 DURABLE_LOOP_APPEND_ACTIVITY_NAME = "durable_agent_append_results_v1"
 DURABLE_LOOP_HUMAN_ACTIVITY_NAME = "durable_agent_human_request_v1"
 DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME = "durable_agent_human_result_v1"
@@ -220,27 +221,58 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
         manager = get_client_manager()
         if not isinstance(manager, HybridApimClientManager):
             raise RuntimeError("durable-loop APIM client manager is unavailable")
-        tools = build_durable_execution_plane(
+        tools: DurableToolDispatchPort = build_durable_execution_plane(
             client_manager=manager,
             settings=settings,
             content=content,
             receipts=receipts,
             binding=_execution_binding,
         )
-        model = ApimMafResponsesProvider(
+        apim_model = ApimMafResponsesProvider(
             manager,
             content=content,
             receipts=receipts,
             settings=settings,
             control_base_url=durable_model_control_base_url(),
         )
+        model: OneStepModelProvider = apim_model
+        if settings.decision_routing_enabled:
+            from .durable_loop_optimizer import (
+                DECISION_SYSTEMONE_PATH,
+                DurableSegmentOptimizer,
+                HttpDecisionOneClient,
+                SegmentDagToolDispatcher,
+            )
+
+            decision_url = settings.decision_endpoint or (
+                manager.model_base_url.rstrip("/").removesuffix("/openai/v1")
+                + DECISION_SYSTEMONE_PATH
+            )
+            model = DurableSegmentOptimizer(
+                apim_model,
+                settings=settings,
+                decision_client=HttpDecisionOneClient(
+                    endpoint_url=decision_url,
+                    headers_provider=manager.request_headers,
+                ),
+            )
+            tools = SegmentDagToolDispatcher(
+                tools,
+                content=content,
+                max_parallel_reads=settings.max_parallel_reads,
+            )
         faults = DurableOneShotFaults(
             receipts,
             enabled=settings.fault_injection_enabled,
         )
         _default_runtime_instance = DurableLoopActivityRuntime(
             model=model,
-            background_model=model if settings.background_model_enabled else None,
+            background_model=(
+                apim_model
+                if settings.background_model_enabled
+                and not settings.decision_routing_enabled
+                else None
+            ),
             tools=tools,
             compactor=DeterministicContextCompactor(),
             content=content,
@@ -698,6 +730,20 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         )
 
         async def dispatch_tool() -> ToolResultV1:
+            from .durable_loop_optimizer import (
+                COMPILE_SEGMENT_DAG_TOOL_NAME,
+                SegmentDagToolDispatcher,
+            )
+
+            dispatcher: DurableToolDispatchPort = runtime.tools
+            if (
+                request.tool_name == COMPILE_SEGMENT_DAG_TOOL_NAME
+                and not isinstance(dispatcher, SegmentDagToolDispatcher)
+            ):
+                dispatcher = SegmentDagToolDispatcher(
+                    dispatcher,
+                    content=runtime.content,
+                )
             if observer is not None:
                 observer.tool_started(request)
             with start_durable_loop_activity_span(
@@ -706,11 +752,11 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 provenance=request.provenance.value,
             ):
                 if observer is None:
-                    return await runtime.tools.dispatch(request)
+                    return await dispatcher.dispatch(request)
                 with use_durable_chat_execution_context(
                     DurableChatExecutionContext(observer=observer)
                 ):
-                    return await runtime.tools.dispatch(request)
+                    return await dispatcher.dispatch(request)
 
         try:
             if observer is not None:
@@ -882,6 +928,16 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             )
         background_written_bytes = 0
         background_model = runtime.background_model
+        model_provider: OneStepModelProvider = runtime.model
+        if plan.settings.decision_routing_enabled:
+            from .durable_loop_optimizer import DurableSegmentOptimizer
+
+            background_model = None
+            if not isinstance(model_provider, DurableSegmentOptimizer):
+                model_provider = DurableSegmentOptimizer(
+                    model_provider,
+                    settings=plan.settings,
+                )
         if (
             document.plan.ui is not None
             and document.plan.ui.model_mode is DurableChatModelMode.FOREGROUND
@@ -917,7 +973,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                                 observer is not None
                                 and producers
                                 and isinstance(
-                                    runtime.model,
+                                    model_provider,
                                     DurableChatStreamingModelProvider,
                                 )
                             ):
@@ -927,13 +983,13 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                                         model_producers=producers,
                                     )
                                 ):
-                                    decision = await runtime.model.run_one_step_with_observer(
+                                    decision = await model_provider.run_one_step_with_observer(
                                         request,
                                         observer=observer,
                                         producers=producers,
                                     )
                             else:
-                                decision = await runtime.model.run_one_step(request)
+                                decision = await model_provider.run_one_step(request)
                         else:
                             started = await background_model.start(request)
                             background_written_bytes = started.written_bytes
@@ -1236,6 +1292,45 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         return await execute_tool_activity(
             payload,
             expected_provenance=ToolProvenance.REMOTE,
+        )
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_DAG_WAVE_ACTIVITY_NAME,
+    )
+    @_with_function_trace_context
+    async def durable_agent_dag_wave_v1(
+        payload: dict,  # type: ignore[type-arg]
+    ) -> dict[str, object]:
+        from .durable_loop_optimizer import execute_dag_wave_activity
+
+        runtime = get_durable_loop_activity_runtime()
+        document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
+        request_ref = ContentRefV1.model_validate(payload["request_ref"])
+        document = await get_protocol_model(
+            runtime.content,
+            document_ref,
+            DurableRunDocumentV1,
+        )
+        parent_request = await get_protocol_model(
+            runtime.content,
+            request_ref,
+            ToolRequestV1,
+        )
+        wave_index = _nonnegative_int(
+            payload.get("wave_index", 0),
+            "wave_index",
+        )
+        raw_wave_results = _sequence(
+            payload.get("wave_result_refs", ()),
+            "wave_result_refs",
+        )
+        return await execute_dag_wave_activity(
+            content=runtime.content,
+            document=document,
+            parent_request=parent_request,
+            wave_index=wave_index,
+            wave_result_refs=raw_wave_results,
         )
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
@@ -2448,6 +2543,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             model_result.tool_calls,
             current.identity.budget.max_parallel_reads,
             tool_activity_name_for_call,
+            run_document_ref=current.run_document_ref,
         )
         appended = yield context.call_activity(
             DURABLE_LOOP_APPEND_ACTIVITY_NAME,
@@ -2581,7 +2677,11 @@ def _schedule_tool_refs(
     calls: tuple[ToolDispatchRefV1, ...],
     max_parallel_reads: int,
     tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str],
+    *,
+    run_document_ref: ContentRefV1 | None = None,
 ) -> Any:
+    from .durable_loop_optimizer import COMPILE_SEGMENT_DAG_TOOL_NAME
+
     results: list[ToolResultRefV1] = []
     index = 0
     while index < len(calls):
@@ -2593,6 +2693,28 @@ def _schedule_tool_refs(
         if cancelled.get("cancelled") is True:
             return tuple(sorted(results, key=lambda item: item.call_ordinal)), calls[index:]
         call = calls[index]
+        if (
+            call.tool_name == COMPILE_SEGMENT_DAG_TOOL_NAME
+            and run_document_ref is not None
+        ):
+            dag_result, dag_cancelled = yield from _schedule_dag_waves(
+                context=context,
+                entity=entity,
+                run_id=run_id,
+                run_document_ref=run_document_ref,
+                dag_call=call,
+                max_parallel_reads=max_parallel_reads,
+                tool_activity_name_for_call=tool_activity_name_for_call,
+            )
+            if dag_cancelled:
+                return (
+                    tuple(sorted(results, key=lambda item: item.call_ordinal)),
+                    calls[index:],
+                )
+            assert dag_result is not None
+            results.append(dag_result)
+            index += 1
+            continue
         if call.behavior is ToolBehavior.READ_ONLY and call.parallel_safe:
             batch: list[ToolDispatchRefV1] = []
             while (
@@ -2626,6 +2748,68 @@ def _schedule_tool_refs(
         )
         index += 1
     return tuple(sorted(results, key=lambda item: item.call_ordinal)), ()
+
+
+def _schedule_dag_waves(
+    *,
+    context: df.DurableOrchestrationContext,
+    entity: df.EntityId,
+    run_id: str,
+    run_document_ref: ContentRefV1,
+    dag_call: ToolDispatchRefV1,
+    max_parallel_reads: int,
+    tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str],
+) -> Any:
+    wave_index = 0
+    wave_result_refs: list[dict[str, object]] = []
+    accumulated_written_bytes = 0
+    while True:
+        wave_step = yield context.call_activity(
+            DURABLE_LOOP_DAG_WAVE_ACTIVITY_NAME,
+            {
+                "request_ref": dag_call.request_ref.model_dump(mode="json"),
+                "run_document_ref": run_document_ref.model_dump(mode="json"),
+                "wave_index": wave_index,
+                "wave_result_refs": list(wave_result_refs),
+            },
+        )
+        if wave_step.get("status") == "completed":
+            final_ref = ToolResultRefV1.model_validate_json(
+                canonical_json_bytes(wave_step["result_ref"])
+            )
+            final_ref = final_ref.model_copy(
+                update={
+                    "written_bytes": (
+                        final_ref.written_bytes + accumulated_written_bytes
+                    )
+                }
+            )
+            return final_ref, False
+        wave_calls = tuple(
+            ToolDispatchRefV1.model_validate_json(canonical_json_bytes(item))
+            for item in _sequence(wave_step.get("tool_calls"), "tool_calls")
+        )
+        accumulated_written_bytes += _nonnegative_int(
+            wave_step.get("written_bytes", 0),
+            "written_bytes",
+        )
+        wave_results, wave_cancelled = yield from _schedule_tool_refs(
+            context,
+            entity,
+            run_id,
+            wave_calls,
+            max_parallel_reads,
+            tool_activity_name_for_call,
+        )
+        accumulated_written_bytes += sum(
+            item.written_bytes for item in wave_results
+        )
+        if wave_cancelled:
+            return None, True
+        wave_result_refs.extend(
+            item.model_dump(mode="json") for item in wave_results
+        )
+        wave_index += 1
 
 
 def _entity_admit(

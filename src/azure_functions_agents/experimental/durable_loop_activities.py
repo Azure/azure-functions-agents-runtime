@@ -724,10 +724,17 @@ class MafOneStepModelProvider:
         _require_target_maf_versions()
         from agent_framework import Agent, FunctionTool, Message
 
-        client, target = self._client_manager.build_chat_client_with_target(
-            request.working_context.bundle.model
+        routed_model_raw = request.model_settings.get("_routed_model")
+        routed_model = (
+            routed_model_raw
+            if isinstance(routed_model_raw, str) and routed_model_raw
+            else None
         )
-        if any(
+        effective_model = routed_model or request.working_context.bundle.model
+        client, target = self._client_manager.build_chat_client_with_target(
+            effective_model
+        )
+        if routed_model is None and any(
             value is not None
             for value in (
                 target.provider,
@@ -779,9 +786,10 @@ class MafOneStepModelProvider:
             )
             for descriptor in request.catalog.tools
         ]
-        _validate_encrypted_reasoning_messages(
-            request.working_context.bundle.messages
-        )
+        if routed_model is None:
+            _validate_encrypted_reasoning_messages(
+                request.working_context.bundle.messages
+            )
         messages = [
             Message.from_dict(_maf_replay_message(message))
             for message in request.working_context.bundle.messages
@@ -1527,6 +1535,13 @@ def _valid_container_name(value: str) -> bool:
 
 def _durable_model_options(request: OneStepModelRequest) -> dict[str, object]:
     options = dict(request.model_settings)
+    routed_model = options.pop("_routed_model", None)
+    forced_tool_name = options.pop("_force_tool_name", None)
+    effective_model = (
+        routed_model
+        if isinstance(routed_model, str) and routed_model
+        else request.working_context.bundle.model
+    )
     forbidden = {
         "continuation_token",
         "conversation",
@@ -1539,7 +1554,11 @@ def _durable_model_options(request: OneStepModelRequest) -> dict[str, object]:
             f"durable model settings contain stateful fields: {present}"
         )
     configured_model = options.get("model")
-    if configured_model is not None and configured_model != request.working_context.bundle.model:
+    if (
+        routed_model is None
+        and configured_model is not None
+        and configured_model != request.working_context.bundle.model
+    ):
         raise DurableLoopModelError(
             "durable model setting does not match the frozen model binding"
         )
@@ -1554,10 +1573,15 @@ def _durable_model_options(request: OneStepModelRequest) -> dict[str, object]:
         raise DurableLoopModelError("durable model include must be a list of strings")
     if "reasoning.encrypted_content" not in resolved_include:
         resolved_include.append("reasoning.encrypted_content")
+    if isinstance(forced_tool_name, str) and forced_tool_name:
+        options["tool_choice"] = {
+            "type": "function",
+            "name": forced_tool_name,
+        }
     options.update(
         {
             "include": resolved_include,
-            "model": request.working_context.bundle.model,
+            "model": effective_model,
             "store": False,
         }
     )
