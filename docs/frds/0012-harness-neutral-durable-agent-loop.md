@@ -227,7 +227,7 @@ Names are illustrative; the contract requirements are normative.
 
 | Outcome | Meaning |
 | --- | --- |
-| `TurnCompleted` | The harness produced the terminal assistant result. |
+| `TurnCompleted` | The harness produced the terminal assistant result and a terminal session continuation for the next turn. |
 | `ExternalWorkRequested` | The harness suspended before one or more side effects and returned serializable work requests plus a continuation reference. |
 | `HumanInputRequested` | The logical turn is waiting for authenticated user input and can resume from the returned continuation. |
 | `RetryRequested` | The connector classified a sanitized transient failure and supplied bounded retry guidance. |
@@ -271,6 +271,7 @@ turn_generation
 storage_kind
 opaque_state_key
 state_format_version
+continuation_role
 created_at
 expires_at
 integrity_metadata
@@ -278,6 +279,8 @@ integrity_metadata
 
 - `opaque_state_key` is a reference, not arbitrary SDK state embedded in Entity
   or orchestration payloads.
+- `continuation_role` distinguishes a resumable mid-turn checkpoint from the
+  terminal session seed produced by `TurnCompleted`.
 - The reference contains no credential, prompt, tool result or reversible owner
   identifier.
 - Durable continuation storage is separate from ordinary MAF history and
@@ -285,6 +288,12 @@ integrity_metadata
   the bound backend/task hub, agent, a non-reversible owner-scope digest,
   registration-assigned entry ID, immutable session incarnation, run and turn
   generation. No client controls the storage key.
+- Qualified Azure hosting profiles persist both MAF and Copilot native
+  continuation in Azure Blob Storage under that dedicated Durable namespace.
+  Worker-local ephemeral storage is never authoritative.
+- Before returning a `ContinuationRef`, the connector fully writes, flushes and
+  seals the native snapshot and records its digest/integrity metadata. A
+  committed snapshot key is immutable; later checkpoints use new keys.
 - The Entity authorizes the exact continuation identity before a connector may
   read it. Harness-owned storage encrypts the referenced state and applies
   integrity protection and least-privilege access.
@@ -302,6 +311,13 @@ integrity_metadata
 - A code deployment does not by itself invalidate a continuation. Deployed
   versions must retain declared compatibility with persisted protocol/state
   versions. Operators own breaking migrations and drain strategy.
+- `TurnCompleted` returns a terminal session continuation tied to the completed
+  run and turn generation. The Entity commits it atomically with the terminal
+  result as the authoritative seed for the next turn.
+- Turn `N+1` receives that prior terminal reference as `session_seed` in its
+  initial `CheckpointRequest`. The connector consumes it to construct the new
+  turn but does not resume or mutate turn `N`. Its first new checkpoint is
+  minted with turn `N+1`'s run ID and generation.
 - Continuation envelopes, excluding the opaque native state, are limited to
   16 KiB serialized. Native state is always stored by reference.
 
@@ -495,8 +511,10 @@ allow safe result reuse. The runtime does not claim exactly-once side effects.
 
 The turn orchestrator uses deterministic DTS APIs only:
 
-1. obtain the accepted turn generation from the Entity;
-2. schedule a harness activity to run or resume the selected connector;
+1. obtain the accepted turn generation and optional authoritative session seed
+   from the Entity;
+2. schedule a harness activity to start from that seed or resume the selected
+   connector from a mid-turn checkpoint;
 3. commit the returned checkpoint outcome through the Entity;
 4. for external work, schedule one activity per work request;
 5. commit the completed ordered result batch;
@@ -523,6 +541,7 @@ versioned business state:
 - run lifecycle and absolute deadline;
 - ordered `ContentRef` values for committed public conversation entries;
 - current continuation metadata;
+- authoritative terminal session continuation for the next accepted turn;
 - external-work dispatch/result receipts;
 - pending human question and accepted answer receipt;
 - cancellation and deletion intent;
@@ -542,6 +561,22 @@ prevents them from mutating the authoritative conversation.
 The Entity also owns the dispatch-claim transition. A replayed or duplicate
 activity cannot claim an operation already claimed by another generation or
 already terminal.
+
+Continuation cleanup follows authoritative state:
+
+- During an active turn, the prior terminal session seed and every checkpoint
+  still referenced by an in-flight generation remain available.
+- After a newer checkpoint is committed and generation fencing proves that no
+  in-flight operation may use an older mid-turn snapshot, that snapshot is
+  eligible for asynchronous garbage collection.
+- When a turn completes, its terminal session continuation is retained as the
+  next-turn seed. The previous turn's terminal seed remains until the first
+  authoritative checkpoint of the new turn is committed, then becomes eligible
+  for cleanup.
+- The current terminal session continuation and committed conversation content
+  remain until session TTL expiry or authorized deletion.
+- Cleanup is receipt-backed and retryable. A cleanup failure does not remove
+  authoritative metadata or make a session appear deleted.
 
 ### 4.9 Admission, identity and idempotency
 
@@ -697,7 +732,8 @@ starts a new turn, resets history or changes harness.
 - Reads, polling, rejected requests and duplicate receipts do not renew TTL.
 - Generation-tagged Durable signals handle deadline and idle expiry.
 - Owner-authorized deletion immediately revokes admission and data access,
-  fences stale work and begins cleanup of runtime-owned state and workspace.
+  fences stale work and begins cleanup of runtime-owned continuation snapshots,
+  referenced content and workspace.
 - Repeated deletion returns the same stable deletion receipt and progress.
 - Non-content request/deletion tombstones remain through the documented retry
   horizon.
@@ -785,6 +821,10 @@ The feature contract is satisfied when:
 - no direct request uses the checkpoint protocol unless separately approved;
 - each Durable harness has exactly one checkpoint connector;
 - both connectors pass cold-worker start/resume tests;
+- Azure profiles persist immutable native snapshots in Blob Storage and never
+  depend on worker-local continuation state;
+- a completed turn's terminal continuation seeds the next turn, and superseded
+  snapshots are removed only after generation-safe replacement;
 - the orchestrator performs no side-effecting work;
 - the same external-work/result contract is used for MAF and Copilot;
 - tool identity, generation, deadline and idempotency survive replay;
@@ -831,6 +871,7 @@ The feature contract is satisfied when:
 | 25 | State limits | Unspecified bounded payloads / explicit upper bounds | Contractual envelope, Entity, batch and response limits with integrity-checked offload | Architecture review | 2026-10-14 |
 | 26 | Cancellation cleanup | Unbounded best effort / fixed budget | Five-second total cleanup budget after worker observation; unconfirmed effects remain unknown | Architecture review | 2026-10-14 |
 | 27 | Content placement | Inline below size thresholds / always by reference | Store prompts, conversation entries, human input and external-work payloads in qualified content storage; keep only bounded references and control metadata in DTS and Entities | Human; review recommendation | 2026-10-19 |
+| 28 | Continuation lifecycle | Mutable/local checkpoints / immutable durable snapshots with a terminal cross-turn seed | Seal Blob-backed snapshots before commit, retain the terminal continuation as the next-turn seed and garbage-collect superseded snapshots only after generation-safe replacement | Human; review recommendation | 2026-10-19 |
 
 ## 6. Test plan
 
@@ -848,10 +889,11 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
 - [ ] Checkpoint contract codec: every outcome and continuation version,
   bounded size, unknown fields, incompatible versions and sanitized errors.
 - [ ] MAF connector: tool-free completion, one/many tool calls, ordered resume,
-  reasoning fidelity, compaction, provider failures and cold restore.
+  reasoning fidelity, compaction, terminal cross-turn seeding, provider failures
+  and cold restore.
 - [ ] Copilot connector: declaration-only tools, pending request persistence,
   process/client restart, external result injection, pending-work continuation,
-  denied permissions and cold restore.
+  terminal cross-turn seeding, denied permissions and cold restore.
 - [ ] Capability validation: native MCP, built-ins, executable skills and
   subagents fail closed until individually qualified; prompt-only content is
   distinguished from executable skills.
@@ -879,6 +921,9 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
 - [ ] Content references: prompts, conversation entries, human input and
   external-work payloads are never inline; verify write-before-commit,
   immutability, scope/digest/length checks and missing/corrupt content failure.
+- [ ] Continuation lifecycle: Azure Blob backing, seal-before-return,
+  immutable snapshot keys, session-seed handoff, generation-safe superseded
+  snapshot cleanup, TTL/deletion retention and cleanup retry receipts.
 - [ ] State bounds: large low-compressibility outputs, continuation and content
   indirection, every contractual envelope limit, metadata-only Entity growth,
   pagination, storage-reference failure and no silent truncation.
