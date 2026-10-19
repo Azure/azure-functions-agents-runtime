@@ -29,7 +29,12 @@ from ._copilot_capabilities import (
     permission_handler,
 )
 from ._copilot_observability import CopilotEventTelemetry
-from ._copilot_runtime import CopilotPreviewError, CopilotRuntime, get_runtime
+from ._copilot_runtime import (
+    _CLEANUP_TIMEOUT_SECONDS,
+    CopilotPreviewError,
+    CopilotRuntime,
+    get_runtime,
+)
 from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
 from ._copilot_session_local import LocalSessionFileBackend
@@ -255,13 +260,13 @@ def _provider(
 
 async def _abort(session: CopilotSession) -> None:
     try:
-        await asyncio.wait_for(session.abort(), timeout=5)
+        await asyncio.wait_for(session.abort(), timeout=_CLEANUP_TIMEOUT_SECONDS)
     except BaseException:
         logger.error("Copilot session abort failed.")
 
 
 async def _close_storage(storage: CopilotSessionFs) -> None:
-    await asyncio.wait_for(storage.close(), timeout=5)
+    await asyncio.wait_for(storage.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
 
 
 async def _delete_leaf(
@@ -284,13 +289,13 @@ async def _bounded_cleanup(
         yield
     except BaseException:
         try:
-            await asyncio.wait_for(operation(), timeout=5)
+            await asyncio.wait_for(operation(), timeout=_CLEANUP_TIMEOUT_SECONDS)
         except BaseException:
             logger.error("%s", diagnostic)
         raise
     else:
         try:
-            await asyncio.wait_for(operation(), timeout=5)
+            await asyncio.wait_for(operation(), timeout=_CLEANUP_TIMEOUT_SECONDS)
         except Exception:
             logger.error("%s", diagnostic)
             raise CopilotPreviewError(diagnostic) from None

@@ -117,6 +117,7 @@ def _reasoning_summary_from_environment() -> ReasoningSummary | None:
 def select_copilot_harness(root: Path) -> AppHarness:
     """Freeze provider and storage settings without acquiring runtime resources."""
     from ._copilot_providers import _PROVIDERS
+    from ._copilot_runner import CopilotRunner
     from ._copilot_session_identity import resolve_route
 
     check_sdk_dependency()
@@ -138,7 +139,6 @@ def select_copilot_harness(root: Path) -> AppHarness:
     reasoning_effort = _reasoning_effort_from_environment()
     reasoning_summary = _reasoning_summary_from_environment()
     route = resolve_route(root)
-    from ._copilot_runner import CopilotRunner
 
     return AppHarness(
         HarnessKind.COPILOT,
@@ -153,7 +153,10 @@ def select_copilot_harness(root: Path) -> AppHarness:
             session_storage=route,
         ),
     )
+
+
 _START_TIMEOUT_SECONDS = 30
+_CLEANUP_TIMEOUT_SECONDS = 5
 _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 
 
@@ -179,7 +182,9 @@ class CopilotRuntime:
         except Exception:
             logger.warning("Copilot graceful shutdown failed; forcing SDK shutdown.")
             try:
-                await asyncio.wait_for(client.force_stop(), timeout=5)
+                await asyncio.wait_for(
+                    client.force_stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                )
             except Exception:
                 raise CopilotPreviewError("Copilot forced SDK shutdown failed.") from None
 
@@ -212,7 +217,7 @@ class CopilotRuntime:
                 await asyncio.wait_for(client.start(), timeout=_START_TIMEOUT_SECONDS)
             except BaseException:
                 try:
-                    await self._stop_client(client, timeout=5)
+                    await self._stop_client(client, timeout=_CLEANUP_TIMEOUT_SECONDS)
                 except BaseException:
                     logger.error("Copilot native startup cleanup failed.")
                 raise
@@ -221,7 +226,7 @@ class CopilotRuntime:
             return client
 
     async def _close_credential(self, credential: AsyncTokenCredential) -> None:
-        await asyncio.wait_for(credential.close(), timeout=5)
+        await asyncio.wait_for(credential.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
 
     def _release_runtime(self) -> None:
         with self._harness._resources.guard:
