@@ -13,36 +13,62 @@ eligibility rules, alias allowlists, or tool-evidence checks in the recovery flo
    directory. Set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` in local settings.
 3. Start Azurite with `azurite --skipApiVersionCheck`, then run `func start`.
 
-## Human intervention
+## Test the three scenarios
 
-With the destination report template absent, call:
+Run the following commands from this sample's `src` directory while the host and
+Azurite are running. Examples use Core Tools' default port, **7071**; change it
+if the host uses another port. In PowerShell, use `curl.exe` rather than the
+Windows PowerShell `curl` alias.
 
-```bash
-curl -i http://localhost:7071/api/reports/weekly
-```
+| Scenario | Setup and request | Expected result |
+| --- | --- | --- |
+| Normal execution | Template exists; GET `/api/reports/weekly` | HTTP 200; no agent call |
+| Human remediation | Template missing; GET `/api/reports/weekly` | HTTP 500; agent explains how to restore the template |
+| Automatic input correction | Template exists; GET `/api/reports/weekly?format=markdwon` | HTTP 200 if the agent corrects the input and the retry succeeds |
 
-The agent should recognize that changing inputs cannot supply a missing deployment
-asset. Expect **HTTP 500**, `requires_user_action: true`, `auto_corrected: false`,
-and `remediation` with inspection/repair steps. Apply the repair from `src`:
+### 1. Normal execution: no exception
+
+Supply the local report template, then request the default text report:
 
 ```powershell
 Copy-Item templates/weekly-report.example.txt templates/weekly-report.txt
+curl.exe -i "http://localhost:7071/api/reports/weekly"
 ```
 
-On Bash, use `cp`. Repeat the request: expect **HTTP 200** with `report` and
-`auto_corrected: false`. Successful ordinary requests do not call the agent.
+Expect **HTTP 200** with `report`, `auto_corrected: false`, and
+`requires_user_action: false`. The report starts with `Weekly operations report`.
+The Function completes normally without calling the agent.
 
-## Agent-decided input correction
+### 2. Human remediation: the agent cannot supply a missing file
 
-Keep the template in place and call:
+Remove only the demo template created above, then repeat the request:
 
-```bash
-curl -i "http://localhost:7071/api/reports/weekly?format=markdwon"
+```powershell
+Remove-Item templates/weekly-report.txt
+curl.exe -i "http://localhost:7071/api/reports/weekly"
 ```
 
-The agent receives the exception type, operation context, and query inputs,
-including duplicate values. It can optionally call `correct_report_format`,
-but need not use a tool to suggest a correction. Its response is ordinary JSON:
+The operation raises `FileNotFoundError`. The agent should recognize that changing
+inputs cannot supply a missing deployment asset. Expect **HTTP 500** with
+`requires_user_action: true`, `auto_corrected: false`, and `remediation` explaining
+how to restore the template and verify the repair. The agent does not create files.
+
+Copy the example template back and repeat the request to verify **HTTP 200**, as
+in scenario 1. For a deployed app, include the template in the project and redeploy.
+
+### 3. Automatic correction: the agent fixes an input and the app retries
+
+Ensure the template exists, then send a misspelled format:
+
+```powershell
+Copy-Item templates/weekly-report.example.txt templates/weekly-report.txt
+curl.exe -i "http://localhost:7071/api/reports/weekly?format=markdwon"
+```
+
+The operation raises `InvalidReportFormatError`. The agent receives the exception
+type, operation context, and query inputs. It can optionally call
+`correct_report_format`, but need not use a tool to suggest a correction. Its
+response to the recovery helper is ordinary JSON, for example:
 
 ```json
 {
@@ -53,17 +79,28 @@ but need not use a tool to suggest a correction. Its response is ordinary JSON:
 
 The application uses those inputs directly for **one** operation retry. On actual
 success it returns HTTP 200 with `report`, `auto_corrected: true`,
-`requires_user_action: false`, and `corrected_input`. The operation itself still
+`requires_user_action: false`, and `corrected_input: {"format": "markdown"}`.
+The report starts with `# Weekly operations report`. The operation itself still
 enforces its normal input rules; there is no separate recovery policy validator.
 For unclear intent or non-input failures, the agent should return
 `corrected_input: null` with meaningful remediation instead.
 
-Agent decisions are not guaranteed. If the retry also fails, the helper returns
-HTTP 500 with static fallback guidance. It does not call the agent or retry again.
-Try deleting the destination template and sending the typo request to see this.
-Try `?format=text&format=markdown` for an ambiguous input the agent should ask
-the caller to clarify rather than guess. All unresolved failures use HTTP 500
-in this deliberately generic demo.
+Agent decisions and wording are not guaranteed. A model failure, invalid response,
+15-second deadline, or failed retry returns HTTP 500 with static fallback guidance.
+The helper does not call the agent or retry again. A typo request with the template
+missing can exercise a failed retry if the agent first proposes a format correction.
+For an additional ambiguous-input case, try `?format=text&format=markdown`; the
+agent should ask the caller to clarify rather than guess. All unresolved failures
+use HTTP 500 in this deliberately generic demo.
+
+### Cleanup
+
+Delete only the demo template you created, then stop the host and Azurite with
+**Ctrl+C** in their terminals:
+
+```powershell
+Remove-Item templates/weekly-report.txt -ErrorAction SilentlyContinue
+```
 
 ## Reuse and limits
 

@@ -11,7 +11,7 @@ from starlette.datastructures import QueryParams
 from azure_functions_agents import HostedSkill
 
 FALLBACK_ADVICE = "Review the application's logs and configuration with its operator before retrying."
-ADVICE_TIMEOUT_SECONDS = 15
+ADVICE_TIMEOUT_SECONDS = 60
 
 
 async def recover_operation(
@@ -22,8 +22,10 @@ async def recover_operation(
     operation: Callable[[QueryParams], dict[str, str]],
     context: str,
 ) -> JSONResponse:
+    """Ask the agent for corrected inputs, retry once, or return human remediation guidance."""
     advice = FALLBACK_ADVICE
     try:
+        # Ask once, with a deadline; omit the raw exception message and traceback.
         async with asyncio.timeout(ADVICE_TIMEOUT_SECONDS):
             result = await skill.run(json.dumps({
                 "exception_type": type(error).__name__,
@@ -32,6 +34,7 @@ async def recover_operation(
             }))
         decision = json.loads(result.content)
         if decision["corrected_input"] is not None:
+            # The application—not the agent—retries the operation, at most once.
             output = operation(QueryParams(decision["corrected_input"]))
             return JSONResponse({
                 **output, "auto_corrected": True, "requires_user_action": False,
@@ -39,6 +42,7 @@ async def recover_operation(
             })
         advice = decision["remediation"] or FALLBACK_ADVICE
     except Exception:
+        # Agent failures, invalid responses, and failed retries all use static guidance.
         logging.exception("Recovery failed; returning fallback guidance")
 
     return JSONResponse({

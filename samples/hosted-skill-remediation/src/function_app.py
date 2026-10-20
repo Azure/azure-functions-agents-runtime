@@ -13,6 +13,7 @@ app = HostedSkillFunctionApp()
 @app.hosted_skill(arg_name="skill", agent_name="error_advisor")
 async def weekly_report(req: Request, skill: HostedSkill) -> JSONResponse:
     try:
+        # Run normally; the agent is only called if the operation fails.
         return JSONResponse({
             **render_report(req.query_params),
             "auto_corrected": False,

@@ -5,6 +5,7 @@ from pathlib import Path
 from starlette.datastructures import QueryParams
 
 TEMPLATE_PATH = Path(__file__).parent / "templates/weekly-report.txt"
+# Give the agent enough context to distinguish bad inputs from missing deployment assets.
 CONTEXT = (
     "Render a weekly report from templates/weekly-report.txt using only the {title} "
     "placeholder. Accepted formats are text and markdown. The developer supplies "
@@ -26,12 +27,15 @@ class DuplicateReportFormatError(InvalidReportFormatError):
 
 
 def render_report(query: QueryParams) -> dict[str, str]:
+    """Validate the requested format and render the local template as text or Markdown."""
+    # Preserve duplicate values so ambiguous inputs raise an error instead of being ignored.
     formats = query.getlist("format")
     if len(formats) > 1:
         raise DuplicateReportFormatError("Supply exactly one format query parameter")
     report_format = formats[0] if formats else "text"
     if report_format not in ("text", "markdown"):
         raise InvalidReportFormatError("Supported formats are text and markdown")
+    # A missing template needs human action; changing request inputs cannot supply it.
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     title = "Weekly operations report"
     return {"report": template.format(title=f"# {title}" if report_format == "markdown" else title)}
