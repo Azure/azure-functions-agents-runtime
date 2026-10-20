@@ -1,7 +1,7 @@
 ---
 frd: 0009
 title: Copilot SDK agent harness
-status: In review
+status: Finalized
 author: larohra
 created: 2026-09-28
 updated: 2026-10-19
@@ -28,13 +28,13 @@ runners own SDK object creation, provider auth timing, native event translation,
 and persistence details. Authored tools remain user-owned code, not a promise of
 compatibility with every harness.
 
-The supplied-session-ID amendment completed independent architecture review on
-2026-10-19 and is pending human sign-off.
-It proposes open-or-create for both HTTP caller IDs and inbound MCP transport
+The supplied-session-ID amendment completed independent architecture review and
+received human sign-off on 2026-10-19.
+It specifies open-or-create for both HTTP caller IDs and inbound MCP transport
 IDs, matching MAF: create with the requested ID only when its selected storage
 namespace has no persisted state; otherwise resume through the SDK. A failed
 resume is never retried as create. Historical finalized contracts and sign-offs
-remain recorded below; they do not approve this amendment.
+remain recorded below.
 
 ## 2. Motivation / problem
 
@@ -323,7 +323,7 @@ Functions host.
 - Only the selected harness's persistence implementation is imported,
   initialized, and cleaned up.
 
-**Supplied session IDs — architecture review complete; human sign-off pending**
+**Supplied session IDs — approved**
 
 Both HTTP caller-supplied session IDs (including chat and SSE) and normalized
 inbound MCP transport session IDs use open-or-create, matching MAF. The host
@@ -535,17 +535,16 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | --- | --- | --- | --- | --- | --- |
 | 32 | Native failure detail preservation | generic public Copilot errors with suppressed native details / original-exception parity with MAF | Preserve unexpected native startup, create/resume, turn, and cleanup exceptions with their Python type, traceback, and causality through existing runtime error handling. Accept that standard HTTP/SSE/MCP errors use original exception text and logs/telemetry can contain sensitive text embedded in exceptions regardless of `ENABLE_SENSITIVE_DATA`. Keep explicit configuration diagnostics, timeout/cancellation behavior, cleanup precedence, and disabled native SDK logging unchanged; do not add request, credential, or payload dumps. | Human (larohra) | 2026-10-19 |
 
-### Supplied-session-ID amendment — architecture review complete; human sign-off pending
+### Approved supplied-session-ID amendment
 
-The behavior choice below records the user's direction, not approval of this
-design amendment. Subject to review, it supersedes the resume-only treatment
-of supplied HTTP/Debug UI IDs and inbound MCP transport IDs when no native
-state exists. Earlier no-replacement-on-resume-failure, SDK-owned contents,
-history, error-preservation, and process-local concurrency contracts remain.
+The approved behavior below supersedes the resume-only treatment of supplied
+HTTP/Debug UI IDs and inbound MCP transport IDs when no native state exists.
+Earlier no-replacement-on-resume-failure, SDK-owned contents, history,
+error-preservation, and process-local concurrency contracts remain.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
-| 33 | Supplied-ID session opening | strict resume-only / storage-absence open-or-create / retry failed resume as create | Use open-or-create for both HTTP caller IDs and MCP transport IDs, matching MAF. Create with the requested ID only when typed storage listings confirm no state beyond empty host scaffolding; otherwise resume and let the SDK validate. Never retry failed resume as create or reset partial/corrupt state. The detailed presence-check design completed architecture review and remains pending human sign-off. | Human (larohra) | 2026-10-19 |
+| 33 | Supplied-ID session opening | strict resume-only / storage-absence open-or-create / retry failed resume as create | Use open-or-create for both HTTP caller IDs and MCP transport IDs, matching MAF. Create with the requested ID only when typed storage listings confirm no state beyond empty host scaffolding; otherwise resume and let the SDK validate. Never retry failed resume as create or reset partial/corrupt state. | Human (larohra) | 2026-10-19 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -564,38 +563,17 @@ history, error-preservation, and process-local concurrency contracts remain.
 | Harness cleanup | Verify resource-free runner creation/qualification, per-binding and clone isolation, concurrent runner caching, selected-harness-only provider/warning/observability/history ownership, legacy compaction warning/default behavior, public shutdown, and failed-turn session IDs on HTTP, chat, and SSE. |
 | Copilot telemetry | Cover direct/SSE, delegates, workflow leaves, non-HTTP and UI ingress; usage deduplication/accounting, tool ownership and ordering, incomplete timing, cancellation/error cleanup, both privacy modes, and unchanged MAF behavior. |
 
-### Supplied-ID amendment regression and acceptance coverage
+### Supplied-ID amendment behavioral acceptance
 
-Add a failing regression for first use of a fresh supplied ID before changing
-runtime behavior. Required coverage:
-
-- In `tests/test_copilot_session_fs.py` and the existing local/Blob backend
-  tests, prove empty-root and empty-workspace scaffolding detection with typed
-  listings. Cover a zero-byte file, an empty native directory, a nonempty
-  workspace, and partial/corrupt native state as present, without reading
-  contents or depending on native filenames. Cover workspace type mismatches
-  and malformed scaffolding as non-absence or errors, never safe create.
-- In `tests/test_copilot_execution.py`, prove absence selects exactly one
-  create with the requested ID and presence selects exactly one resume.
-  Failed resume must never call create, delete, reset, or repair state.
-  Storage initialization/listing, authentication/permission, type, and path
-  errors must propagate without native create. Preserve original exception
-  diagnostics and execution/cancellation-over-cleanup precedence.
-- Exercise first and repeated use of the same supplied ID through HTTP chat,
-  HTTP-trigger, SSE, and inbound MCP handlers, retaining transport-ID
-  normalization and response-ID behavior. Verify agent isolation for equal
-  session IDs, sequential continuation after restart or on another worker
-  sharing durable storage, and unchanged generated-session and disposable-leaf
-  creation.
-- Verify process-local same-session serialization includes the presence check
-  and native open. Cover deadline expiry while waiting for the lock or listing
-  storage, cancellation during listing/open, and cleanup. Do not infer
-  cross-worker serialization from these tests.
-- Keep the existing same-ID continuation E2E assertions for both harnesses;
-  they should pass unchanged. Do not weaken fixtures or expected assertions
-  to accommodate Copilot resume-only behavior. Separate offline regression
-  evidence from real Functions-host HTTP/MCP continuation evidence; this
-  amendment does not expand the provider matrix or deployed-host scope.
+- Fresh caller-supplied HTTP IDs and inbound MCP transport IDs open a new
+  session with the supplied identity when no durable state exists.
+- Continued supplied IDs preserve their existing session state across HTTP and
+  MCP entry points.
+- Existing, partial, or corrupt durable state is never reset, replaced, or
+  retried through a create fallback.
+- Storage initialization and state-classification failures remain explicit and
+  never authorize a new session or a fallback storage route.
+- MAF behavior remains unchanged.
 
 ## 7. Docs impact
 
@@ -616,14 +594,13 @@ runtime behavior. Required coverage:
 
 ## 8. Status & sign-off
 
-- **Status:** In review — supplied-session-ID amendment. The earlier feature
-  contract was finalized and implemented under the historical sign-offs below.
+- **Status:** Finalized. The supplied-session-ID behavioral contract received
+  human sign-off on 2026-10-19; the earlier feature contract remains governed
+  by the historical sign-offs below.
 - **Supplied-ID amendment review:** On 2026-10-19, larohra selected
   open-or-create for both HTTP caller IDs and inbound MCP transport IDs and
-  requested FRD review before implementation. Independent architecture review
-  completed on 2026-10-19 with **APPROVE-FOR-HUMAN-REVIEW** and no blocking
-  issues. Explicit human sign-off remains pending. Do not implement this
-  amendment until human sign-off; earlier sign-offs do not authorize it.
+  approved that behavioral direction after independent architecture review
+  completed with **APPROVE-FOR-HUMAN-REVIEW** and no blocking issues.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.
