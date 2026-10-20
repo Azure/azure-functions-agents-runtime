@@ -1,10 +1,10 @@
 ---
 frd: 0013
 title: Harness-neutral Durable Agent Loop
-status: In review
+status: Finalized
 author: harshivcodes
 created: 2026-10-14
-updated: 2026-10-19
+updated: 2026-10-20
 issues: []
 pull_requests: [#266]
 branch: harshivcodes/durable-agent-loop-changes
@@ -979,6 +979,7 @@ The feature contract is satisfied when:
 | 30 | Prompt-only skills | Reject all skills / allow scoped reads / allow scripts | Support selected read-only skill instructions and resources in V1; deny MAF script execution, Copilot `builtin:bash` and general filesystem access | Human; review recommendation | 2026-10-19 |
 | 31 | Sandbox tool exposure | Harness-native worker tools / runtime declaration-only schemas | Expose qualified sandbox operations as shared declaration-only tools and dispatch every invocation through a generation-fenced session workspace activity | Human; review recommendation | 2026-10-19 |
 | 32 | Cross-turn seed validation | Require the new active run/generation / validate the prior committed seed separately / replace the seed after every terminal outcome | Validate a terminal seed against the Entity's prior successfully completed turn, permit it only on the next initial request and retain it across failed, cancelled or timed-out turns | Human; Agent recommendation | 2026-10-19 |
+| 33 | Architecture approval | Continue architecture review / finalize the feature contract | Finalize the harness-neutral Durable Agent Loop contract for implementation | Human | 2026-10-20 |
 
 ## 6. Test plan
 
@@ -1081,5 +1082,6 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   stable operation identity, exact connector profiles, restored admission/API
   guarantees, deterministic deadlines, payload limits and bounded
   cancellation. Those corrections are incorporated in this revision.
-- **Human sign-off:** Pending. Status is `In review`; set `status: Finalized`
-  only after explicit human approval.
+- **Human sign-off:** Approved by @harshivcodes on 2026-10-20. Status is
+  `Finalized`; implementation may proceed through the repository feature
+  lifecycle.
