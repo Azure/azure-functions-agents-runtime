@@ -19,6 +19,32 @@ def test_hybrid_apim_client_uses_custom_subscription_header() -> None:
     assert client is not None
 
 
+def test_hybrid_apim_foundry_responses_route_adds_required_api_version() -> None:
+    manager = HybridApimClientManager(
+        base_url="https://example.test/project/openai",
+        audience=None,
+        subscription_key="private",
+    )
+
+    client, target = manager.build_chat_client_with_target("deployment")
+
+    assert client.client.default_query == {"api-version": "2025-03-01-preview"}
+    assert target.api_version == "2025-03-01-preview"
+
+
+def test_hybrid_apim_openai_v1_route_keeps_openai_compatible_shape() -> None:
+    manager = HybridApimClientManager(
+        base_url="https://example.test/project/openai/v1",
+        audience=None,
+        subscription_key="private",
+    )
+
+    client, target = manager.build_chat_client_with_target("deployment")
+
+    assert client.client.default_query == {}
+    assert target.api_version == "responses-v1"
+
+
 @pytest.mark.asyncio
 async def test_hybrid_apim_manager_close_is_idempotent() -> None:
     manager = HybridApimClientManager(

@@ -41,14 +41,26 @@ from azure_functions_agents.experimental.durable_loop_config import (
 )
 from azure_functions_agents.experimental.durable_loop_optimizer import (
     COMPILE_SEGMENT_DAG_TOOL_NAME,
+    ESTIMATED_STEP_OUTPUT_TOKENS,
     DecisionEvaluation,
     DurableSegmentOptimizer,
     HeuristicDecisionOneClient,
+    HttpDecisionOneClient,
+    ModelRateSource,
     ModelTier,
     PrefixCacheLedger,
+    RouteDecisionSource,
+    SegmentDagToolDispatcher,
     SegmentMode,
+    SegmentRouteDecision,
+    StepCostEstimate,
+    _bounded_safe_text,
+    _extract_user_goal,
     build_decision_one_payload,
+    deserialize_segment_route_decision,
+    model_token_rates,
     parse_decision_one_response,
+    serialize_segment_route_decision,
 )
 from azure_functions_agents.experimental.durable_loop_protocol import (
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
@@ -57,9 +69,11 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     DurableLoopRunStatus,
     DurableOrchestrationInputV1,
     DurableRunDocumentV1,
+    FrozenToolCatalogV1,
     FrozenToolDescriptorV1,
     MAFMessageBundleV1,
     ModelDecisionEnvelopeV1,
+    SandboxExecutionProfile,
     ToolBehavior,
     ToolProvenance,
     WorkingContextV1,
@@ -82,9 +96,41 @@ from azure_functions_agents.experimental.durable_loop_state import (
     InMemoryDurableLoopStateStore,
 )
 from azure_functions_agents.experimental.durable_loop_tools import (
+    DurableToolCatalogPort,
+    DurableToolCatalogSnapshot,
     DurableToolRegistry,
 )
 from azure_functions_agents.strict_json import canonical_json_bytes
+
+
+@pytest.mark.asyncio
+async def test_segment_dispatcher_preserves_admission_catalog_port() -> None:
+    registry = DurableToolRegistry()
+    snapshot = DurableToolCatalogSnapshot(
+        catalog=registry.catalog(policy_hash="a" * 64, package_hash="b" * 64),
+        package_hash="b" * 64,
+    )
+    calls: list[tuple[str, SandboxExecutionProfile]] = []
+
+    class CatalogRouter(DurableToolRegistry):
+        async def freeze_catalog(
+            self,
+            *,
+            policy_hash: str,
+            sandbox_profile: SandboxExecutionProfile,
+        ) -> DurableToolCatalogSnapshot:
+            calls.append((policy_hash, sandbox_profile))
+            return snapshot
+
+    dispatcher = SegmentDagToolDispatcher(CatalogRouter())
+
+    assert isinstance(dispatcher, DurableToolCatalogPort)
+    result = await dispatcher.freeze_catalog(
+        policy_hash="a" * 64,
+        sandbox_profile=SandboxExecutionProfile.RETAINED_SESSION,
+    )
+    assert result is snapshot
+    assert calls == [("a" * 64, SandboxExecutionProfile.RETAINED_SESSION)]
 
 
 class _RecordingOneStepProvider:
@@ -257,12 +303,108 @@ def test_decision_routing_flag_defaults_false_and_parses_env() -> None:
     assert enabled_settings.fast_model == "gpt-5.4-mini"
 
 
+def test_verified_model_rates_use_exact_model_identity() -> None:
+    luna = model_token_rates("gpt-6-luna", tier=ModelTier.FAST)
+    sol = model_token_rates("gpt-6.1-sol", tier=ModelTier.FRONTIER)
+    astra = model_token_rates("gpt-6-astra", tier=ModelTier.FRONTIER)
+
+    assert (
+        luna.input_microunits,
+        luna.cached_input_microunits,
+        luna.output_microunits,
+        luna.source,
+    ) == (
+        100_000,
+        10_000,
+        500_000,
+        ModelRateSource.AZURE_RETAIL_GLOBAL_STANDARD_SHORT_CONTEXT,
+    )
+    assert (
+        sol.input_microunits,
+        sol.cached_input_microunits,
+        sol.output_microunits,
+        sol.source,
+    ) == (
+        2_000_000,
+        100_000,
+        10_000_000,
+        ModelRateSource.AZURE_RETAIL_GLOBAL_STANDARD_SHORT_CONTEXT,
+    )
+    assert (
+        astra.input_microunits,
+        astra.cached_input_microunits,
+        astra.output_microunits,
+        astra.source,
+    ) == (
+        2_500_000,
+        250_000,
+        10_000_000,
+        ModelRateSource.ASSUMED_TIER_DEFAULT,
+    )
+
+
+def test_verified_rates_drive_estimated_and_recorded_costs() -> None:
+    ledger = PrefixCacheLedger()
+    catalog = DurableToolRegistry().catalog(
+        policy_hash="a" * 64,
+        package_hash="b" * 64,
+    )
+    estimate = ledger.estimate_step_cost(
+        run_id="run-estimate",
+        messages=({"role": "user", "contents": [{"type": "text", "text": "hi"}]},),
+        catalog=catalog,
+        frontier_model="gpt-6.1-sol",
+        fast_model="gpt-6-luna",
+        now=datetime(2026, 10, 20, tzinfo=UTC),
+    )
+
+    assert estimate.frontier_warm_tokens == 0
+    assert estimate.fast_warm_tokens == 0
+    assert estimate.frontier_cost_microunits == (
+        estimate.frontier_cold_tokens * 2_000_000
+        + ESTIMATED_STEP_OUTPUT_TOKENS * 10_000_000
+        + 999_999
+    ) // 1_000_000
+    assert estimate.fast_cost_microunits == (
+        estimate.fast_cold_tokens * 100_000
+        + ESTIMATED_STEP_OUTPUT_TOKENS * 500_000
+        + 999_999
+    ) // 1_000_000
+
+    recorded = ledger.record_step(
+        run_id="run-recorded",
+        model="gpt-6-luna",
+        tier=ModelTier.FAST,
+        messages=(),
+        input_tokens=1_000_000,
+        cached_tokens=250_000,
+        output_tokens=100_000,
+        decision_input_tokens=1_000_000,
+        emitted_dag=False,
+        now=datetime(2026, 10, 20, tzinfo=UTC),
+    )
+    assert recorded == 169_500
+
+
 def test_decision_one_payload_and_response_schema() -> None:
     payload = build_decision_one_payload(
         decision_model="msft-decision-1",
         state={"step_index": 0, "user_goal": "Triage all services"},
     )
     assert set(payload["questions"]) == {"dag_viable", "step_tier", "dag_tier"}
+    questions = payload["questions"]
+    assert isinstance(questions, dict)
+    assert "minimum sufficient configured tier" in questions["step_tier"]["instructions"]
+    assert "Greetings, small talk, acknowledgements" in (
+        questions["step_tier"]["criteria"]["fast"]
+    )
+    assert "no executable task" in questions["step_tier"]["criteria"]["frontier"]
+    assert "fully specified now as one fixed DAG" in (
+        questions["dag_viable"]["instructions"]
+    )
+    assert "Template dependencies alone do not require frontier" in (
+        questions["dag_tier"]["criteria"]["frontier"]
+    )
 
     parsed = parse_decision_one_response(
         {
@@ -292,6 +434,377 @@ def test_decision_one_payload_and_response_schema() -> None:
         dag_fast_probability=0.15,
         decision_input_tokens=320,
     )
+
+
+@pytest.mark.asyncio
+async def test_decision_state_is_grounded_bounded_and_excludes_private_content() -> None:
+    settings = DurableLoopSettings(
+        decision_routing_enabled=True,
+        fast_model="gpt-6-luna",
+        decision_model="msft-decision-1",
+    )
+    tools = tuple(
+        FrozenToolDescriptorV1(
+            name=f"tool_{index:02d}",
+            description=(
+                "tool-description-start token=tool-secret "
+                + ("d" * 2_000)
+                + " tool-description-end"
+                if index == 0
+                else "Independent read-only lookup. " + ("d" * 180)
+            ),
+            parameters={"additionalProperties": True, "type": "object"},
+            provenance=ToolProvenance.LOCAL,
+            behavior=ToolBehavior.READ_ONLY,
+            parallel_safe=True,
+        )
+        for index in range(70)
+    )
+    catalog = FrozenToolCatalogV1.create(
+        tools=tools,
+        policy_hash="1" * 64,
+        package_hash="2" * 64,
+    )
+    messages: tuple[dict[str, object], ...] = (
+        *(
+            {
+                "role": "user" if index % 2 == 0 else "assistant",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"turn-{index} " + ("x" * 5_000),
+                    }
+                ],
+            }
+            for index in range(14)
+        ),
+        {
+            "role": "tool",
+            "contents": [
+                {
+                    "type": "function_result",
+                    "name": "tool_00",
+                    "result": {
+                        "status": "succeeded",
+                        "password": "raw-tool-secret",
+                    },
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "Give a direct answer; password=hunter2",
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "contents": [
+                {"type": "reasoning", "summary": "hidden chain of thought"},
+                {"type": "text", "text": "Acknowledged. Bearer abc.def.ghi"},
+            ],
+        },
+    )
+    identity = create_run_identity(
+        session_id="sess-decision-state",
+        request_id="req-decision-state",
+        request_body={"prompt": "bounded state"},
+        owner_hash="a" * 64,
+        agent_slug="main",
+        agent_hash="b" * 64,
+        catalog_hash=catalog.catalog_hash,
+        deployment_hash="c" * 64,
+        tool_package_hash=catalog.package_hash,
+        policy_hash=catalog.policy_hash,
+        settings=settings,
+    )
+    bundle = MAFMessageBundleV1.create(
+        messages=messages,
+        maf_core_version="1.17.0",
+        provider="azure_openai_apim",
+        model="gpt-6.1-sol",
+        api_version="responses-v1",
+    )
+    request = OneStepModelRequest(
+        identity=identity,
+        step_index=0,
+        instructions=(
+            "INSTRUCTION-START token=instruction-secret "
+            + ("i" * 20_000)
+            + " INSTRUCTION-END"
+        ),
+        working_context=WorkingContextV1(
+            bundle=bundle,
+            compaction_generation=0,
+            source_audit_hash=bundle.bundle_hash,
+            source_start=0,
+            source_end=len(messages),
+            estimated_tokens=1000,
+        ),
+        catalog=catalog,
+        model_settings={},
+    )
+    decision_client = HeuristicDecisionOneClient()
+    optimizer = DurableSegmentOptimizer(
+        _RecordingOneStepProvider(()),
+        settings=settings,
+        decision_client=decision_client,
+    )
+
+    route = await optimizer.route_request(request)
+
+    assert route.mode is SegmentMode.STEP
+    assert route.tier is ModelTier.FAST
+    assert len(decision_client.requests) == 1
+    state = decision_client.requests[0]["state"]
+    assert isinstance(state, dict)
+    assert set(state) == {
+        "agent_instructions",
+        "agent_instructions_truncated",
+        "available_tools",
+        "completed_tools",
+        "configured_tiers",
+        "estimated_input_tokens",
+        "frontier_cache_warm",
+        "last_tool_status",
+        "omitted_available_tool_count",
+        "omitted_completed_tool_count",
+        "omitted_conversation_message_count",
+        "recent_conversation",
+        "step_index",
+        "truncated_conversation_message_count",
+        "truncated_tool_description_count",
+        "user_goal",
+        "user_goal_truncated",
+    }
+    assert state["configured_tiers"] == {
+        "fast": {"model": "gpt-6-luna"},
+        "frontier": {"model": "gpt-6.1-sol"},
+    }
+    assert len(state["agent_instructions"]) == 16_384
+    assert "INSTRUCTION-START" in state["agent_instructions"]
+    assert "INSTRUCTION-END" in state["agent_instructions"]
+    assert "...[truncated]..." in state["agent_instructions"]
+    assert "instruction-secret" not in state["agent_instructions"]
+    assert state["agent_instructions_truncated"] is True
+    assert state["user_goal"] == "Give a direct answer; password=<redacted>"
+    assert state["user_goal_truncated"] is False
+    recent = state["recent_conversation"]
+    assert isinstance(recent, list)
+    assert len(recent) == 8
+    assert sum(len(entry["text"]) for entry in recent) == 24_576
+    assert recent[-1] == {
+        "role": "assistant",
+        "text": "Acknowledged. Bearer <redacted>",
+    }
+    assert all("reasoning" not in entry["text"] for entry in recent)
+    assert all("hidden chain of thought" not in entry["text"] for entry in recent)
+    assert state["omitted_conversation_message_count"] == 8
+    assert state["truncated_conversation_message_count"] == 6
+    available_tools = state["available_tools"]
+    assert isinstance(available_tools, list)
+    assert len(available_tools) == 64
+    assert len(available_tools[0]["description"]) == 1_024
+    assert "tool-description-start" in available_tools[0]["description"]
+    assert "tool-description-end" in available_tools[0]["description"]
+    assert state["omitted_available_tool_count"] == 6
+    assert state["truncated_tool_description_count"] == 1
+    serialized_state = canonical_json_bytes(state).decode("utf-8")
+    assert "raw-tool-secret" not in serialized_state
+    assert "tool-secret" not in serialized_state
+    assert "hunter2" not in serialized_state
+    assert "abc.def.ghi" not in serialized_state
+
+
+def test_latest_user_goal_preserves_request_tail_when_truncated() -> None:
+    goal, truncated = _extract_user_goal(
+        (
+            {
+                "role": "user",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "LATEST-REQUEST-START "
+                            + ("u" * 9_000)
+                            + " LATEST-REQUEST-END"
+                        ),
+                    }
+                ],
+            },
+        )
+    )
+
+    assert truncated is True
+    assert len(goal) == 8_192
+    assert goal.startswith("LATEST-REQUEST-START ")
+    assert goal.endswith(" LATEST-REQUEST-END")
+    assert goal.count("...[truncated]...") == 1
+    marker_only, marker_only_truncated = _bounded_safe_text(
+        "abcdefghijklmnopqrstuvwxyz",
+        maximum_chars=5,
+    )
+    narrow, narrow_truncated = _bounded_safe_text(
+        "abcdefghijklmnopqrstuvwxyz",
+        maximum_chars=20,
+    )
+    assert marker_only_truncated is True
+    assert len(marker_only) == 5
+    assert narrow_truncated is True
+    assert len(narrow) == 20
+
+
+@pytest.mark.asyncio
+async def test_route_thresholds_and_single_inference_contract_are_unchanged() -> None:
+    class BoundaryDecisionClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def evaluate(
+            self,
+            payload: Mapping[str, object],
+        ) -> DecisionEvaluation:
+            del payload
+            self.calls += 1
+            return DecisionEvaluation(
+                dag_viable=0.70,
+                step_tier=ModelTier.FRONTIER,
+                step_fast_probability=0.0,
+                dag_tier=ModelTier.FAST,
+                dag_fast_probability=0.75,
+                decision_input_tokens=10,
+            )
+
+    settings = DurableLoopSettings(
+        decision_routing_enabled=True,
+        fast_model="gpt-6-luna",
+    )
+    catalog = FrozenToolCatalogV1.create(
+        tools=tuple(
+            FrozenToolDescriptorV1(
+                name=f"lookup_{index}",
+                description="Independent lookup.",
+                parameters={"additionalProperties": True, "type": "object"},
+                provenance=ToolProvenance.LOCAL,
+                behavior=ToolBehavior.READ_ONLY,
+                parallel_safe=True,
+            )
+            for index in range(2)
+        ),
+        policy_hash="1" * 64,
+        package_hash="2" * 64,
+    )
+    identity = create_run_identity(
+        session_id="sess-threshold",
+        request_id="req-threshold",
+        request_body={"prompt": "Check both"},
+        owner_hash="a" * 64,
+        agent_slug="main",
+        agent_hash="b" * 64,
+        catalog_hash=catalog.catalog_hash,
+        deployment_hash="c" * 64,
+        tool_package_hash=catalog.package_hash,
+        policy_hash=catalog.policy_hash,
+        settings=settings,
+    )
+    bundle = MAFMessageBundleV1.create(
+        messages=(
+            {
+                "role": "user",
+                "contents": [{"type": "text", "text": "Check both services"}],
+            },
+        ),
+        maf_core_version="1.17.0",
+        provider="azure_openai_apim",
+        model="gpt-6.1-sol",
+        api_version="responses-v1",
+    )
+    request = OneStepModelRequest(
+        identity=identity,
+        step_index=0,
+        instructions="Use the lookup tools.",
+        working_context=WorkingContextV1(
+            bundle=bundle,
+            compaction_generation=0,
+            source_audit_hash=bundle.bundle_hash,
+            source_start=0,
+            source_end=1,
+            estimated_tokens=10,
+        ),
+        catalog=catalog,
+        model_settings={},
+    )
+    decision_client = BoundaryDecisionClient()
+    optimizer = DurableSegmentOptimizer(
+        _RecordingOneStepProvider(()),
+        settings=settings,
+        decision_client=decision_client,
+    )
+
+    route = await optimizer.route_request(request)
+
+    assert decision_client.calls == 1
+    assert route.mode is SegmentMode.DAG
+    assert route.tier is ModelTier.FAST
+    assert route.reason == "decision_dag_viable:0.70"
+
+
+def test_route_decision_round_trips_for_durable_handoff() -> None:
+    decision = DecisionEvaluation(
+        dag_viable=0.2,
+        step_tier=ModelTier.FAST,
+        step_fast_probability=0.9,
+        dag_tier=ModelTier.FRONTIER,
+        dag_fast_probability=0.1,
+        decision_input_tokens=42,
+        source=RouteDecisionSource.LIVE,
+        http_status=200,
+        duration_ms=12.5,
+    )
+    route = SegmentRouteDecision(
+        run_id="run-route",
+        step_index=2,
+        mode=SegmentMode.STEP,
+        tier=ModelTier.FAST,
+        target_model="gpt-4.1-mini",
+        short_circuited=False,
+        reason="decision_fast_step:0.90",
+        source=RouteDecisionSource.LIVE,
+        cost_estimate=StepCostEstimate(
+            estimated_input_tokens=100,
+            frontier_warm_tokens=0,
+            frontier_cold_tokens=100,
+            frontier_cost_microunits=300,
+            fast_warm_tokens=0,
+            fast_cold_tokens=100,
+            fast_cost_microunits=30,
+            frontier_cache_warm=False,
+        ),
+        evaluation=decision,
+    )
+
+    value = serialize_segment_route_decision(route, request_hash="a" * 64)
+    request_hash, restored = deserialize_segment_route_decision(value)
+
+    assert request_hash == "a" * 64
+    assert restored == route
+
+
+@pytest.mark.asyncio
+async def test_http_decision_client_exposes_unconfigured_fallback() -> None:
+    evaluation = await HttpDecisionOneClient(endpoint_url="").evaluate(
+        build_decision_one_payload(
+            decision_model="msft-decision-1",
+            state={"step_index": 0},
+        )
+    )
+
+    assert evaluation.source is RouteDecisionSource.HEURISTIC
+    assert evaluation.fallback_reason == "endpoint_unconfigured"
+    assert evaluation.http_status is None
 
 
 @pytest.mark.asyncio
@@ -784,8 +1297,8 @@ def _assert_dag_route_guarantees(
     )
     step0_options = _durable_model_options(step0_request)
     assert step0_options["tool_choice"] == {
-        "type": "function",
-        "name": COMPILE_SEGMENT_DAG_TOOL_NAME,
+        "mode": "required",
+        "required_function_name": COMPILE_SEGMENT_DAG_TOOL_NAME,
     }
 
     step1_request = hybrid_provider.requests[1]
@@ -1136,4 +1649,3 @@ async def test_orchestrator_schedules_dag_waves_via_task_all_and_wave_activity(
         }
     finally:
         reset_durable_loop_activity_runtime_factory()
-

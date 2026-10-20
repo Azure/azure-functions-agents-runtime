@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -14,6 +15,7 @@ from azure_functions_agents.experimental.durable_loop_activities import (
     OneStepModelRequest,
     ScriptedModelStep,
     get_protocol_model,
+    resolve_durable_content_blob_binding,
 )
 from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_CONTENT_BLOB_URI_ENV,
@@ -30,6 +32,9 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     UsageV1,
     WorkingContextV1,
     canonical_hash,
+)
+from azure_functions_agents.experimental.durable_loop_receipts import (
+    BlobDurableKeyedDocumentStore,
 )
 from azure_functions_agents.experimental.durable_loop_tools import (
     DurableToolRegistry,
@@ -115,25 +120,105 @@ async def test_content_store_is_immutable_and_integrity_checked() -> None:
         await store.get_bytes(reference.model_copy(update={"sha256": _HASH}))
 
 
-def test_blob_content_store_requires_explicit_dedicated_configuration(
+@pytest.mark.parametrize("store_type", [BlobDurableContentStore, BlobDurableKeyedDocumentStore])
+@pytest.mark.parametrize("legacy_settings", [False, True])
+def test_blob_stores_use_host_connection_string(
     monkeypatch: pytest.MonkeyPatch,
+    store_type: type[BlobDurableContentStore] | type[BlobDurableKeyedDocumentStore],
+    legacy_settings: bool,
 ) -> None:
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
     monkeypatch.setenv(
         "AzureWebJobsStorage__blobServiceUri",
         "https://hoststorage.blob.core.windows.net",
     )
-    monkeypatch.delenv(DURABLE_LOOP_CONTENT_BLOB_URI_ENV, raising=False)
-    monkeypatch.delenv(DURABLE_LOOP_CONTENT_CONTAINER_ENV, raising=False)
+    if legacy_settings:
+        monkeypatch.setenv(
+            DURABLE_LOOP_CONTENT_BLOB_URI_ENV,
+            "https://content.blob.core.windows.net?sig=secret",
+        )
+        monkeypatch.setenv(DURABLE_LOOP_CONTENT_CONTAINER_ENV, "ignored-container")
+    else:
+        monkeypatch.delenv(DURABLE_LOOP_CONTENT_BLOB_URI_ENV, raising=False)
+        monkeypatch.delenv(DURABLE_LOOP_CONTENT_CONTAINER_ENV, raising=False)
 
-    with pytest.raises(DurableLoopContentError, match="CONTENT_BLOB_URI"):
-        BlobDurableContentStore.from_environment()
+    store = store_type.from_environment()
 
-    monkeypatch.setenv(
-        DURABLE_LOOP_CONTENT_BLOB_URI_ENV,
-        "https://content.blob.core.windows.net?sig=secret",
-    )
-    monkeypatch.setenv(DURABLE_LOOP_CONTENT_CONTAINER_ENV, "durable-content")
+    assert store._service_client.url == "http://127.0.0.1:10000/devstoreaccount1/"
+    assert store._container_name == "durable-loop-content"
+
+
+@pytest.mark.parametrize(
+    ("storage_client_id", "expected"),
+    [("host-identity", "host-identity"), (" ", "app-identity"), ("", "app-identity")],
+)
+def test_content_binding_uses_host_identity(
+    storage_client_id: str,
+    expected: str,
+) -> None:
+    binding = resolve_durable_content_blob_binding({
+        "AzureWebJobsStorage": " ",
+        "AzureWebJobsStorage__blobServiceUri": "https://hoststorage.blob.core.windows.net",
+        "AzureWebJobsStorage__clientId": storage_client_id,
+        "AZURE_CLIENT_ID": "app-identity",
+    })
+
+    assert binding.service_url == "https://hoststorage.blob.core.windows.net"
+    assert binding.client_id == expected
+    assert binding.connection_string is None
+
+
+def test_content_binding_requires_host_storage() -> None:
+    with pytest.raises(DurableLoopContentError, match="AzureWebJobsStorage"):
+        resolve_durable_content_blob_binding({
+            DURABLE_LOOP_CONTENT_BLOB_URI_ENV: "https://content.blob.core.windows.net",
+            DURABLE_LOOP_CONTENT_CONTAINER_ENV: "durable-content",
+        })
+
+
+def test_content_binding_rejects_credentials_in_identity_uri() -> None:
     with pytest.raises(DurableLoopContentError, match="credential-free HTTPS"):
+        resolve_durable_content_blob_binding({
+            "AzureWebJobsStorage__blobServiceUri": "https://host.blob.core.windows.net?sig=secret",
+        })
+
+
+@pytest.mark.parametrize("store_type", [BlobDurableContentStore, BlobDurableKeyedDocumentStore])
+def test_blob_stores_use_host_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    store_type: type[BlobDurableContentStore] | type[BlobDurableKeyedDocumentStore],
+) -> None:
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.setenv(
+        "AzureWebJobsStorage__blobServiceUri", "https://host.blob.core.windows.net"
+    )
+    monkeypatch.setenv("AzureWebJobsStorage__clientId", "host-identity")
+    with (
+        patch("azure.storage.blob.aio.BlobServiceClient") as client,
+        patch(
+            "azure_functions_agents.experimental.durable_loop_activities."
+            "build_async_credential_with_client_id"
+        ) as credential,
+    ):
+        store = store_type.from_environment()
+
+    credential.assert_called_once_with("host-identity")
+    client.assert_called_once_with(
+        account_url="https://host.blob.core.windows.net",
+        credential=credential.return_value,
+    )
+    assert store._service_client is client.return_value
+    assert store._container_name == "durable-loop-content"
+
+
+def test_invalid_host_connection_string_does_not_fall_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AzureWebJobsStorage", "invalid")
+    monkeypatch.setenv(
+        "AzureWebJobsStorage__blobServiceUri", "https://host.blob.core.windows.net"
+    )
+    with pytest.raises(DurableLoopContentError, match="not a usable Blob connection string"):
         BlobDurableContentStore.from_environment()
 
 

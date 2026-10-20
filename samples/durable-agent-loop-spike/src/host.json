@@ -4,7 +4,8 @@
   "telemetryMode": "OpenTelemetry",
   "logging": {
     "logLevel": {
-      "default": "Information"
+      "default": "Warning",
+      "AgentRuntime.Routing": "Information"
     }
   },
   "extensions": {

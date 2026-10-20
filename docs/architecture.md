@@ -98,8 +98,19 @@ A few boundaries are worth calling out explicitly:
   subset without references or regular expressions. Admission freezes the
   resolved model target, durable status exposes bounded token/cost/content and
   parked-time counters, accepted answers and cancellations use durable delivery
-  outboxes, and the content journal requires an explicit dedicated Blob origin
-  rather than silently reusing host-storage settings. Provider, endpoint, API,
+  outboxes, and the content journal uses only `AzureWebJobsStorage`, with
+  connection-string precedence over `AzureWebJobsStorage__blobServiceUri`.
+  Content and keyed documents share the `durable-loop-content` container;
+  Azurite is supported through the host connection string. Identity-based access
+  uses `AzureWebJobsStorage__clientId`, then `AZURE_CLIENT_ID`, then the default
+  credential chain. The old experimental content binding settings are ignored.
+  The durable-loop-only `experimental/durable_loop_packaging.py` adapter uses
+  the secure controller packager on Linux and a deterministic bounded ZIP of
+  an explicitly configured, trusted tool bundle for Windows development.
+  Windows capture rejects links/junctions and checks for tree mutation, but
+  does not claim the controller's descriptor-anchored, race-closed guarantees.
+  The general session-runtime packager remains Linux-only.
+  Provider, endpoint, API,
   and deployment bindings are revalidated per activity; cost caps require
   frozen pricing rates; per-call argument/result limits are enforced around
   dispatch; terminal idempotency receipts are retained until explicit expiry;
@@ -145,6 +156,34 @@ traffic, isolated local execution, and customer-owned content storage. DTS
 coordinates one model decision or tool result at a time; it does not carry raw
 prompts, reasoning, tool payloads, or workspace archives in orchestration
 history.
+
+When experimental decision routing is enabled, new runs use
+`durable_agent_turn_orchestrator_v4`. Before every model step it schedules the
+named `durable_agent_route_model_v1` activity, checks cancellation again, then
+passes that activity's immutable, content-free route receipt to
+`durable_agent_model_step_v1`. The model activity applies the frozen model tier
+and DAG mode to the raw provider; it does not call Decision-1 again, including
+on foreground streaming or an orchestrator-level model retry. Older
+orchestrator versions retain their original inline-routing behavior so existing
+histories remain replayable. Routing receipts are first-writer-wins in the
+existing keyed-document store. Prefix-cache and cost estimates remain
+conservative spike estimates rather than durable billing facts. The bounded
+per-run watermark, last routed model, and last-DAG guard are checkpointed in
+each immutable run document, then restored by both routing and model
+activities; worker memory is only a transient view of that committed state.
+The routing activity projects deterministic, budgeted Decision-1 context from
+agent instructions, recent user/assistant text, tool descriptions and
+capabilities, completed-tool names/status, configured tier model names, and
+cost/cache facts. It excludes reasoning and tool-result bodies, applies
+best-effort credential redaction, retains both the head and tail when an
+application character budget truncates text, and reports truncation separately
+from whole-item omission. The latest user goal is budgeted independently so an
+oversized recent assistant message cannot displace the active request. These
+budgets are payload controls, not asserted Decision-1 token or context limits.
+The minimum-sufficient-tier and fixed-DAG policy remain in the Decision-1
+question rubric rather than conversation data. The existing `0.70` DAG and
+`0.75` fast-confidence gates remain local route-contract checks after the
+single Decision-1 inference.
 
 ![Durable agent loop request flow](diagrams/durable-agent-loop-request-flow.svg)
 

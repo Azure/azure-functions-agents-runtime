@@ -178,6 +178,69 @@ def _provider_request() -> OneStepModelRequest:
     )
 
 
+def _provider_request_with_forced_tool() -> OneStepModelRequest:
+    request = _provider_request()
+    descriptor = FrozenToolDescriptorV1(
+        name="lookup",
+        description="Lookup.",
+        parameters={
+            "additionalProperties": False,
+            "properties": {"region": {"type": "string"}},
+            "required": ["region"],
+            "type": "object",
+        },
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.READ_ONLY,
+    )
+    return replace(
+        request,
+        catalog=FrozenToolCatalogV1.create(
+            tools=(descriptor,),
+            policy_hash=request.identity.policy_hash,
+            package_hash=request.identity.tool_package_hash,
+        ),
+        model_settings={"_force_tool_name": "lookup"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_maf_provider_uses_framework_forced_tool_choice() -> None:
+    client = _OneStepChatClient(
+        [
+            Content.from_function_call(
+                "call-1",
+                "lookup",
+                arguments={"region": "westus3"},
+            )
+        ]
+    )
+
+    await MafOneStepModelProvider(_ClientManager(client)).run_one_step(
+        _provider_request_with_forced_tool()
+    )
+
+    assert client.received_options[0]["tool_choice"] == {
+        "mode": "required",
+        "required_function_name": "lookup",
+    }
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "none", "required"])
+@pytest.mark.asyncio
+async def test_runtime_maf_provider_preserves_framework_tool_choice_modes(
+    tool_choice: str,
+) -> None:
+    client = _OneStepChatClient([Content.from_text("done")], finish_reason="stop")
+    request = replace(
+        _provider_request_with_forced_tool(),
+        model_settings={"tool_choice": tool_choice},
+    )
+
+    await MafOneStepModelProvider(_ClientManager(client)).run_one_step(request)
+
+    assert client.received_options[0]["tool_choice"] == tool_choice
+
+
 def test_target_maf_versions_are_exact() -> None:
     assert version("agent-framework-core") == "1.17.0"
     assert version("agent-framework-openai") == "1.14.2"
@@ -616,7 +679,7 @@ async def test_real_openai_responses_client_sends_one_request_per_invocation() -
             estimated_tokens=4,
         ),
         catalog=catalog,
-        model_settings={},
+        model_settings={"_force_tool_name": "lookup"},
     )
 
     try:
@@ -634,6 +697,10 @@ async def test_real_openai_responses_client_sends_one_request_per_invocation() -
     assert "previous_response_id" not in requests[0]
     assert requests[0]["instructions"] == "Choose a tool."
     assert requests[0]["tools"][0]["name"] == "lookup"
+    assert requests[0]["tool_choice"] == {
+        "type": "function",
+        "name": "lookup",
+    }
     assert decision.tool_calls[0].arguments == {"region": "westus3"}
     assert decision.response_id_hash is not None
     assert "resp_1" not in decision.model_dump_json()

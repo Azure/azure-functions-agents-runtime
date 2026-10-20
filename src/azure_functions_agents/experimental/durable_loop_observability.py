@@ -17,6 +17,7 @@ class DurableLoopPhase(StrEnum):
     """Bounded progress phases emitted by loop activities."""
 
     RUN = "run"
+    ROUTING = "routing"
     MODEL_STEP = "model_step"
     MODEL_START = "model_start"
     MODEL_POLL = "model_poll"

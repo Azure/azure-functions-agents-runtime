@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -13,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .._logger import logger
 from ..config.paths import get_app_root
-from ..controller.package import CapturedContentPackage, get_content_package
+from ..controller.package import CapturedContentPackage
 from ..strict_json import canonical_json_bytes
 from ..transport.manifest import ExpectedSandboxManifestBinding
 from ..transport.ports import SandboxSessionProvider
@@ -33,6 +34,7 @@ from .durable_loop_observability import (
     DurableLoopPhase,
     DurableLoopTimer,
 )
+from .durable_loop_packaging import get_durable_tool_package
 from .durable_loop_protocol import (
     ContentRefV1,
     DurableFaultProfile,
@@ -323,7 +325,7 @@ class DurableAcaSandboxLane:
         self._content = content
         self._receipts = receipts
         self._provider_factory = provider_factory or _provider_factory(settings)
-        self._package_factory = package_factory or get_content_package
+        self._package_factory = package_factory or self._default_package_factory
         self._faults = faults or DurableOneShotFaults(
             receipts,
             enabled=loop_settings.fault_injection_enabled,
@@ -337,6 +339,14 @@ class DurableAcaSandboxLane:
         self._catalog_manifest: HybridToolManifest | None = None
         self._catalog_package: CapturedContentPackage | None = None
         self._catalog_package_ref: ContentRefV1 | None = None
+
+    async def _default_package_factory(self, root: Path) -> CapturedContentPackage:
+        if sys.platform == "win32" and self._settings.tool_bundle_root is None:
+            raise DurableSandboxError(
+                "Windows durable-loop development requires "
+                "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT."
+            )
+        return await get_durable_tool_package(root)
 
     async def discover(
         self,

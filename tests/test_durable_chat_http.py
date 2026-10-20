@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from azurefunctions.extensions.http.fastapi import Request
+from pydantic import BaseModel, ValidationError
 
 from azure_functions_agents.config.schema import EndpointAuthConfig, EntraAuthConfig
 from azure_functions_agents.experimental import durable_chat_http, durable_loop_http
@@ -50,6 +51,27 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     canonical_hash,
 )
 from azure_functions_agents.experimental.hybrid_config import HYBRID_SANDBOX_GROUP_ENV
+
+
+def test_initialization_diagnostics_include_frames_and_redact_exception_values() -> None:
+    class Document(BaseModel):
+        count: int
+
+    try:
+        try:
+            Document.model_validate({"count": "secret-rejected-value"})
+        except ValidationError as exc:
+            raise ValueError("secret-wrapper-message") from exc
+    except ValueError as exc:
+        details = durable_loop_http._chat_initialization_error_details(exc)
+
+    assert [item["error_type"] for item in details] == ["ValueError", "ValidationError"]
+    assert details[0]["frames"]
+    assert details[1]["validation_errors"] == [
+        {"field": ("count",), "type": "int_parsing"}
+    ]
+    assert "secret-rejected-value" not in str(details)
+    assert "secret-wrapper-message" not in str(details)
 
 
 class _App:

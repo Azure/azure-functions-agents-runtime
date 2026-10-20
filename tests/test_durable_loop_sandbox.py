@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from azure_functions_agents.controller.package import CapturedContentPackage
+from azure_functions_agents.experimental import durable_loop_packaging, durable_loop_sandbox
 from azure_functions_agents.experimental.durable_chat_execution_observer import (
     DurableChatExecutionContext,
     DurableChatExecutionObserver,
@@ -48,6 +49,7 @@ from azure_functions_agents.experimental.durable_loop_receipts import (
 from azure_functions_agents.experimental.durable_loop_sandbox import (
     DurableAcaSandboxLane,
     DurableSandboxCapacityCoordinator,
+    DurableSandboxError,
 )
 from azure_functions_agents.experimental.hybrid_config import HybridSandboxSettings
 from azure_functions_agents.experimental.hybrid_executor import (
@@ -247,6 +249,46 @@ def _settings() -> HybridSandboxSettings:
         drain_timeout_seconds=5,
         orphan_age_seconds=1200,
     )
+
+
+@pytest.mark.asyncio
+async def test_windows_catalog_discovery_captures_real_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(durable_loop_packaging, "_WINDOWS", True)
+    (tmp_path / "hello.py").write_bytes(b"def hello(): return 'hello'\n")
+    delivered = []
+
+    async def acquire(_cls, _settings, *, provider_factory, package_factory):
+        delivered.append(await package_factory(tmp_path))
+        return _Lease(0)
+
+    monkeypatch.setattr(InvocationSandboxLease, "acquire", classmethod(acquire))
+    lane = DurableAcaSandboxLane(
+        settings=replace(_settings(), tool_bundle_root=tmp_path),
+        loop_settings=DurableLoopSettings(),
+        content=InMemoryDurableContentStore(),
+        receipts=InMemoryDurableKeyedDocumentStore(),
+    )
+    tools, package_hash = await lane.discover()
+    assert [tool.name for tool in tools] == ["write_file"]
+    assert len(delivered) == 1
+    assert delivered[0].digest == "sha256:" + package_hash
+
+
+@pytest.mark.asyncio
+async def test_windows_default_capture_requires_explicit_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(durable_loop_sandbox.sys, "platform", "win32")
+    lane = DurableAcaSandboxLane(
+        settings=_settings(),
+        loop_settings=DurableLoopSettings(),
+        content=InMemoryDurableContentStore(),
+        receipts=InMemoryDurableKeyedDocumentStore(),
+    )
+    with pytest.raises(DurableSandboxError, match="HYBRID_TOOL_BUNDLE_ROOT"):
+        await lane.discover()
 
 
 def _request(

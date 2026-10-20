@@ -25,6 +25,7 @@ DURABLE_LOOP_SCHEMA_VERSION: Literal["1"] = "1"
 DURABLE_LOOP_ORCHESTRATOR_V1_NAME = "durable_agent_turn_orchestrator_v1"
 DURABLE_LOOP_ORCHESTRATOR_V2_NAME = "durable_agent_turn_orchestrator_v2"
 DURABLE_LOOP_ORCHESTRATOR_V3_NAME = "durable_agent_turn_orchestrator_v3"
+DURABLE_LOOP_ORCHESTRATOR_V4_NAME = "durable_agent_turn_orchestrator_v4"
 MAX_DURABLE_ENVELOPE_BYTES = 32 * 1024
 MAX_MAF_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_MAF_BUNDLE_MESSAGES = 4096
@@ -38,6 +39,7 @@ MAX_HUMAN_CHOICES = 20
 MAX_HUMAN_CHOICE_CHARS = 256
 MAX_HUMAN_SCHEMA_DEPTH = 8
 MAX_HUMAN_SCHEMA_NODES = 128
+MAX_SEGMENT_OPTIMIZER_WATERMARKS = 8
 
 _OPAQUE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
@@ -482,6 +484,9 @@ class ModelDecisionEnvelopeV1(_DurableLoopModel):
     usage: UsageV1 = UsageV1()
     finish_reason: Annotated[str, Field(max_length=128)] | None = None
     attempts: Annotated[int, Field(ge=1, le=16)] = 1
+    provider_reported_model: Annotated[str, Field(min_length=1, max_length=256)] | None = (
+        None
+    )
 
     @model_validator(mode="after")
     def validate_decision(self) -> Self:
@@ -777,6 +782,46 @@ class CheckpointStateV1(_DurableLoopModel):
             raise ValueError("checkpoint audit head does not match the audit bundle")
         if self.working_context.source_audit_hash != self.audit_head_hash:
             raise ValueError("working context does not bind to the checkpoint audit head")
+        return self
+
+
+class PrefixCacheWatermarkV1(_DurableLoopModel):
+    """One durable, conservative prompt-cache watermark."""
+
+    schema_version: SchemaVersion = DURABLE_LOOP_SCHEMA_VERSION
+    model: Annotated[str, Field(min_length=1, max_length=256)]
+    message_count: Annotated[int, Field(ge=0, le=MAX_MAF_BUNDLE_MESSAGES)]
+    prefix_hash: _Sha256
+    input_tokens: _NonNegativeInt
+    cached_tokens: _NonNegativeInt
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def validate_watermark(self) -> Self:
+        if self.cached_tokens > self.input_tokens:
+            raise ValueError("cached tokens cannot exceed input tokens")
+        _as_utc(self.updated_at, "updated_at")
+        return self
+
+
+class SegmentOptimizerStateV1(_DurableLoopModel):
+    """Bounded optimizer state committed with the immutable run document."""
+
+    schema_version: SchemaVersion = DURABLE_LOOP_SCHEMA_VERSION
+    watermarks: Annotated[
+        tuple[PrefixCacheWatermarkV1, ...],
+        Field(max_length=MAX_SEGMENT_OPTIMIZER_WATERMARKS),
+    ] = ()
+    last_routed_model: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+    last_step_was_dag: bool = False
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        models = [watermark.model for watermark in self.watermarks]
+        if len(models) != len(set(models)):
+            raise ValueError("optimizer watermarks must have unique models")
+        if len(canonical_json_bytes(self.model_dump(mode="json"))) > MAX_DURABLE_ENVELOPE_BYTES:
+            raise ValueError("optimizer state exceeds the byte limit")
         return self
 
 
@@ -1124,6 +1169,10 @@ class DurableRunDocumentV1(_DurableLoopModel):
     plan: DurableLoopPlanDocumentV1
     checkpoint: CheckpointStateV1
     pending_decision: ModelDecisionEnvelopeV1 | None = None
+    optimizer_state: SegmentOptimizerStateV1 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class DurableOrchestrationInputV1(_DurableLoopModel):
@@ -1188,6 +1237,11 @@ class ModelStepActivityResultV1(_DurableLoopModel):
     error: ErrorEnvelopeV1 | None = None
     usage: UsageV1 = UsageV1()
     written_bytes: _NonNegativeInt = 0
+    requested_model: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+    selected_model: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+    provider_reported_model: Annotated[str, Field(min_length=1, max_length=256)] | None = (
+        None
+    )
 
     @model_validator(mode="after")
     def validate_model_step_result(self) -> Self:

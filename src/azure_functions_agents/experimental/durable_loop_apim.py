@@ -38,6 +38,7 @@ from .durable_loop_observability import (
 )
 from .durable_loop_protocol import (
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
     BackgroundPollResultV1,
     BackgroundStartDisposition,
     BackgroundStartResultV1,
@@ -69,6 +70,7 @@ _DEMO_FAULT_HEADER = "x-af-demo-fault"
 _DEMO_MODEL_429_VALUE = "model-429-once"
 _MAX_PROVIDER_BODY_BYTES = 8 * 1024 * 1024
 _TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_SAFE_SERVICE_ERROR_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 class ApimResponsesError(RuntimeError):
@@ -81,12 +83,19 @@ class ApimResponsesError(RuntimeError):
         status_code: int | None = None,
         retry_after_seconds: float | None = None,
         ambiguous: bool = False,
+        service_code: str | None = None,
     ) -> None:
-        super().__init__(code)
+        details = [code]
+        if status_code is not None:
+            details.append(f"status_code={status_code}")
+        if service_code is not None:
+            details.append(f"service_code={service_code}")
+        super().__init__(" ".join(details))
         self.code = code
         self.status_code = status_code
         self.retry_after_seconds = retry_after_seconds
         self.ambiguous = ambiguous
+        self.service_code = service_code
 
 
 @runtime_checkable
@@ -1126,6 +1135,9 @@ def _decision_from_provider_payload(  # noqa: PLR0912, PLR0915
     if not calls and (final_text is None or not final_text.strip()):
         raise DurableLoopModelError("provider response contains no final decision")
     response_id = _required_text(payload.get("id"), "provider response ID")
+    provider_reported_model = _optional_text(payload.get("model"))
+    if provider_reported_model is not None and len(provider_reported_model) > 256:
+        provider_reported_model = None
     return ModelDecisionEnvelopeV1(
         run_id=operation.run_id,
         step_index=operation.step_index,
@@ -1138,6 +1150,7 @@ def _decision_from_provider_payload(  # noqa: PLR0912, PLR0915
         usage=usage,
         finish_reason="tool_calls" if calls else "stop",
         attempts=max(1, operation.poll_count + 1),
+        provider_reported_model=provider_reported_model,
     )
 
 
@@ -1236,7 +1249,10 @@ def _cross_activity_429(
     headers = client_kwargs.get("extra_headers")
     return (
         request.identity.orchestration_version
-        == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+        in {
+            DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+            DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
+        }
         and request.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
         and isinstance(error, ApimResponsesError)
         and error.status_code == 429
@@ -1279,6 +1295,7 @@ def _normalized_model_exception(exc: Exception) -> Exception:
                 "model_throttled" if status == 429 else "model_request_failed",
                 status_code=status,
                 retry_after_seconds=_retry_after(headers),
+                service_code=_safe_service_code(getattr(current, "code", None)),
             )
         inner = getattr(current, "inner_exception", None)
         current = (
@@ -1287,6 +1304,12 @@ def _normalized_model_exception(exc: Exception) -> Exception:
             else current.__cause__
         )
     return exc
+
+
+def _safe_service_code(value: object) -> str | None:
+    if not isinstance(value, str) or not _SAFE_SERVICE_ERROR_CODE.fullmatch(value):
+        return None
+    return value
 
 
 def _retryable_exception(exc: Exception) -> bool:

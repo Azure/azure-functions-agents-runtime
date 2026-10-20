@@ -40,6 +40,8 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
+    DURABLE_LOOP_ROUTING_ACTIVITY_NAME,
     DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
     DURABLE_LOOP_SESSION_ENTITY_NAME,
     DURABLE_LOOP_TOOL_ACTIVITY_NAME,
@@ -108,6 +110,9 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
     assert functions[DURABLE_LOOP_ORCHESTRATOR_V3_NAME] == [
         "orchestrationTrigger"
     ]
+    assert functions[DURABLE_LOOP_ORCHESTRATOR_V4_NAME] == [
+        "orchestrationTrigger"
+    ]
     assert functions[DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME] == [
         "orchestrationTrigger"
     ]
@@ -121,6 +126,7 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         "orchestrationTrigger"
     ]
     assert functions[DURABLE_LOOP_MODEL_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_ROUTING_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_CLEANUP_ACTIVITY_NAME] == ["activityTrigger"]
@@ -147,11 +153,13 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         DURABLE_LOOP_ORCHESTRATOR_NAME,
         DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
         DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+        DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
         DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
         DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
         DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME,
         DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
         DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+        DURABLE_LOOP_ROUTING_ACTIVITY_NAME,
         DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
         DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
         DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
@@ -221,6 +229,68 @@ def test_v3_model_retry_schedules_two_explicit_activities() -> None:
         ),
     ]
     assert context.timers == [now + timedelta(seconds=1)]
+
+
+def test_model_retry_reuses_frozen_route() -> None:
+    now = datetime.now(UTC)
+
+    class Context:
+        current_utc_datetime = now
+
+        def __init__(self) -> None:
+            self.activity_calls: list[tuple[str, object]] = []
+
+        def call_activity(self, name: str, input_: object) -> object:
+            self.activity_calls.append((name, input_))
+            return ("activity", len(self.activity_calls))
+
+        def create_timer(self, _fire_at: datetime) -> object:
+            return ("timer", 1)
+
+    class Reference:
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {"object_id": "run-document"}
+
+    context = Context()
+    current = SimpleNamespace(
+        identity=SimpleNamespace(
+            active_deadline=now + timedelta(minutes=5),
+            absolute_deadline=now + timedelta(hours=1),
+        ),
+        parked_seconds=0.0,
+        run_document_ref=Reference(),
+    )
+    route = {"request_hash": "a" * 64}
+    orchestration = _call_model_activity(
+        context,
+        current,
+        retry_once=True,
+        route=route,
+    )
+
+    next(orchestration)
+    orchestration.throw(RuntimeError("first activity failed"))
+    orchestration.send(None)
+    with pytest.raises(StopIteration):
+        orchestration.send({"result": "ok"})
+
+    assert context.activity_calls == [
+        (
+            DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+            {
+                "route": route,
+                "run_document_ref": {"object_id": "run-document"},
+            },
+        ),
+        (
+            DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+            {
+                "route": route,
+                "run_document_ref": {"object_id": "run-document"},
+            },
+        ),
+    ]
 
 
 def test_registered_durable_binding_annotations_are_worker_compatible(

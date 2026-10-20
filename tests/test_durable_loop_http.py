@@ -10,6 +10,7 @@ from typing import Any
 
 import azure.durable_functions as df
 import pytest
+from azure.durable_functions.models.DurableOrchestrationStatus import DurableOrchestrationStatus
 from azurefunctions.extensions.http.fastapi import Response
 
 from azure_functions_agents import app as app_module
@@ -29,6 +30,7 @@ from azure_functions_agents.experimental.durable_loop_config import (
 )
 from azure_functions_agents.experimental.durable_loop_http import (
     _authorized_owner,
+    _authorized_status,
     _json_response,
     _owner_hash,
     _persist_run_input,
@@ -51,7 +53,7 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
-    DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
     DurableLoopActivityRuntime,
     apply_session_entity_operation,
     get_durable_loop_activity_runtime,
@@ -64,6 +66,43 @@ from azure_functions_agents.experimental.durable_loop_tools import (
 )
 from azure_functions_agents.registration._auth import AuthError, resolve_owner_principal
 from azure_functions_agents.session_state import FunctionAppPrincipal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "warns"),
+    [
+        (None, False),
+        (DurableOrchestrationStatus(), False),
+        (SimpleNamespace(input_=None), False),
+        (SimpleNamespace(input_={"invalid": True}), True),
+    ],
+)
+async def test_status_unavailable_or_invalid_input_returns_owner_safe_not_found(
+    status: object,
+    warns: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from azure_functions_agents.experimental import durable_loop_http
+
+    monkeypatch.setattr(
+        durable_loop_http, "_authorized_owner", lambda *_args: FunctionAppPrincipal()
+    )
+    monkeypatch.setattr(durable_loop_http, "_path_parameter", lambda *_args: "run-missing")
+
+    class Client:
+        async def get_status(self, run_id: str, *, show_input: bool) -> object:
+            assert run_id == "run-missing"
+            assert show_input
+            return status
+
+    response = await _authorized_status(object(), Client(), EndpointAuthConfig())
+
+    assert isinstance(response, Response)
+    assert response.status_code == 404
+    assert json.loads(response.body) == {"error": "run_not_found"}
+    assert ("input was rejected" in caplog.text) is warns
 
 
 @pytest.mark.parametrize(
@@ -700,6 +739,10 @@ async def test_private_start_profiles_are_strict_and_gate_controlled(
     monkeypatch.setenv(DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV, "true")
     monkeypatch.setenv(DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV, "true")
     monkeypatch.setenv(DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV, "true")
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_DECISION_ROUTING_ENABLED",
+        "true",
+    )
     enabled_root = tmp_path / "enabled"
     enabled_root.mkdir()
     _write_agent(enabled_root)
@@ -744,9 +787,9 @@ async def test_private_start_profiles_are_strict_and_gate_controlled(
     )
     assert (
         durable_input.identity.orchestration_version
-        == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+        == DURABLE_LOOP_ORCHESTRATOR_V4_NAME
     )
-    assert client.starts[-1][0] == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+    assert client.starts[-1][0] == DURABLE_LOOP_ORCHESTRATOR_V4_NAME
     document = await get_protocol_model(
         runtime.content,
         durable_input.run_document_ref,

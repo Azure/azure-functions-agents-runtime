@@ -53,6 +53,16 @@ classifies as **system logs** (emitted with `customer_app_insight = false`), so 
 app's `traces`. `host.json` `logLevel` does **not** surface them, and worker-side `DEBUG` would
 require the `PYTHON_ENABLE_DEBUG_LOGGING` app setting. This is by design.
 
+The experimental durable routing spike is a narrow exception. It uses the
+customer-visible `AgentRuntime.Routing` category so operators can see the
+selected source, model, tier, mode, bounded reason, estimated cache/cost
+figures, fallback status, duration, and hashed run correlation. Configure only
+that category at `Information` while keeping the default at `Warning`.
+Successful routes log at `Information`; heuristic fallback caused by a live
+Decision-1 failure logs at `Warning`. Route spans carry the same content-free
+fields under `af.durable_loop.routing.*`, while route metrics keep only bounded
+phase/outcome/provenance dimensions.
+
 ACA reconciliation and reclaim audit records are the narrow exception: they are emitted as short
 runtime spans with `af.sandbox.*` attributes, so they are queryable in `AppDependencies`. Their
 companion internal log lines remain system-only; do not query `AppTraces` for either event.

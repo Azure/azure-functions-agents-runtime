@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -49,6 +52,7 @@ from .durable_loop_config import DurableLoopSettings
 from .durable_loop_execution import DurableLoopExecutionBinding
 from .durable_loop_observability import (
     DurableLoopPhase,
+    durable_loop_run_correlation,
     start_durable_loop_activity_span,
 )
 from .durable_loop_protocol import (
@@ -96,6 +100,7 @@ DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME = "durable_agent_admission_v1"
 DURABLE_LOOP_ORCHESTRATOR_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V1_NAME
 DURABLE_LOOP_ORCHESTRATOR_V2_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V2_NAME
 DURABLE_LOOP_ORCHESTRATOR_V3_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+DURABLE_LOOP_ORCHESTRATOR_V4_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V4_NAME
 DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME = "durable_agent_human_input_outbox_v1"
 DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME = (
     "durable_agent_human_delivery_outbox_v1"
@@ -106,6 +111,7 @@ DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME = (
 DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME = "durable_agent_control_v1"
 DURABLE_LOOP_SESSION_ENTITY_NAME = "durable_agent_session_entity_v1"
 DURABLE_LOOP_MODEL_ACTIVITY_NAME = "durable_agent_model_step_v1"
+DURABLE_LOOP_ROUTING_ACTIVITY_NAME = "durable_agent_route_model_v1"
 DURABLE_LOOP_TOOL_ACTIVITY_NAME = "durable_agent_tool_step_v1"
 DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME = "durable_agent_sandbox_tool_v1"
 DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME = "durable_agent_mcp_tool_v1"
@@ -124,6 +130,7 @@ DURABLE_LOOP_CANCEL_EVENT_NAME = "durable_agent_cancel_v1"
 _MAX_ENTITY_IDEMPOTENCY_RECEIPTS = 128
 _MAX_ENTITY_HUMAN_INPUT_RECEIPTS = 64
 _MAX_ENTITY_ABORT_RECEIPTS = 64
+_routing_logger = logging.getLogger("AgentRuntime.Routing")
 
 
 class _UnavailableToolDispatcher:
@@ -173,6 +180,8 @@ class DurableLoopActivityRuntime:
     compactor: DeterministicContextCompactor
     content: DurableContentStore
     background_model: BackgroundModelProvider | None = None
+    route_optimizer: Any | None = None
+    route_receipts: Any | None = None
     faults: Any | None = None
     human_events: HumanEventDeliveryPort = field(
         default_factory=_UnavailableHumanEventDelivery
@@ -236,6 +245,7 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
             control_base_url=durable_model_control_base_url(),
         )
         model: OneStepModelProvider = apim_model
+        route_optimizer = None
         if settings.decision_routing_enabled:
             from .durable_loop_optimizer import (
                 DECISION_SYSTEMONE_PATH,
@@ -248,7 +258,7 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
                 manager.model_base_url.rstrip("/").removesuffix("/openai/v1")
                 + DECISION_SYSTEMONE_PATH
             )
-            model = DurableSegmentOptimizer(
+            route_optimizer = DurableSegmentOptimizer(
                 apim_model,
                 settings=settings,
                 decision_client=HttpDecisionOneClient(
@@ -273,6 +283,8 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
                 and not settings.decision_routing_enabled
                 else None
             ),
+            route_optimizer=route_optimizer,
+            route_receipts=receipts,
             tools=tools,
             compactor=DeterministicContextCompactor(),
             content=content,
@@ -625,6 +637,22 @@ def register_durable_loop_blueprint(app: func.FunctionApp) -> None:
             )
         )
 
+    @blueprint.orchestration_trigger(  # type: ignore[untyped-decorator]
+        context_name="context",
+        orchestration=DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
+    )
+    def durable_agent_turn_orchestrator_v4(
+        context: df.DurableOrchestrationContext,
+    ) -> Any:
+        return (
+            yield from _run_registered_durable_loop(
+                context,
+                tool_activity_name_for_call=_provenance_tool_activity_name,
+                retry_first_model_activity=True,
+                route_before_model=True,
+            )
+        )
+
     app.register_blueprint(blueprint)
 
 
@@ -633,6 +661,7 @@ def _run_registered_durable_loop(
     *,
     tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str],
     retry_first_model_activity: bool = False,
+    route_before_model: bool = False,
 ) -> Any:
     payload = DurableOrchestrationInputV1.model_validate_json(
         canonical_json_bytes(context.get_input())
@@ -649,6 +678,7 @@ def _run_registered_durable_loop(
                 payload,
                 tool_activity_name_for_call=tool_activity_name_for_call,
                 retry_first_model_activity=retry_first_model_activity,
+                route_before_model=route_before_model,
             )
         )
     except Exception:
@@ -877,6 +907,196 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
+        activity=DURABLE_LOOP_ROUTING_ACTIVITY_NAME,
+    )
+    @_with_function_trace_context
+    async def durable_agent_route_model_v1(  # noqa: PLR0915
+        payload: dict,  # type: ignore[type-arg]
+    ) -> dict[str, object]:
+        from .durable_loop_observability import (
+            DurableLoopOutcome,
+            record_durable_loop_event,
+        )
+        from .durable_loop_optimizer import (
+            ESTIMATED_STEP_OUTPUT_TOKENS,
+            DurableSegmentOptimizer,
+            ModelTier,
+            RouteDecisionSource,
+            deserialize_segment_route_decision,
+            model_token_rates,
+            serialize_segment_route_decision,
+        )
+
+        runtime = get_durable_loop_activity_runtime()
+        reference = ContentRefV1.model_validate(payload["run_document_ref"])
+        document = await get_protocol_model(
+            runtime.content,
+            reference,
+            DurableRunDocumentV1,
+        )
+        plan = _plan_from_document(document.plan)
+        request = _model_request_from_document(document, plan)
+        request_hash = request.canonical_request_hash()
+        receipt_key = f"routing/{request_hash}"
+        started_at = time.perf_counter()
+        route_value: dict[str, object] | None = None
+        reused = False
+        if runtime.route_receipts is not None:
+            existing = await runtime.route_receipts.get(receipt_key)
+            if existing is not None:
+                parsed = json.loads(existing.payload)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError("durable routing receipt is invalid")
+                route_value = parsed
+                reused = True
+        optimizer = runtime.route_optimizer
+        if optimizer is None:
+            optimizer = DurableSegmentOptimizer(
+                runtime.model,
+                settings=plan.settings,
+            )
+        optimizer.ledger.restore(
+            run_id=request.identity.run_id,
+            state=document.optimizer_state,
+        )
+        if route_value is None:
+            route = await optimizer.route_request(request)
+            route_value = serialize_segment_route_decision(
+                route,
+                request_hash=request_hash,
+            )
+            if runtime.route_receipts is not None:
+                created = await runtime.route_receipts.create(
+                    receipt_key,
+                    canonical_json_bytes(route_value),
+                )
+                if not created:
+                    winner = await runtime.route_receipts.get(receipt_key)
+                    if winner is None:
+                        raise RuntimeError("durable routing receipt disappeared")
+                    parsed = json.loads(winner.payload)
+                    if not isinstance(parsed, dict):
+                        raise RuntimeError("durable routing receipt is invalid")
+                    route_value = parsed
+                    reused = True
+        stored_request_hash, route = deserialize_segment_route_decision(route_value)
+        if stored_request_hash != request_hash:
+            raise RuntimeError("durable routing receipt request hash changed")
+        elapsed_seconds = max(0.0, time.perf_counter() - started_at)
+        correlation = durable_loop_run_correlation(route.run_id)
+        frontier_model = request.working_context.bundle.model
+        fast_model = plan.settings.fast_model
+        frontier_rates = model_token_rates(
+            frontier_model,
+            tier=ModelTier.FRONTIER,
+        )
+        fast_rates = model_token_rates(fast_model, tier=ModelTier.FAST)
+        with start_durable_loop_activity_span(
+            DurableLoopPhase.ROUTING,
+            run_id=route.run_id,
+            provenance="runtime",
+        ) as span:
+            span.set_attribute("af.durable_loop.routing.source", route.source.value)
+            span.set_attribute("af.durable_loop.routing.mode", route.mode.value)
+            span.set_attribute("af.durable_loop.routing.tier", route.tier.value)
+            span.set_attribute("af.durable_loop.routing.model", route.target_model)
+            span.set_attribute("af.durable_loop.routing.reason", route.reason)
+            span.set_attribute(
+                "af.durable_loop.routing.estimated_input_tokens",
+                route.cost_estimate.estimated_input_tokens,
+            )
+            span.set_attribute(
+                "af.durable_loop.routing.frontier_cost_microunits",
+                route.cost_estimate.frontier_cost_microunits,
+            )
+            span.set_attribute(
+                "af.durable_loop.routing.fast_cost_microunits",
+                route.cost_estimate.fast_cost_microunits,
+            )
+            span.set_attribute(
+                "af.durable_loop.routing.frontier_cache_warm",
+                route.cost_estimate.frontier_cache_warm,
+            )
+            span.set_attribute(
+                "af.durable_loop.routing.frontier_rate_source",
+                frontier_rates.source.value,
+            )
+            span.set_attribute(
+                "af.durable_loop.routing.fast_rate_source",
+                fast_rates.source.value,
+            )
+            span.set_attribute(
+                "af.durable_loop.routing.projected_output_tokens",
+                ESTIMATED_STEP_OUTPUT_TOKENS,
+            )
+            span.set_attribute(
+                "af.durable_loop.routing.decision_rate_source",
+                "assumed_spike_constant",
+            )
+            span.set_attribute("af.durable_loop.routing.receipt_reused", reused)
+            if route.evaluation is not None:
+                span.set_attribute(
+                    "af.durable_loop.routing.fallback_reason",
+                    route.evaluation.fallback_reason,
+                )
+                span.set_attribute(
+                    "af.durable_loop.routing.http_status",
+                    route.evaluation.http_status,
+                )
+                span.set_attribute(
+                    "af.durable_loop.routing.decision_duration_ms",
+                    route.evaluation.duration_ms,
+                )
+            record_durable_loop_event(
+                DurableLoopPhase.ROUTING,
+                DurableLoopOutcome.DEDUPLICATED if reused else DurableLoopOutcome.COMPLETED,
+                provenance="runtime",
+                duration_seconds=elapsed_seconds,
+            )
+        log_method = (
+            _routing_logger.warning
+            if route.source is RouteDecisionSource.HEURISTIC
+            and route.evaluation is not None
+            and route.evaluation.fallback_reason is not None
+            else _routing_logger.info
+        )
+        log_method(
+            "Durable route selected "
+            "(run_correlation=%s step_index=%d source=%s model=%s tier=%s "
+            "mode=%s reason=%s estimated_input_tokens=%d "
+            "frontier_cost_microunits=%d fast_cost_microunits=%d "
+            "frontier_model=%s frontier_rate_source=%s fast_model=%s "
+            "fast_rate_source=%s projected_output_tokens=%d "
+            "decision_rate_source=%s frontier_cache_warm=%s "
+            "fallback_reason=%s http_status=%s "
+            "decision_duration_ms=%.3f activity_duration_ms=%.3f receipt_reused=%s).",
+            correlation,
+            route.step_index,
+            route.source.value,
+            route.target_model,
+            route.tier.value,
+            route.mode.value,
+            route.reason,
+            route.cost_estimate.estimated_input_tokens,
+            route.cost_estimate.frontier_cost_microunits,
+            route.cost_estimate.fast_cost_microunits,
+            frontier_model,
+            frontier_rates.source.value,
+            fast_model,
+            fast_rates.source.value,
+            ESTIMATED_STEP_OUTPUT_TOKENS,
+            "assumed_spike_constant",
+            route.cost_estimate.frontier_cache_warm,
+            route.evaluation.fallback_reason if route.evaluation is not None else None,
+            route.evaluation.http_status if route.evaluation is not None else None,
+            route.evaluation.duration_ms if route.evaluation is not None else 0.0,
+            elapsed_seconds * 1000.0,
+            reused,
+        )
+        return route_value
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
         activity=DURABLE_LOOP_MODEL_ACTIVITY_NAME,
     )
     @_with_function_trace_context
@@ -892,19 +1112,8 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         )
         plan = _plan_from_document(document.plan)
         checkpoint = document.checkpoint
-        request = OneStepModelRequest(
-            identity=checkpoint.identity,
-            step_index=checkpoint.next_model_step,
-            instructions=plan.instructions,
-            working_context=checkpoint.working_context,
-            catalog=plan.catalog,
-            model_settings=plan.model_settings,
-            fault_profile=plan.fault_profile,
-            effective_active_deadline=(
-                checkpoint.identity.active_deadline
-                + timedelta(seconds=checkpoint.parked_seconds)
-            ),
-        )
+        request = _model_request_from_document(document, plan)
+        requested_model = request.working_context.bundle.model
         observer = None
         if document.plan.ui is not None:
             observer = await _start_durable_chat_observer(
@@ -929,11 +1138,37 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         background_written_bytes = 0
         background_model = runtime.background_model
         model_provider: OneStepModelProvider = runtime.model
-        if plan.settings.decision_routing_enabled:
+        route = None
+        route_optimizer = None
+        if "route" in payload:
+            from .durable_loop_optimizer import (
+                DurableSegmentOptimizer,
+                deserialize_segment_route_decision,
+            )
+
+            route_value = _mapping(payload["route"], "route")
+            request_hash, route = deserialize_segment_route_decision(route_value)
+            if request_hash != request.canonical_request_hash():
+                raise RuntimeError("durable model route request hash changed")
+            route_optimizer = runtime.route_optimizer
+            if route_optimizer is None:
+                route_optimizer = DurableSegmentOptimizer(
+                    model_provider,
+                    settings=plan.settings,
+                )
+            route_optimizer.ledger.restore(
+                run_id=request.identity.run_id,
+                state=document.optimizer_state,
+            )
+            request = route_optimizer.apply_route(request, route)
+            background_model = None
+        elif plan.settings.decision_routing_enabled:
             from .durable_loop_optimizer import DurableSegmentOptimizer
 
             background_model = None
-            if not isinstance(model_provider, DurableSegmentOptimizer):
+            if runtime.route_optimizer is not None:
+                model_provider = runtime.route_optimizer
+            elif not isinstance(model_provider, DurableSegmentOptimizer):
                 model_provider = DurableSegmentOptimizer(
                     model_provider,
                     settings=plan.settings,
@@ -960,6 +1195,18 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 human_waits=checkpoint.human_wait_count,
                 step_index=checkpoint.next_model_step,
             )
+        selected_model = request.working_context.bundle.model
+        correlation = durable_loop_run_correlation(checkpoint.identity.run_id)
+        _routing_logger.info(
+            "Durable-loop model activity selected "
+            "(run_correlation=%s step_index=%d requested_model=%s "
+            "selected_model=%s streaming=%s).",
+            correlation,
+            checkpoint.next_model_step,
+            requested_model,
+            selected_model,
+            bool(producers),
+        )
         try:
             try:
                 async with asyncio.timeout(plan.settings.activity_timeout_seconds):
@@ -967,7 +1214,16 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                         DurableLoopPhase.MODEL_STEP,
                         run_id=checkpoint.identity.run_id,
                         provenance="model",
-                    ):
+                    ) as span:
+                        span.set_attribute(
+                            "af.durable_loop.requested_model",
+                            requested_model,
+                        )
+                        span.set_attribute(
+                            "af.durable_loop.selected_model",
+                            selected_model,
+                        )
+                        span.set_attribute("gen_ai.request.model", selected_model)
                         if background_model is None:
                             if (
                                 observer is not None
@@ -999,28 +1255,59 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                                     kind="model-operation",
                                     model=started.operation,
                                 )
-                                return ModelStepActivityResultV1(
-                                    run_document_ref=reference,
-                                    step_index=checkpoint.next_model_step,
-                                    background_operation_ref=operation_ref,
-                                    poll_after_seconds=plan.settings.poll_initial_seconds,
-                                    written_bytes=(
-                                        started.written_bytes
-                                        or operation_ref.byte_length
-                                    ),
-                                ).model_dump(mode="json")
+                                return _with_model_identity(
+                                    ModelStepActivityResultV1(
+                                        run_document_ref=reference,
+                                        step_index=checkpoint.next_model_step,
+                                        background_operation_ref=operation_ref,
+                                        poll_after_seconds=(
+                                            plan.settings.poll_initial_seconds
+                                        ),
+                                        written_bytes=(
+                                            started.written_bytes
+                                            or operation_ref.byte_length
+                                        ),
+                                    ).model_dump(mode="json"),
+                                    requested_model=requested_model,
+                                    selected_model=selected_model,
+                                )
                             if started.error is not None:
-                                return await _persist_model_error(
-                                    runtime,
-                                    document,
-                                    started.error,
-                                    extra_written_bytes=started.written_bytes,
+                                return _with_model_identity(
+                                    await _persist_model_error(
+                                        runtime,
+                                        document,
+                                        started.error,
+                                        extra_written_bytes=started.written_bytes,
+                                    ),
+                                    requested_model=requested_model,
+                                    selected_model=selected_model,
                                 )
                             if started.decision is None:
                                 raise RuntimeError(
                                     "background model start returned no outcome"
                                 )
                             decision = started.decision
+                        if decision.provider_reported_model is not None:
+                            span.set_attribute(
+                                "gen_ai.response.model",
+                                decision.provider_reported_model,
+                            )
+                    if route is not None:
+                        if route_optimizer is None:
+                            raise RuntimeError("durable route optimizer is missing")
+                        decision = route_optimizer.finalize_decision(
+                            _model_request_from_document(document, plan),
+                            request,
+                            route,
+                            decision,
+                        )
+                        document = document.model_copy(
+                            update={
+                                "optimizer_state": route_optimizer.ledger.snapshot(
+                                    run_id=request.identity.run_id
+                                )
+                            }
+                        )
             except TimeoutError:
                 raise RuntimeError("durable model activity timed out") from None
             except DurableLoopProviderTerminalError as exc:
@@ -1049,13 +1336,17 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                     kind="run-document",
                     model=failed,
                 )
-                return ModelStepActivityResultV1(
-                    run_document_ref=failed_ref,
-                    step_index=checkpoint.next_model_step,
-                    error=error,
-                    usage=exc.usage,
-                    written_bytes=failed_ref.byte_length,
-                ).model_dump(mode="json")
+                return _with_model_identity(
+                    ModelStepActivityResultV1(
+                        run_document_ref=failed_ref,
+                        step_index=checkpoint.next_model_step,
+                        error=error,
+                        usage=exc.usage,
+                        written_bytes=failed_ref.byte_length,
+                    ).model_dump(mode="json"),
+                    requested_model=requested_model,
+                    selected_model=selected_model,
+                )
             if observer is not None:
                 observer.progress(
                     status=DurableLoopRunStatus.RUNNING,
@@ -1065,11 +1356,16 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                     human_waits=checkpoint.human_wait_count,
                     step_index=checkpoint.next_model_step,
                 )
-            return await _persist_model_decision(
-                runtime,
-                document,
-                decision,
-                extra_written_bytes=background_written_bytes,
+            return _with_model_identity(
+                await _persist_model_decision(
+                    runtime,
+                    document,
+                    decision,
+                    extra_written_bytes=background_written_bytes,
+                ),
+                requested_model=requested_model,
+                selected_model=selected_model,
+                provider_reported_model=decision.provider_reported_model,
             )
         finally:
             if observer is not None:
@@ -1106,36 +1402,49 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 kind="model-operation",
                 model=polled.operation,
             )
-            return ModelStepActivityResultV1(
-                run_document_ref=ContentRefV1.model_validate(
-                    payload["run_document_ref"]
-                ),
-                step_index=operation.step_index,
-                background_operation_ref=operation_ref,
-                poll_after_seconds=min(
-                    plan.settings.poll_max_seconds,
-                    plan.settings.poll_initial_seconds
-                    * (2 ** min(polled.operation.poll_count, 8)),
-                ),
-                written_bytes=(
-                    polled.written_bytes
-                    or operation_ref.byte_length
-                ),
-            ).model_dump(mode="json")
+            return _with_model_identity(
+                ModelStepActivityResultV1(
+                    run_document_ref=ContentRefV1.model_validate(
+                        payload["run_document_ref"]
+                    ),
+                    step_index=operation.step_index,
+                    background_operation_ref=operation_ref,
+                    poll_after_seconds=min(
+                        plan.settings.poll_max_seconds,
+                        plan.settings.poll_initial_seconds
+                        * (2 ** min(polled.operation.poll_count, 8)),
+                    ),
+                    written_bytes=(
+                        polled.written_bytes
+                        or operation_ref.byte_length
+                    ),
+                ).model_dump(mode="json"),
+                requested_model=document.plan.model,
+                selected_model=document.plan.model,
+            )
         if polled.error is not None:
-            return await _persist_model_error(
-                runtime,
-                document,
-                polled.error,
-                extra_written_bytes=polled.written_bytes,
+            return _with_model_identity(
+                await _persist_model_error(
+                    runtime,
+                    document,
+                    polled.error,
+                    extra_written_bytes=polled.written_bytes,
+                ),
+                requested_model=document.plan.model,
+                selected_model=document.plan.model,
             )
         if polled.decision is None:
             raise RuntimeError("background model poll returned no outcome")
-        return await _persist_model_decision(
-            runtime,
-            document,
-            polled.decision,
-            extra_written_bytes=polled.written_bytes,
+        return _with_model_identity(
+            await _persist_model_decision(
+                runtime,
+                document,
+                polled.decision,
+                extra_written_bytes=polled.written_bytes,
+            ),
+            requested_model=document.plan.model,
+            selected_model=document.plan.model,
+            provider_reported_model=polled.decision.provider_reported_model,
         )
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
@@ -1870,15 +2179,38 @@ def _register_short_orchestrators(blueprint: df.Blueprint) -> None:
         return (yield from _call_session_entity(context, operation))
 
 
+def _model_request_from_document(
+    document: DurableRunDocumentV1,
+    plan: DurableLoopPlan,
+) -> OneStepModelRequest:
+    checkpoint = document.checkpoint
+    return OneStepModelRequest(
+        identity=checkpoint.identity,
+        step_index=checkpoint.next_model_step,
+        instructions=plan.instructions,
+        working_context=checkpoint.working_context,
+        catalog=plan.catalog,
+        model_settings=plan.model_settings,
+        fault_profile=plan.fault_profile,
+        effective_active_deadline=(
+            checkpoint.identity.active_deadline
+            + timedelta(seconds=checkpoint.parked_seconds)
+        ),
+    )
+
+
 def _call_model_activity(
     context: df.DurableOrchestrationContext,
     current: DurableOrchestrationInputV1,
     *,
     retry_once: bool,
+    route: Mapping[str, object] | None = None,
 ) -> Any:
     activity_input = {
         "run_document_ref": current.run_document_ref.model_dump(mode="json")
     }
+    if route is not None:
+        activity_input["route"] = dict(route)
     if not retry_once:
         return (
             yield context.call_activity(
@@ -1918,6 +2250,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
         _generic_tool_activity_name
     ),
     retry_first_model_activity: bool = False,
+    route_before_model: bool = False,
 ) -> Any:
     admission = yield context.call_entity(
         entity,
@@ -2032,12 +2365,49 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 "step_index": current.next_model_step,
             }
         )
+        route_value = None
+        if route_before_model:
+            context.set_custom_status(
+                {
+                    "phase": DurableLoopPhase.ROUTING.value,
+                    "status": DurableLoopRunStatus.RUNNING.value,
+                    "step_index": current.next_model_step,
+                }
+            )
+            route_value = yield context.call_activity(
+                DURABLE_LOOP_ROUTING_ACTIVITY_NAME,
+                {
+                    "run_document_ref": current.run_document_ref.model_dump(
+                        mode="json"
+                    )
+                },
+            )
+            cancelled_after_route = yield context.call_entity(
+                entity,
+                "is_cancelled",
+                {"run_id": current.identity.run_id},
+            )
+            if cancelled_after_route.get("cancelled") is True:
+                yield from _cleanup_execution_plane(context, current)
+                yield context.call_entity(
+                    entity,
+                    "abort",
+                    {
+                        "context_ref": current.run_document_ref.model_dump(
+                            mode="json"
+                        ),
+                        "run_id": current.identity.run_id,
+                        "status": DurableLoopRunStatus.CANCELLED.value,
+                    },
+                )
+                return {"status": DurableLoopRunStatus.CANCELLED.value}
         model_result_data = yield from _call_model_activity(
             context,
             current,
             retry_once=(
                 retry_first_model_activity and current.next_model_step == 0
             ),
+            route=route_value,
         )
         model_result = ModelStepActivityResultV1.model_validate_json(
             canonical_json_bytes(model_result_data)
@@ -3342,6 +3712,22 @@ async def _persist_model_error(
         error=error,
         written_bytes=failed_ref.byte_length + extra_written_bytes,
     ).model_dump(mode="json")
+
+
+def _with_model_identity(
+    result: dict[str, object],
+    *,
+    requested_model: str,
+    selected_model: str,
+    provider_reported_model: str | None = None,
+) -> dict[str, object]:
+    """Add bounded model identity metadata to one DTS-visible activity result."""
+    return {
+        **result,
+        "requested_model": requested_model,
+        "selected_model": selected_model,
+        "provider_reported_model": provider_reported_model,
+    }
 
 
 async def _persist_model_decision(

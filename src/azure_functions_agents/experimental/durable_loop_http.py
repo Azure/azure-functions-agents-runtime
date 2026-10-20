@@ -8,11 +8,14 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from traceback import extract_tb
 from typing import Any
 
 import azure.durable_functions as df
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response
+from pydantic import ValidationError
 
 from .._logger import logger
 from ..client_manager import get_client_manager
@@ -71,6 +74,7 @@ from .durable_loop_registration import (
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
     _normalize_durable_client_binding_annotation,
     configure_durable_loop_execution_binding,
     get_durable_loop_activity_runtime,
@@ -996,11 +1000,12 @@ async def _run_metadata(
     api_version = target.api_version or "responses-v1"
     sandbox_profile = _sandbox_profile(body, settings)
     fault_profile = _fault_profile(body, settings)
-    orchestration_version = (
-        DURABLE_LOOP_ORCHESTRATOR_V3_NAME
-        if fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
-        else DURABLE_LOOP_ORCHESTRATOR_V2_NAME
-    )
+    if settings.decision_routing_enabled:
+        orchestration_version = DURABLE_LOOP_ORCHESTRATOR_V4_NAME
+    elif fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE:
+        orchestration_version = DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+    else:
+        orchestration_version = DURABLE_LOOP_ORCHESTRATOR_V2_NAME
     base_policy_hash = canonical_hash(
         {
             "agent": resolved.slug,
@@ -1265,16 +1270,17 @@ async def _recover_or_initialize_chat_run(
             )
             return _expired_chat_initialization_response(run_id)
         return await _load_initialized_chat_input(initialization)
-    except (DurableChatInitializationError, ValueError):
+    except (DurableChatInitializationError, ValueError) as exc:
         logger.warning(
-            "durable-chat initialization failed: run_id=%s",
+            "durable-chat initialization failed: run_id=%s error_details=%s",
             run_id,
+            _chat_initialization_error_details(exc),
         )
     except Exception as exc:
         logger.warning(
-            "durable-chat initialization storage failed: run_id=%s error_type=%s",
+            "durable-chat initialization failed: run_id=%s error_details=%s",
             run_id,
-            type(exc).__name__,
+            _chat_initialization_error_details(exc),
         )
     return _json_response(
         {
@@ -1284,6 +1290,32 @@ async def _recover_or_initialize_chat_run(
         },
         status_code=503,
     )
+
+
+def _chat_initialization_error_details(error: BaseException) -> list[dict[str, object]]:
+    """Describe exception chains without messages, source text, or rejected values."""
+    details: list[dict[str, object]] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        detail: dict[str, object] = {
+            "error_type": type(current).__name__,
+            "frames": [
+                f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}"
+                for frame in extract_tb(current.__traceback__)
+            ],
+        }
+        if isinstance(current, ValidationError):
+            detail["validation_errors"] = [
+                {"field": item["loc"], "type": item["type"]}
+                for item in current.errors(include_input=False, include_url=False)
+            ]
+        details.append(detail)
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    return details
 
 
 async def _reclaim_expired_chat_admission(
@@ -1429,10 +1461,13 @@ async def _authorized_status(
         return owner
     run_id = _path_parameter(req, "run_id")
     status = await client.get_status(run_id, show_input=True)
-    if status is None:
-        logger.warning("durable-loop status lookup returned no instance")
+    if not status:
+        logger.debug("durable-loop status lookup returned no instance")
         return _json_response({"error": "run_not_found"}, status_code=404)
     raw_input = status.input_
+    if raw_input is None:
+        logger.debug("durable-loop status input is not available")
+        return _json_response({"error": "run_not_found"}, status_code=404)
     try:
         durable_input = _durable_status_input(raw_input)
     except Exception as exc:

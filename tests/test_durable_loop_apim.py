@@ -184,6 +184,14 @@ class _Gateway429Error(Exception):
         self.response = SimpleNamespace(headers={"Retry-After": "0.01"})
 
 
+class _GatewayRequestError(Exception):
+    def __init__(self) -> None:
+        super().__init__("unsafe backend detail")
+        self.status_code = 404
+        self.code = "not_found"
+        self.response = SimpleNamespace(headers={})
+
+
 def _wrapped_gateway_429_error() -> ChatClientException:
     inner = _Gateway429Error()
     outer = ChatClientException("wrapped")
@@ -350,6 +358,7 @@ async def test_background_poll_and_cancel_use_fixed_control_routes_and_header() 
             {"id": "resp_1", "status": "in_progress", "output": []},
             {
                 "id": "resp_1",
+                "model": "provider-resolved-model",
                 "status": "completed",
                 "output": [
                     {
@@ -391,6 +400,7 @@ async def test_background_poll_and_cancel_use_fixed_control_routes_and_header() 
     assert pending.operation.status is ModelOperationStatus.IN_PROGRESS
     terminal = await provider.poll(pending.operation)
     assert terminal.decision is not None
+    assert terminal.decision.provider_reported_model == "provider-resolved-model"
     reasoning = terminal.decision.assistant_message["contents"][0]  # type: ignore[index]
     assert reasoning["protected_data"] == "cipher"  # type: ignore[index]
     cancelled = await provider.cancel(pending.operation)
@@ -794,6 +804,39 @@ async def test_wrapped_gateway_429_is_normalized_and_retried() -> None:
     assert "x-af-demo-fault" not in foreground.client_kwargs[1][
         "extra_headers"
     ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_failure_exposes_only_safe_status_and_service_code() -> None:
+    request = _request()
+
+    class FailedForeground(_Foreground):
+        async def run_one_step(
+            self,
+            _request: OneStepModelRequest,
+            *,
+            client_kwargs=None,
+        ):
+            raise _GatewayRequestError()
+
+    provider = ApimMafResponsesProvider(
+        _manager(),
+        content=InMemoryDurableContentStore(),
+        receipts=InMemoryDurableKeyedDocumentStore(),
+        settings=DurableLoopSettings(),
+        control_base_url="https://gateway.test/model-control",
+        foreground=FailedForeground(request),
+    )
+
+    with pytest.raises(
+        ApimResponsesError,
+        match=r"^model_request_failed status_code=404 service_code=not_found$",
+    ) as captured:
+        await provider.run_one_step(request)
+
+    assert captured.value.status_code == 404
+    assert captured.value.service_code == "not_found"
+    assert "unsafe backend detail" not in str(captured.value)
 
 
 @pytest.mark.asyncio

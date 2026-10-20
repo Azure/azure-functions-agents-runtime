@@ -12,9 +12,11 @@ from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .._credential import build_async_credential_with_client_id
 from ..strict_json import canonical_json_bytes
-from .durable_loop_activities import resolve_durable_content_blob_binding
+from .durable_loop_activities import (
+    DURABLE_LOOP_CONTENT_CONTAINER_NAME,
+    build_durable_content_blob_client,
+)
 from .durable_loop_protocol import ContentRefV1, DurableFaultProfile
 
 _DOCUMENT_KEY = re.compile(r"^[a-z0-9][a-z0-9/_-]{0,255}$")
@@ -138,7 +140,7 @@ class InMemoryDurableKeyedDocumentStore:
 
 
 class BlobDurableKeyedDocumentStore:
-    """Blob-backed create/CAS store in the dedicated durable content container."""
+    """Blob-backed create/CAS store in the host-storage content container."""
 
     def __init__(
         self,
@@ -153,16 +155,10 @@ class BlobDurableKeyedDocumentStore:
 
     @classmethod
     def from_environment(cls) -> BlobDurableKeyedDocumentStore:
-        """Build from the same validated dedicated Blob binding as content."""
-        from azure.storage.blob.aio import BlobServiceClient
-
-        binding = resolve_durable_content_blob_binding()
+        """Build from the same AzureWebJobsStorage binding as content."""
         return cls(
-            BlobServiceClient(
-                account_url=binding.service_url,
-                credential=build_async_credential_with_client_id(binding.client_id),
-            ),
-            container_name=binding.container_name,
+            build_durable_content_blob_client(),
+            container_name=DURABLE_LOOP_CONTENT_CONTAINER_NAME,
         )
 
     async def get(self, key: str) -> KeyedDocument | None:

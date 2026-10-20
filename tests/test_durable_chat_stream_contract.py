@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -60,6 +61,7 @@ class _HeldFinalStreamChatClient(FunctionInvocationLayer[Any], BaseChatClient[An
         self._finalizer_started = finalizer_started
         self._release_finalizer = release_finalizer
         self.call_count = 0
+        self.received_options: list[dict[str, Any]] = []
 
     def _inner_get_response(
         self,
@@ -73,6 +75,7 @@ class _HeldFinalStreamChatClient(FunctionInvocationLayer[Any], BaseChatClient[An
         assert messages
         assert options["instructions"] == "Use the lookup tool."
         self.call_count += 1
+        self.received_options.append(dict(options))
 
         async def updates() -> asyncio.AsyncIterator[ChatResponseUpdate]:
             yield ChatResponseUpdate(
@@ -294,7 +297,10 @@ async def test_maf_provider_streams_to_chat_observer_before_held_final_response(
 
     task = asyncio.create_task(
         MafOneStepModelProvider(_ClientManager(client)).run_one_step_with_observer(
-            _request(),
+            replace(
+                _request(),
+                model_settings={"_force_tool_name": "lookup"},
+            ),
             observer=observer,
             producers=(producer,),
         )
@@ -312,6 +318,10 @@ async def test_maf_provider_streams_to_chat_observer_before_held_final_response(
     decision = await task
 
     assert client.function_invocation_configuration["enabled"] is False
+    assert client.received_options[0]["tool_choice"] == {
+        "mode": "required",
+        "required_function_name": "lookup",
+    }
     assert decision.final_text is None
     assert [(call.call_id, call.name) for call in decision.tool_calls] == [
         ("call-1", "lookup")

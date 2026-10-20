@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 from agent_framework import ChatContext, ChatMiddleware
 
@@ -24,6 +25,7 @@ from .hybrid_observability import (
 
 _DEFAULT_MODEL = "gpt-4.1-mini"
 _DUMMY_OPENAI_KEY = "apim-managed"
+_FOUNDRY_RESPONSES_API_VERSION = "2025-03-01-preview"
 
 
 class HybridModelTimingMiddleware(ChatMiddleware):
@@ -132,6 +134,7 @@ class HybridApimClientManager(ClientManager):
             api_key=api_key,
             base_url=self._base_url,
             default_headers=headers,
+            default_query=_responses_default_query(self._base_url),
             max_retries=0,
         )
         client = OpenAIChatClient(
@@ -147,7 +150,11 @@ class HybridApimClientManager(ClientManager):
             provider="azure_openai_apim",
             model=resolved_model,
             endpoint=self._base_url.rstrip("/"),
-            api_version="responses-v1",
+            api_version=(
+                _FOUNDRY_RESPONSES_API_VERSION
+                if _responses_default_query(self._base_url)
+                else "responses-v1"
+            ),
         )
 
     def _token_provider(self) -> Callable[[], Awaitable[str]]:
@@ -190,3 +197,10 @@ class HybridApimClientManager(ClientManager):
             return
         await self._credential.close()
         self._credential = None
+
+
+def _responses_default_query(base_url: str) -> dict[str, str]:
+    path = urlsplit(base_url).path.rstrip("/")
+    if path.endswith("/openai") and not path.endswith("/openai/v1"):
+        return {"api-version": _FOUNDRY_RESPONSES_API_VERSION}
+    return {}

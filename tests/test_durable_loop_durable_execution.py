@@ -39,8 +39,17 @@ from azure_functions_agents.experimental.durable_loop_activities import (
 )
 from azure_functions_agents.experimental.durable_loop_apim import ApimResponsesError
 from azure_functions_agents.experimental.durable_loop_config import (
+    DURABLE_LOOP_DECISION_ROUTING_ENABLED_ENV,
     DURABLE_LOOP_ENABLED_ENV,
     DurableLoopSettings,
+)
+from azure_functions_agents.experimental.durable_loop_optimizer import (
+    COMPILE_SEGMENT_DAG_TOOL_NAME,
+    DecisionEvaluation,
+    DurableSegmentOptimizer,
+    ModelTier,
+    RouteDecisionSource,
+    SegmentMode,
 )
 from azure_functions_agents.experimental.durable_loop_protocol import (
     DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
@@ -93,6 +102,7 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_MODEL_ACTIVITY_NAME,
     DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
     DURABLE_LOOP_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_ROUTING_ACTIVITY_NAME,
     DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
     DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     DurableLoopActivityRuntime,
@@ -472,6 +482,9 @@ async def test_model_activity_returns_only_refs_and_preserves_full_audit(
         json.dumps(raw_result)
     )
     assert result.final_response_ref is not None
+    assert result.requested_model == "model"
+    assert result.selected_model == "model"
+    assert result.provider_reported_model is None
     assert result.written_bytes > result.final_response_ref.byte_length
     assert await content.get_bytes(result.final_response_ref) == b"sensitive final answer"
     document = await get_protocol_model(
@@ -523,9 +536,389 @@ async def test_non_chat_model_activity_skips_chat_observer_setup(
     finally:
         reset_durable_loop_activity_runtime_factory()
 
-    assert ModelStepActivityResultV1.model_validate_json(
+    result = ModelStepActivityResultV1.model_validate_json(
         canonical_json_bytes(raw_result)
-    ).final_response_ref is not None
+    )
+    assert result.final_response_ref is not None
+    assert result.requested_model == "model"
+    assert result.selected_model == "model"
+
+
+@pytest.mark.asyncio
+async def test_routing_activity_freezes_and_reuses_decision_before_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class DecisionClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def evaluate(self, _payload):
+            self.calls += 1
+            return DecisionEvaluation(
+                dag_viable=0.1,
+                step_tier=ModelTier.FAST,
+                step_fast_probability=0.95,
+                dag_tier=ModelTier.FRONTIER,
+                dag_fast_probability=0.1,
+                decision_input_tokens=10,
+                source=RouteDecisionSource.LIVE,
+                http_status=200,
+                duration_ms=4.0,
+            )
+
+    class Provider:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def run_one_step(self, request):
+            self.requests.append(request)
+            return ScriptedModelStep(final_text="done").build(request)
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setenv(DURABLE_LOOP_DECISION_ROUTING_ENABLED_ENV, "true")
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    receipts = InMemoryDurableKeyedDocumentStore()
+    provider = Provider()
+    decision_client = DecisionClient()
+    settings = DurableLoopSettings(
+        decision_routing_enabled=True,
+        fast_model="gpt-fast",
+    )
+    optimizer = DurableSegmentOptimizer(
+        provider,
+        settings=settings,
+        decision_client=decision_client,
+    )
+    runtime = DurableLoopActivityRuntime(
+        model=provider,
+        route_optimizer=optimizer,
+        route_receipts=receipts,
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    caplog.set_level("INFO", logger="AgentRuntime.Routing")
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    run_input = await _run_input(content, catalog)
+    activity_input = {
+        "run_document_ref": run_input.run_document_ref.model_dump(mode="json")
+    }
+
+    try:
+        route_activity = _registered(app, DURABLE_LOOP_ROUTING_ACTIVITY_NAME)
+        first_route = await route_activity(activity_input)
+        second_route = await route_activity(activity_input)
+        model_activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+        raw_result = await model_activity(
+            {**activity_input, "route": first_route}
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    assert first_route == second_route
+    assert decision_client.calls == 1
+    assert len(provider.requests) == 1
+    assert provider.requests[0].working_context.bundle.model == "gpt-fast"
+    assert "source=live" in caplog.text
+    assert "model=gpt-fast" in caplog.text
+    assert "requested_model=model" in caplog.text
+    assert "selected_model=gpt-fast" in caplog.text
+    assert "frontier_rate_source=assumed_tier_default" in caplog.text
+    assert "fast_rate_source=assumed_tier_default" in caplog.text
+    assert "projected_output_tokens=250" in caplog.text
+    assert "decision_rate_source=assumed_spike_constant" in caplog.text
+    assert "receipt_reused=True" in caplog.text
+    assert "run-1" not in caplog.text
+    assert "sensitive prompt" not in caplog.text
+    result = ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(raw_result)
+    )
+    assert result.final_response_ref is not None
+    assert result.requested_model == "model"
+    assert result.selected_model == "gpt-fast"
+    assert result.provider_reported_model is None
+
+
+@pytest.mark.asyncio
+async def test_routing_ledger_restores_across_separate_activity_runtimes(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_time = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+
+    class DecisionClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def evaluate(self, _payload):
+            self.calls += 1
+            return DecisionEvaluation(
+                dag_viable=0.95,
+                step_tier=ModelTier.FRONTIER,
+                step_fast_probability=0.05,
+                dag_tier=ModelTier.FRONTIER,
+                dag_fast_probability=0.05,
+                decision_input_tokens=10,
+                source=RouteDecisionSource.LIVE,
+            )
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setenv(DURABLE_LOOP_DECISION_ROUTING_ENABLED_ENV, "true")
+    registry = DurableToolRegistry()
+    for name in ("lookup_a", "lookup_b"):
+        registry.register(
+            FrozenToolDescriptorV1(
+                name=name,
+                description=f"{name} description.",
+                parameters={"additionalProperties": True, "type": "object"},
+                provenance=ToolProvenance.REMOTE,
+                behavior=ToolBehavior.READ_ONLY,
+                parallel_safe=True,
+            ),
+            lambda _arguments, _call_key: {"ok": True},
+        )
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    receipts = InMemoryDurableKeyedDocumentStore()
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+    run_input = await _run_input(content, catalog, now=route_time)
+    initial = await get_protocol_model(
+        content,
+        run_input.run_document_ref,
+        DurableRunDocumentV1,
+    )
+    messages = (
+        {
+            "contents": [{"text": "x" * 40000, "type": "text"}],
+            "role": "user",
+        },
+    )
+    bundle = MAFMessageBundleV1.create(
+        messages=messages,
+        maf_core_version=initial.plan.maf_core_version,
+        provider=initial.plan.provider,
+        model=initial.plan.model,
+        api_version=initial.plan.api_version,
+    )
+    working = initial.checkpoint.working_context.model_copy(
+        update={
+            "bundle": bundle,
+            "estimated_tokens": 10000,
+            "source_audit_hash": bundle.bundle_hash,
+        }
+    )
+    initial = initial.model_copy(
+        update={
+            "checkpoint": initial.checkpoint.model_copy(
+                update={
+                    "audit_bundle": bundle,
+                    "audit_head_hash": bundle.bundle_hash,
+                    "working_context": working,
+                }
+            )
+        }
+    )
+    initial_ref = await put_protocol_model(
+        content,
+        kind="run-document",
+        model=initial,
+    )
+    activity_input = {"run_document_ref": initial_ref.model_dump(mode="json")}
+    decision_client = DecisionClient()
+    route_optimizer = DurableSegmentOptimizer(
+        ScriptedOneStepModelProvider([]),
+        settings=_settings(),
+        decision_client=decision_client,
+        clock=lambda: route_time,
+    )
+    route_runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        route_optimizer=route_optimizer,
+        route_receipts=receipts,
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    route_activity = _registered(app, DURABLE_LOOP_ROUTING_ACTIVITY_NAME)
+    set_durable_loop_activity_runtime_factory(lambda: route_runtime)
+    first_route = await route_activity(activity_input)
+    assert first_route["mode"] == SegmentMode.DAG.value
+
+    model_provider = ScriptedOneStepModelProvider(
+        [
+            ScriptedModelStep(
+                calls=(
+                    (
+                        "dag-1",
+                        COMPILE_SEGMENT_DAG_TOOL_NAME,
+                        {
+                            "tasks": [
+                                {"id": "a", "tool": "lookup_a"},
+                                {"id": "b", "tool": "lookup_b"},
+                            ]
+                        },
+                    ),
+                ),
+                input_tokens=10000,
+                output_tokens=100,
+            )
+        ]
+    )
+    model_optimizer = DurableSegmentOptimizer(
+        model_provider,
+        settings=_settings(),
+        decision_client=DecisionClient(),
+        clock=lambda: route_time + timedelta(seconds=30),
+    )
+    model_runtime = DurableLoopActivityRuntime(
+        model=model_provider,
+        route_optimizer=model_optimizer,
+        route_receipts=receipts,
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    model_activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+    set_durable_loop_activity_runtime_factory(lambda: model_runtime)
+    first_model_raw = await model_activity({**activity_input, "route": first_route})
+    first_model = ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(first_model_raw)
+    )
+    pending = await get_protocol_model(
+        content,
+        first_model.run_document_ref,
+        DurableRunDocumentV1,
+    )
+    assert pending.optimizer_state is not None
+    assert pending.optimizer_state.last_routed_model == initial.plan.model
+    assert pending.optimizer_state.last_step_was_dag is True
+    assert pending.optimizer_state.watermarks[0].updated_at == route_time
+
+    replay_provider = ScriptedOneStepModelProvider(
+        [
+            ScriptedModelStep(
+                calls=(
+                    (
+                        "dag-1",
+                        COMPILE_SEGMENT_DAG_TOOL_NAME,
+                        {
+                            "tasks": [
+                                {"id": "a", "tool": "lookup_a"},
+                                {"id": "b", "tool": "lookup_b"},
+                            ]
+                        },
+                    ),
+                ),
+                input_tokens=10000,
+                output_tokens=100,
+            )
+        ]
+    )
+    replay_optimizer = DurableSegmentOptimizer(
+        replay_provider,
+        settings=_settings(),
+        decision_client=DecisionClient(),
+        clock=lambda: route_time + timedelta(minutes=10),
+    )
+    replay_runtime = DurableLoopActivityRuntime(
+        model=replay_provider,
+        route_optimizer=replay_optimizer,
+        route_receipts=receipts,
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: replay_runtime)
+    replay_raw = await model_activity({**activity_input, "route": first_route})
+    replay = ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(replay_raw)
+    )
+    assert replay.run_document_ref == first_model.run_document_ref
+
+    next_document = pending.model_copy(
+        update={
+            "checkpoint": pending.checkpoint.model_copy(
+                update={
+                    "completed_model_steps": 1,
+                    "next_model_step": 1,
+                    "status": DurableLoopRunStatus.RUNNING,
+                }
+            ),
+            "pending_decision": None,
+        }
+    )
+    next_ref = await put_protocol_model(
+        content,
+        kind="run-document",
+        model=next_document,
+    )
+    next_route_optimizer = DurableSegmentOptimizer(
+        ScriptedOneStepModelProvider([]),
+        settings=_settings(),
+        decision_client=decision_client,
+        clock=lambda: route_time + timedelta(seconds=60),
+    )
+    next_route_runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        route_optimizer=next_route_optimizer,
+        route_receipts=receipts,
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: next_route_runtime)
+    try:
+        next_route = await route_activity(
+            {"run_document_ref": next_ref.model_dump(mode="json")}
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    assert next_route["mode"] == SegmentMode.STEP.value
+    assert next_route["reason"] == "warm_frontier_cheaper_than_cold_fast"
+    assert next_route["cost_estimate"]["frontier_cache_warm"] is True
+    assert next_route_optimizer.ledger.last_routed_model("run-1") == initial.plan.model
+    assert next_route_optimizer.ledger.last_step_was_dag("run-1") is True
+    assert decision_client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_honors_cancellation_between_route_and_model() -> None:
+    from azure_functions_agents.experimental.durable_loop_registration import (
+        _run_durable_loop,
+    )
+
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    run_input = await _run_input(content, catalog)
+    context = _OrchestrationContext(
+        run_input.model_dump(mode="json"),
+        activity_results={DURABLE_LOOP_ROUTING_ACTIVITY_NAME: {"frozen": True}},
+        cancellation_sequence=[False, True],
+    )
+
+    output = _drive_to_completion(
+        _run_durable_loop(
+            context,
+            df.EntityId("durable_agent_session_entity_v1", "e" * 64),
+            run_input,
+            route_before_model=True,
+        )
+    )
+
+    assert output == {"status": DurableLoopRunStatus.CANCELLED.value}
+    assert [name for name, _payload in context.activity_calls] == [
+        DURABLE_LOOP_ROUTING_ACTIVITY_NAME
+    ]
 
 
 @pytest.mark.asyncio
@@ -533,9 +926,22 @@ async def test_foreground_chat_model_activity_reserves_once_and_publishes_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class DecisionClient:
+        async def evaluate(self, _payload):
+            return DecisionEvaluation(
+                dag_viable=0.1,
+                step_tier=ModelTier.FAST,
+                step_fast_probability=0.95,
+                dag_tier=ModelTier.FRONTIER,
+                dag_fast_probability=0.1,
+                decision_input_tokens=10,
+                source=RouteDecisionSource.LIVE,
+            )
+
     class StreamingProvider:
         def __init__(self) -> None:
             self.producers = ()
+            self.model = None
 
         async def run_one_step(self, _request):
             raise AssertionError("foreground chat did not use the streaming adapter")
@@ -548,6 +954,7 @@ async def test_foreground_chat_model_activity_reserves_once_and_publishes_text(
             producers,
         ):
             self.producers = tuple(producers)
+            self.model = request.working_context.bundle.model
             observer.model_attempt_started(producers[0])
             observer.assistant_text(producers[0], "streamed first")
             observer.model_attempt_completed(producers[0])
@@ -562,8 +969,19 @@ async def test_foreground_chat_model_activity_reserves_once_and_publishes_text(
         documents=InMemoryDurableKeyedDocumentStore(),
     )
     provider = StreamingProvider()
+    receipts = InMemoryDurableKeyedDocumentStore()
+    optimizer = DurableSegmentOptimizer(
+        provider,
+        settings=DurableLoopSettings(
+            decision_routing_enabled=True,
+            fast_model="gpt-fast",
+        ),
+        decision_client=DecisionClient(),
+    )
     runtime = DurableLoopActivityRuntime(
         model=provider,
+        route_optimizer=optimizer,
+        route_receipts=receipts,
         tools=registry.build_dispatcher(),
         compactor=DeterministicContextCompactor(),
         content=content,
@@ -580,12 +998,16 @@ async def test_foreground_chat_model_activity_reserves_once_and_publishes_text(
     await _initialize_chat_journal(journal, run_input, ui)
 
     try:
+        activity_input = {
+            "run_document_ref": run_input.run_document_ref.model_dump(mode="json")
+        }
+        route_activity = _registered(app, DURABLE_LOOP_ROUTING_ACTIVITY_NAME)
+        route = await route_activity(activity_input)
         activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
         raw_result = await activity(
             {
-                "run_document_ref": run_input.run_document_ref.model_dump(
-                    mode="json"
-                )
+                **activity_input,
+                "route": route,
             }
         )
     finally:
@@ -597,6 +1019,9 @@ async def test_foreground_chat_model_activity_reserves_once_and_publishes_text(
     )
     replay = await journal.replay(run_id="run-1", after_sequence=0, limit=64)
     assert result.final_response_ref is not None
+    assert result.requested_model == "model"
+    assert result.selected_model == "gpt-fast"
+    assert provider.model == "gpt-fast"
     assert len(provider.producers) == 3
     assert any(
         isinstance(event.event, DurableChatAssistantTextObservationV1)

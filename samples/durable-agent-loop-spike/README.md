@@ -128,11 +128,14 @@ below is explicitly anonymous; existing qualification clients can still
 supply a key. Do not place Function keys, APIM keys, prompts, answers, or
 response bodies in command lines, committed files, or logs.
 
-Durable prompt, tool, and result content uses the dedicated private
-`durable-loop-content` Blob container rather than `AzureWebJobsStorage`. The
-Function app receives the account URI, container name, and Function UAMI client
-ID through the three
-`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_*` settings.
+Durable prompt, tool, and result content uses the private `durable-loop-content`
+Blob container in `AzureWebJobsStorage` only. A host connection string takes
+precedence, including `UseDevelopmentStorage=true` for local Azurite.
+Identity-based deployments use `AzureWebJobsStorage__blobServiceUri` and the
+host-storage client ID (falling back to `AZURE_CLIENT_ID`).
+The three legacy
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_*` settings are
+ignored. Existing content in another account/container is not migrated.
 The existing account-scoped Storage Blob Data Owner assignment grants the
 Function identity access without a connection string or storage key.
 
@@ -148,6 +151,15 @@ host storage, session history, and a rollback to Azure Storage Durable.
 For local development, `local.settings.template.json` targets the official DTS
 emulator at `http://localhost:8080` and task hub `default`; its dashboard is at
 `http://localhost:8082`.
+
+On Windows, the durable-loop spike packages the explicit
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT` (the sample uses
+`sandbox_bundle`) without the Linux-only controller capture APIs. This local
+development path produces a deterministic `funcs_zip` archive, rejects links
+and junctions, and enforces the 256 MiB bound. Use only a trusted, stable tool
+directory without secrets: this is not the controller's race-closed Linux
+capture and does not enable Windows support for the general session runtime.
+Linux durable-loop execution continues to use the secure controller packager.
 
 The deployed Function App also receives the non-secret
 `APPLICATIONINSIGHTS_RESOURCE_ID`. The local template intentionally leaves it

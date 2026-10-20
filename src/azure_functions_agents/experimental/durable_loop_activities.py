@@ -8,11 +8,11 @@ import json
 import math
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from importlib.metadata import version
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
@@ -22,11 +22,6 @@ from ..client_manager import ClientManager
 from ..strict_json import assert_json_value, canonical_json_bytes
 from .durable_chat_execution_observer import DurableChatExecutionObserver
 from .durable_chat_protocol import DurableChatModelProducerV1
-from .durable_loop_config import (
-    DURABLE_LOOP_CONTENT_BLOB_URI_ENV,
-    DURABLE_LOOP_CONTENT_CLIENT_ID_ENV,
-    DURABLE_LOOP_CONTENT_CONTAINER_ENV,
-)
 from .durable_loop_protocol import (
     BackgroundPollResultV1,
     BackgroundStartDisposition,
@@ -50,6 +45,11 @@ from .durable_loop_protocol import (
     deterministic_model_step_key,
     parse_durable_loop_document,
 )
+
+if TYPE_CHECKING:
+    from azure.storage.blob.aio import BlobServiceClient
+
+DURABLE_LOOP_CONTENT_CONTAINER_NAME = "durable-loop-content"
 
 
 class DurableLoopContentError(RuntimeError):
@@ -209,7 +209,7 @@ class BlobDurableContentStore:
         self,
         service_client: Any,
         *,
-        container_name: str = "azure-functions-agents-durable",
+        container_name: str = DURABLE_LOOP_CONTENT_CONTAINER_NAME,
         maximum_bytes: int = 32 * 1024 * 1024,
     ) -> None:
         self._service_client = service_client
@@ -220,16 +220,10 @@ class BlobDurableContentStore:
 
     @classmethod
     def from_environment(cls) -> BlobDurableContentStore:
-        """Build from explicit durable-content settings, never host storage defaults."""
-        from azure.storage.blob.aio import BlobServiceClient
-
-        binding = resolve_durable_content_blob_binding()
+        """Build from the Function App's AzureWebJobsStorage binding."""
         return cls(
-            BlobServiceClient(
-                account_url=binding.service_url,
-                credential=build_async_credential_with_client_id(binding.client_id),
-            ),
-            container_name=binding.container_name,
+            build_durable_content_blob_client(),
+            container_name=DURABLE_LOOP_CONTENT_CONTAINER_NAME,
         )
 
     async def put_bytes(
@@ -299,23 +293,32 @@ class BlobDurableContentStore:
 
 @dataclass(frozen=True, slots=True)
 class DurableContentBlobBinding:
-    """Validated shared Blob origin used by content and receipt stores."""
+    """Host-storage binding shared by content and receipt stores."""
 
-    service_url: str
+    service_url: str | None
     container_name: str
     client_id: str | None
+    connection_string: str | None = field(default=None, repr=False)
 
 
 def resolve_durable_content_blob_binding(
     environment: Mapping[str, str] | None = None,
 ) -> DurableContentBlobBinding:
-    """Resolve the dedicated credential-free Blob binding once."""
+    """Resolve AzureWebJobsStorage only, with connection-string precedence."""
     source = os.environ if environment is None else environment
-    service_url = source.get(DURABLE_LOOP_CONTENT_BLOB_URI_ENV, "").strip()
+    connection_string = source.get("AzureWebJobsStorage", "").strip()
+    if connection_string:
+        return DurableContentBlobBinding(
+            service_url=None,
+            container_name=DURABLE_LOOP_CONTENT_CONTAINER_NAME,
+            client_id=None,
+            connection_string=connection_string,
+        )
+    service_url = source.get("AzureWebJobsStorage__blobServiceUri", "").strip()
     if not service_url:
         raise DurableLoopContentError(
-            "durable-loop content storage requires "
-            f"{DURABLE_LOOP_CONTENT_BLOB_URI_ENV}"
+            "durable-loop content storage requires AzureWebJobsStorage "
+            "(connection string) or AzureWebJobsStorage__blobServiceUri (identity-based)"
         )
     parsed = urlsplit(service_url)
     if (
@@ -328,25 +331,38 @@ def resolve_durable_content_blob_binding(
         or parsed.fragment
     ):
         raise DurableLoopContentError(
-            f"{DURABLE_LOOP_CONTENT_BLOB_URI_ENV} must be a credential-free HTTPS origin"
+            "AzureWebJobsStorage__blobServiceUri must be a credential-free HTTPS origin"
         )
-    container_name = source.get(
-        DURABLE_LOOP_CONTENT_CONTAINER_ENV,
-        "",
-    ).strip()
-    if not _valid_container_name(container_name):
-        raise DurableLoopContentError(
-            f"{DURABLE_LOOP_CONTENT_CONTAINER_ENV} must be a valid explicit container name"
-        )
-    client_id = source.get(
-        DURABLE_LOOP_CONTENT_CLIENT_ID_ENV,
-        "",
-    ).strip() or None
+    client_id = (
+        source.get("AzureWebJobsStorage__clientId", "").strip()
+        or source.get("AZURE_CLIENT_ID", "").strip()
+        or None
+    )
     return DurableContentBlobBinding(
         service_url=service_url,
-        container_name=container_name,
+        container_name=DURABLE_LOOP_CONTENT_CONTAINER_NAME,
         client_id=client_id,
     )
+
+
+def build_durable_content_blob_client() -> BlobServiceClient:
+    """Build a Blob client for the shared host-storage binding."""
+    from azure.storage.blob.aio import BlobServiceClient
+
+    binding = resolve_durable_content_blob_binding()
+    if binding.connection_string:
+        try:
+            return BlobServiceClient.from_connection_string(binding.connection_string)
+        except ValueError:
+            raise DurableLoopContentError(
+                "AzureWebJobsStorage is not a usable Blob connection string"
+            ) from None
+    if binding.service_url:
+        return BlobServiceClient(
+            account_url=binding.service_url,
+            credential=build_async_credential_with_client_id(binding.client_id),
+        )
+    raise DurableLoopContentError("AzureWebJobsStorage Blob binding is missing")
 
 
 async def put_protocol_model(
@@ -1523,16 +1539,6 @@ def _provider_identifier_ref(value: str) -> ContentRefV1:
     )
 
 
-def _valid_container_name(value: str) -> bool:
-    return (
-        3 <= len(value) <= 63
-        and value[0].isalnum()
-        and value[-1].isalnum()
-        and all(character.islower() or character.isdigit() or character == "-" for character in value)
-        and "--" not in value
-    )
-
-
 def _durable_model_options(request: OneStepModelRequest) -> dict[str, object]:
     options = dict(request.model_settings)
     routed_model = options.pop("_routed_model", None)
@@ -1575,8 +1581,8 @@ def _durable_model_options(request: OneStepModelRequest) -> dict[str, object]:
         resolved_include.append("reasoning.encrypted_content")
     if isinstance(forced_tool_name, str) and forced_tool_name:
         options["tool_choice"] = {
-            "type": "function",
-            "name": forced_tool_name,
+            "mode": "required",
+            "required_function_name": forced_tool_name,
         }
     options.update(
         {

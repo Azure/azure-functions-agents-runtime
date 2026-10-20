@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -42,7 +43,9 @@ from .durable_loop_protocol import (
     FrozenToolDescriptorV1,
     MAFMessageBundleV1,
     ModelDecisionEnvelopeV1,
+    PrefixCacheWatermarkV1,
     SandboxExecutionProfile,
+    SegmentOptimizerStateV1,
     ToolBehavior,
     ToolDispatchRefV1,
     ToolProvenance,
@@ -58,6 +61,8 @@ from .durable_loop_tools import (
     REQUEST_HUMAN_INPUT_TOOL_NAME,
     DurableRetainedSandboxInspection,
     DurableRetainedSandboxInspectionPort,
+    DurableToolCatalogPort,
+    DurableToolCatalogSnapshot,
     DurableToolCleanupPort,
     DurableToolDispatchPort,
 )
@@ -65,20 +70,37 @@ from .durable_loop_tools import (
 COMPILE_SEGMENT_DAG_TOOL_NAME = "compile_segment_dag"
 DECISION_SYSTEMONE_PATH = "/providers/microsoft/v1/systemone"
 
-FRONTIER_INPUT_RATE_MICROUNITS = 2_500_000
-FRONTIER_CACHED_INPUT_RATE_MICROUNITS = 250_000
-FRONTIER_OUTPUT_RATE_MICROUNITS = 10_000_000
-FAST_INPUT_RATE_MICROUNITS = 250_000
-FAST_CACHED_INPUT_RATE_MICROUNITS = 25_000
-FAST_OUTPUT_RATE_MICROUNITS = 1_000_000
-DECISION_INPUT_RATE_MICROUNITS = 42_000
+_ASSUMED_FRONTIER_INPUT_RATE_MICROUNITS = 2_500_000
+_ASSUMED_FRONTIER_CACHED_INPUT_RATE_MICROUNITS = 250_000
+_ASSUMED_FRONTIER_OUTPUT_RATE_MICROUNITS = 10_000_000
+_ASSUMED_FAST_INPUT_RATE_MICROUNITS = 250_000
+_ASSUMED_FAST_CACHED_INPUT_RATE_MICROUNITS = 25_000
+_ASSUMED_FAST_OUTPUT_RATE_MICROUNITS = 1_000_000
+_ASSUMED_DECISION_INPUT_RATE_MICROUNITS = 42_000
 
 _CACHE_TTL_SECONDS = 300.0
 _CACHE_MIN_TOKENS = 1024
 _CACHE_BUCKET_TOKENS = 128
-_ESTIMATED_STEP_OUTPUT_TOKENS = 250
+ESTIMATED_STEP_OUTPUT_TOKENS = 250
 _DEFAULT_DAG_THRESHOLD = 0.70
 _DEFAULT_FAST_THRESHOLD = 0.75
+_DECISION_AGENT_INSTRUCTIONS_MAX_CHARS = 16_384
+_DECISION_RECENT_MESSAGE_MAX_CHARS = 4_096
+_DECISION_RECENT_CONVERSATION_MAX_CHARS = 24_576
+_DECISION_RECENT_CONVERSATION_MAX_MESSAGES = 12
+_DECISION_TOOL_DESCRIPTION_MAX_CHARS = 1_024
+_DECISION_TOOL_CATALOG_MAX_CHARS = 16_384
+_DECISION_TOOL_CATALOG_MAX_TOOLS = 64
+_DECISION_COMPLETED_TOOLS_MAX_COUNT = 64
+_DECISION_USER_GOAL_MAX_CHARS = 8_192
+_TRUNCATION_MARKER = "\n...[truncated]...\n"
+
+_CREDENTIAL_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(api[_-]?key|account[_-]?key|authorization|client[_-]?secret|"
+    r"connection[_-]?string|password|secret|subscription[_-]?key|token)\b"
+    r"(\s*[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_BEARER_TOKEN_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 
 _DAG_PLANNING_ADDENDUM = (
     "\n\nSegment Optimizer DAG Mode: When 2 or more tool calls can be planned "
@@ -101,6 +123,49 @@ class SegmentMode(StrEnum):
 
     STEP = "step"
     DAG = "dag"
+
+
+class RouteDecisionSource(StrEnum):
+    """Bounded origin of one segment route."""
+
+    LIVE = "live"
+    HEURISTIC = "heuristic"
+    SHORT_CIRCUIT = "short_circuit"
+
+
+class ModelRateSource(StrEnum):
+    """Provenance for one static model-pricing snapshot."""
+
+    AZURE_RETAIL_GLOBAL_STANDARD_SHORT_CONTEXT = (
+        "azure_retail_global_standard_short_context_2026-10-20"
+    )
+    ASSUMED_TIER_DEFAULT = "assumed_tier_default"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelTokenRates:
+    """USD microunits per million tokens for one exact model identity."""
+
+    input_microunits: int
+    cached_input_microunits: int
+    output_microunits: int
+    source: ModelRateSource
+
+
+_VERIFIED_MODEL_RATES = {
+    "gpt-6-luna": ModelTokenRates(
+        input_microunits=100_000,
+        cached_input_microunits=10_000,
+        output_microunits=500_000,
+        source=ModelRateSource.AZURE_RETAIL_GLOBAL_STANDARD_SHORT_CONTEXT,
+    ),
+    "gpt-6.1-sol": ModelTokenRates(
+        input_microunits=2_000_000,
+        cached_input_microunits=100_000,
+        output_microunits=10_000_000,
+        source=ModelRateSource.AZURE_RETAIL_GLOBAL_STANDARD_SHORT_CONTEXT,
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +204,10 @@ class DecisionEvaluation:
     dag_tier: ModelTier
     dag_fast_probability: float
     decision_input_tokens: int
+    source: RouteDecisionSource = RouteDecisionSource.HEURISTIC
+    fallback_reason: str | None = None
+    http_status: int | None = None
+    duration_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +223,8 @@ class SegmentRouteDecision:
     reason: str
     cost_estimate: StepCostEstimate
     evaluation: DecisionEvaluation | None = None
+    source: RouteDecisionSource = RouteDecisionSource.SHORT_CIRCUIT
+    recorded_at: datetime | None = None
 
 
 def compile_segment_dag_tool_descriptor() -> FrozenToolDescriptorV1:
@@ -213,6 +284,55 @@ class PrefixCacheLedger:
         """Return whether the previous step compiled and ran a sub-DAG."""
         return self._last_step_was_dag.get(run_id, False)
 
+    def restore(
+        self,
+        *,
+        run_id: str,
+        state: SegmentOptimizerStateV1 | None,
+    ) -> None:
+        """Replace one run's worker-local view from its durable snapshot."""
+        for key in tuple(self._watermarks):
+            if key[0] == run_id:
+                del self._watermarks[key]
+        self._last_routed_model.pop(run_id, None)
+        self._last_step_was_dag.pop(run_id, None)
+        if state is None:
+            return
+        for watermark in state.watermarks:
+            self._watermarks[(run_id, watermark.model)] = ModelWatermark(
+                model=watermark.model,
+                message_count=watermark.message_count,
+                prefix_hash=watermark.prefix_hash,
+                input_tokens=watermark.input_tokens,
+                cached_tokens=watermark.cached_tokens,
+                updated_at=watermark.updated_at,
+            )
+        if state.last_routed_model is not None:
+            self._last_routed_model[run_id] = state.last_routed_model
+        self._last_step_was_dag[run_id] = state.last_step_was_dag
+
+    def snapshot(self, *, run_id: str) -> SegmentOptimizerStateV1:
+        """Return the bounded durable snapshot for one run."""
+        watermarks = tuple(
+            PrefixCacheWatermarkV1(
+                model=watermark.model,
+                message_count=watermark.message_count,
+                prefix_hash=watermark.prefix_hash,
+                input_tokens=watermark.input_tokens,
+                cached_tokens=watermark.cached_tokens,
+                updated_at=watermark.updated_at,
+            )
+            for (watermark_run_id, _model), watermark in sorted(
+                self._watermarks.items()
+            )
+            if watermark_run_id == run_id
+        )
+        return SegmentOptimizerStateV1(
+            watermarks=watermarks,
+            last_routed_model=self._last_routed_model.get(run_id),
+            last_step_was_dag=self._last_step_was_dag.get(run_id, False),
+        )
+
     def estimate_step_cost(
         self,
         *,
@@ -246,17 +366,19 @@ class PrefixCacheLedger:
             now=now,
         )
         frontier_cost = _compute_tier_cost_microunits(
+            model=frontier_model,
             tier=ModelTier.FRONTIER,
             warm_input_tokens=frontier_warm,
             cold_input_tokens=frontier_cold,
-            output_tokens=_ESTIMATED_STEP_OUTPUT_TOKENS,
+            output_tokens=ESTIMATED_STEP_OUTPUT_TOKENS,
         )
         switch_penalty_tokens = frontier_warm if frontier_warm > 0 and fast_warm == 0 else 0
         fast_cost = _compute_tier_cost_microunits(
+            model=fast_model,
             tier=ModelTier.FAST,
             warm_input_tokens=fast_warm,
             cold_input_tokens=fast_cold + switch_penalty_tokens,
-            output_tokens=_ESTIMATED_STEP_OUTPUT_TOKENS,
+            output_tokens=ESTIMATED_STEP_OUTPUT_TOKENS,
         )
         return StepCostEstimate(
             estimated_input_tokens=total_input_tokens,
@@ -310,13 +432,15 @@ class PrefixCacheLedger:
         self._last_step_was_dag[run_id] = emitted_dag
 
         model_cost = _compute_tier_cost_microunits(
+            model=model,
             tier=tier,
             warm_input_tokens=warm_tokens,
             cold_input_tokens=cold_tokens,
             output_tokens=output_tokens,
         )
         decision_cost = math.ceil(
-            (decision_input_tokens * DECISION_INPUT_RATE_MICROUNITS) / 1_000_000
+            (decision_input_tokens * _ASSUMED_DECISION_INPUT_RATE_MICROUNITS)
+            / 1_000_000
         )
         return model_cost + decision_cost
 
@@ -374,31 +498,51 @@ def build_decision_one_payload(
             "dag_viable": {
                 "type": "noul",
                 "instructions": (
-                    "Can the next 2+ tool calls execute as a fixed DAG without "
-                    "inspecting intermediate outputs?"
+                    "Return true only when the next 2+ executable tool calls can "
+                    "be fully specified now as one fixed DAG. Static arguments "
+                    "and declared ${node.result.field} dependencies are allowed. "
+                    "Return false when there is no executable task, only one tool "
+                    "call, missing arguments, clarification, branching, recovery, "
+                    "or any need to inspect an intermediate output before deciding "
+                    "the next call."
                 ),
             },
             "step_tier": {
                 "type": "choice",
-                "instructions": "If executing a single step, which model tier is needed?",
+                "instructions": (
+                    "Choose the minimum sufficient configured tier for the next "
+                    "single step. Judge the actual next action, not casual wording "
+                    "or prompt length."
+                ),
                 "criteria": {
                     ModelTier.FAST.value: (
-                        "Single obvious tool call or straightforward summary."
+                        "Greetings, small talk, acknowledgements, simple "
+                        "clarification, direct answers, straightforward summaries, "
+                        "or one obvious tool call with known arguments."
                     ),
                     ModelTier.FRONTIER.value: (
-                        "Complex reasoning, ambiguity, or error recovery."
+                        "Substantive next-action reasoning, consequential ambiguity, "
+                        "multi-constraint synthesis, or recovery after failure. "
+                        "Do not choose frontier merely for casual wording or when "
+                        "there is no executable task."
                     ),
                 },
             },
             "dag_tier": {
                 "type": "choice",
-                "instructions": "If authoring a multi-tool DAG, which model tier is needed?",
+                "instructions": (
+                    "If a fixed multi-tool DAG is viable, choose the minimum "
+                    "sufficient configured tier to author it."
+                ),
                 "criteria": {
                     ModelTier.FAST.value: (
-                        "Simple parallel fan-out with static arguments."
+                        "Simple parallel fan-out or an obvious fixed dependency "
+                        "chain with fully known arguments."
                     ),
                     ModelTier.FRONTIER.value: (
-                        "Chained dependencies using ${node.result.field} templates."
+                        "A fixed DAG whose construction still requires substantive "
+                        "reasoning across constraints or consequential ambiguity. "
+                        "Template dependencies alone do not require frontier."
                     ),
                 },
             },
@@ -553,9 +697,13 @@ class HttpDecisionOneClient:
         payload: Mapping[str, object],
     ) -> DecisionEvaluation:
         if not self._endpoint_url:
-            return await self._fallback.evaluate(payload)
+            return replace(
+                await self._fallback.evaluate(payload),
+                fallback_reason="endpoint_unconfigured",
+            )
         import aiohttp
 
+        started_at = time.perf_counter()
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self._headers_provider is not None:
             extra = self._headers_provider()
@@ -575,16 +723,52 @@ class HttpDecisionOneClient:
                 ) as response,
             ):
                 if response.status != 200:
-                    return await self._fallback.evaluate(payload)
+                    return replace(
+                        await self._fallback.evaluate(payload),
+                        fallback_reason="http_non_200",
+                        http_status=response.status,
+                        duration_ms=max(
+                            0.0,
+                            (time.perf_counter() - started_at) * 1000.0,
+                        ),
+                    )
                 body = json.loads(await response.read())
                 if not isinstance(body, Mapping):
-                    return await self._fallback.evaluate(payload)
-                return parse_decision_one_response(
-                    body,
-                    fallback_input_tokens=fallback_tokens,
+                    return replace(
+                        await self._fallback.evaluate(payload),
+                        fallback_reason="invalid_response",
+                        http_status=response.status,
+                        duration_ms=max(
+                            0.0,
+                            (time.perf_counter() - started_at) * 1000.0,
+                        ),
+                    )
+                return replace(
+                    parse_decision_one_response(
+                        body,
+                        fallback_input_tokens=fallback_tokens,
+                    ),
+                    source=RouteDecisionSource.LIVE,
+                    http_status=response.status,
+                    duration_ms=max(
+                        0.0,
+                        (time.perf_counter() - started_at) * 1000.0,
+                    ),
                 )
+        except TimeoutError:
+            fallback_reason = "timeout"
+        except (aiohttp.ClientError, json.JSONDecodeError, ValueError):
+            fallback_reason = "request_failed"
         except Exception:
-            return await self._fallback.evaluate(payload)
+            fallback_reason = "unexpected_failure"
+        return replace(
+            await self._fallback.evaluate(payload),
+            fallback_reason=fallback_reason,
+            duration_ms=max(
+                0.0,
+                (time.perf_counter() - started_at) * 1000.0,
+            ),
+        )
 
 
 class DurableSegmentOptimizer(
@@ -620,9 +804,10 @@ class DurableSegmentOptimizer(
     ) -> ModelDecisionEnvelopeV1:
         if not self._settings.decision_routing_enabled:
             return await self._inner.run_one_step(request)
-        routed_request, route = await self._prepare_routed_request(request)
+        route = await self.route_request(request)
+        routed_request = self.apply_route(request, route)
         decision = await self._inner.run_one_step(routed_request)
-        return self._finalize_decision(request, routed_request, route, decision)
+        return self.finalize_decision(request, routed_request, route, decision)
 
     async def run_one_step_with_observer(
         self,
@@ -639,7 +824,8 @@ class DurableSegmentOptimizer(
                     producers=producers,
                 )
             return await self._inner.run_one_step(request)
-        routed_request, route = await self._prepare_routed_request(request)
+        route = await self.route_request(request)
+        routed_request = self.apply_route(request, route)
         if isinstance(self._inner, DurableChatStreamingModelProvider):
             decision = await self._inner.run_one_step_with_observer(
                 routed_request,
@@ -648,12 +834,13 @@ class DurableSegmentOptimizer(
             )
         else:
             decision = await self._inner.run_one_step(routed_request)
-        return self._finalize_decision(request, routed_request, route, decision)
+        return self.finalize_decision(request, routed_request, route, decision)
 
-    async def _prepare_routed_request(
+    async def route_request(
         self,
         request: OneStepModelRequest,
-    ) -> tuple[OneStepModelRequest, SegmentRouteDecision]:
+    ) -> SegmentRouteDecision:
+        """Select one immutable route without invoking the model provider."""
         now = self._clock()
         run_id = request.identity.run_id
         frontier_model = request.working_context.bundle.model
@@ -674,7 +861,7 @@ class DurableSegmentOptimizer(
             if tool.provenance is not ToolProvenance.RUNTIME
             and tool.name != COMPILE_SEGMENT_DAG_TOOL_NAME
         ]
-        completed_tools, last_status, latest_preview = _inspect_tool_history(messages)
+        completed_tools, last_status = _inspect_tool_history(messages)
         remaining_tool_budget = max(
             0,
             request.identity.budget.max_tool_calls - len(completed_tools),
@@ -695,6 +882,7 @@ class DurableSegmentOptimizer(
                 short_circuited=True,
                 reason="last_tool_failed_fail_safe",
                 cost_estimate=cost_estimate,
+                recorded_at=now,
             )
         elif (
             not dag_possible
@@ -710,18 +898,19 @@ class DurableSegmentOptimizer(
                 short_circuited=True,
                 reason="warm_frontier_cheaper_than_cold_fast",
                 cost_estimate=cost_estimate,
+                recorded_at=now,
             )
         else:
-            state_projection = {
-                "step_index": request.step_index,
-                "user_goal": _extract_user_goal(messages),
-                "completed_tools": completed_tools,
-                "last_tool_status": last_status,
-                "latest_tool_output_preview": latest_preview,
-                "available_tools": executable_tools,
-                "estimated_input_tokens": cost_estimate.estimated_input_tokens,
-                "frontier_cache_warm": cost_estimate.frontier_cache_warm,
-            }
+            state_projection = _build_decision_state(
+                request=request,
+                messages=messages,
+                executable_tools=frozenset(executable_tools),
+                completed_tools=completed_tools,
+                last_tool_status=last_status,
+                fast_model=fast_model,
+                frontier_model=frontier_model,
+                cost_estimate=cost_estimate,
+            )
             payload = build_decision_one_payload(
                 decision_model=self._settings.decision_model,
                 state=state_projection,
@@ -761,9 +950,24 @@ class DurableSegmentOptimizer(
                 reason=reason,
                 cost_estimate=cost_estimate,
                 evaluation=evaluation,
+                source=evaluation.source,
+                recorded_at=now,
             )
 
         self.route_history.append(route)
+        return route
+
+    def apply_route(
+        self,
+        request: OneStepModelRequest,
+        route: SegmentRouteDecision,
+    ) -> OneStepModelRequest:
+        """Apply a previously selected route without evaluating routing again."""
+        if route.run_id != request.identity.run_id or route.step_index != request.step_index:
+            raise ValueError("segment route does not match the model request")
+        run_id = request.identity.run_id
+        messages = request.working_context.bundle.messages
+        frontier_model = request.working_context.bundle.model
         previous_model = self._ledger.last_routed_model(run_id) or frontier_model
         sanitized_messages = (
             _strip_foreign_reasoning(messages)
@@ -801,9 +1005,9 @@ class DurableSegmentOptimizer(
             fault_profile=request.fault_profile,
             effective_active_deadline=request.effective_active_deadline,
         )
-        return routed_request, route
+        return routed_request
 
-    def _finalize_decision(
+    def finalize_decision(
         self,
         original_request: OneStepModelRequest,
         routed_request: OneStepModelRequest,
@@ -829,7 +1033,7 @@ class DurableSegmentOptimizer(
             output_tokens=decision.usage.output_tokens,
             decision_input_tokens=decision_tokens,
             emitted_dag=emitted_dag,
-            now=self._clock(),
+            now=route.recorded_at or self._clock(),
         )
         updated_usage = decision.usage.model_copy(
             update={"cost_microunits": cost_microunits}
@@ -840,6 +1044,121 @@ class DurableSegmentOptimizer(
                 "usage": updated_usage,
             }
         )
+
+
+def serialize_segment_route_decision(
+    route: SegmentRouteDecision,
+    *,
+    request_hash: str,
+) -> dict[str, object]:
+    """Serialize one content-free route for Durable activity handoff."""
+    evaluation = route.evaluation
+    return {
+        "request_hash": request_hash,
+        "run_id": route.run_id,
+        "step_index": route.step_index,
+        "mode": route.mode.value,
+        "tier": route.tier.value,
+        "target_model": route.target_model,
+        "short_circuited": route.short_circuited,
+        "reason": route.reason,
+        "source": route.source.value,
+        "recorded_at": (
+            route.recorded_at.isoformat()
+            if route.recorded_at is not None
+            else None
+        ),
+        "cost_estimate": {
+            "estimated_input_tokens": route.cost_estimate.estimated_input_tokens,
+            "frontier_warm_tokens": route.cost_estimate.frontier_warm_tokens,
+            "frontier_cold_tokens": route.cost_estimate.frontier_cold_tokens,
+            "frontier_cost_microunits": route.cost_estimate.frontier_cost_microunits,
+            "fast_warm_tokens": route.cost_estimate.fast_warm_tokens,
+            "fast_cold_tokens": route.cost_estimate.fast_cold_tokens,
+            "fast_cost_microunits": route.cost_estimate.fast_cost_microunits,
+            "frontier_cache_warm": route.cost_estimate.frontier_cache_warm,
+        },
+        "evaluation": (
+            {
+                "dag_viable": evaluation.dag_viable,
+                "step_tier": evaluation.step_tier.value,
+                "step_fast_probability": evaluation.step_fast_probability,
+                "dag_tier": evaluation.dag_tier.value,
+                "dag_fast_probability": evaluation.dag_fast_probability,
+                "decision_input_tokens": evaluation.decision_input_tokens,
+                "source": evaluation.source.value,
+                "fallback_reason": evaluation.fallback_reason,
+                "http_status": evaluation.http_status,
+                "duration_ms": evaluation.duration_ms,
+            }
+            if evaluation is not None
+            else None
+        ),
+    }
+
+
+def deserialize_segment_route_decision(
+    value: Mapping[str, object],
+) -> tuple[str, SegmentRouteDecision]:
+    """Parse one route emitted by the routing activity."""
+    step_index = value["step_index"]
+    if not isinstance(step_index, int) or isinstance(step_index, bool):
+        raise ValueError("segment route step index is invalid")
+    cost = value["cost_estimate"]
+    if not isinstance(cost, Mapping):
+        raise ValueError("segment route cost estimate is invalid")
+    evaluation_value = value.get("evaluation")
+    evaluation = None
+    if evaluation_value is not None:
+        if not isinstance(evaluation_value, Mapping):
+            raise ValueError("segment route evaluation is invalid")
+        evaluation = DecisionEvaluation(
+            dag_viable=float(evaluation_value["dag_viable"]),
+            step_tier=ModelTier(str(evaluation_value["step_tier"])),
+            step_fast_probability=float(evaluation_value["step_fast_probability"]),
+            dag_tier=ModelTier(str(evaluation_value["dag_tier"])),
+            dag_fast_probability=float(evaluation_value["dag_fast_probability"]),
+            decision_input_tokens=int(evaluation_value["decision_input_tokens"]),
+            source=RouteDecisionSource(str(evaluation_value["source"])),
+            fallback_reason=(
+                str(evaluation_value["fallback_reason"])
+                if evaluation_value.get("fallback_reason") is not None
+                else None
+            ),
+            http_status=(
+                int(evaluation_value["http_status"])
+                if evaluation_value.get("http_status") is not None
+                else None
+            ),
+            duration_ms=float(evaluation_value["duration_ms"]),
+        )
+    route = SegmentRouteDecision(
+        run_id=str(value["run_id"]),
+        step_index=step_index,
+        mode=SegmentMode(str(value["mode"])),
+        tier=ModelTier(str(value["tier"])),
+        target_model=str(value["target_model"]),
+        short_circuited=bool(value["short_circuited"]),
+        reason=str(value["reason"]),
+        source=RouteDecisionSource(str(value["source"])),
+        cost_estimate=StepCostEstimate(
+            estimated_input_tokens=int(cost["estimated_input_tokens"]),
+            frontier_warm_tokens=int(cost["frontier_warm_tokens"]),
+            frontier_cold_tokens=int(cost["frontier_cold_tokens"]),
+            frontier_cost_microunits=int(cost["frontier_cost_microunits"]),
+            fast_warm_tokens=int(cost["fast_warm_tokens"]),
+            fast_cold_tokens=int(cost["fast_cold_tokens"]),
+            fast_cost_microunits=int(cost["fast_cost_microunits"]),
+            frontier_cache_warm=bool(cost["frontier_cache_warm"]),
+        ),
+        evaluation=evaluation,
+        recorded_at=(
+            datetime.fromisoformat(str(value["recorded_at"]))
+            if value.get("recorded_at") is not None
+            else None
+        ),
+    )
+    return str(value["request_hash"]), route
 
 
 class SegmentDagToolDispatcher(
@@ -861,6 +1180,20 @@ class SegmentDagToolDispatcher(
         self._catalog_provider = catalog_provider
         self._content = content
         self._max_parallel_reads = max(1, max_parallel_reads)
+
+    async def freeze_catalog(
+        self,
+        *,
+        policy_hash: str,
+        sandbox_profile: SandboxExecutionProfile,
+    ) -> DurableToolCatalogSnapshot:
+        """Preserve the wrapped router's admission catalog boundary."""
+        if not isinstance(self._inner, DurableToolCatalogPort):
+            raise ValueError("durable tool catalog provider is unavailable")
+        return await self._inner.freeze_catalog(
+            policy_hash=policy_hash,
+            sandbox_profile=sandbox_profile,
+        )
 
     async def dispatch(self, request: ToolRequestV1) -> ToolResultV1:
         if request.tool_name != COMPILE_SEGMENT_DAG_TOOL_NAME:
@@ -1481,24 +1814,39 @@ def _flatten_wave_result_refs(
 
 def _compute_tier_cost_microunits(
     *,
+    model: str,
     tier: ModelTier,
     warm_input_tokens: int,
     cold_input_tokens: int,
     output_tokens: int,
 ) -> int:
-    if tier is ModelTier.FAST:
-        raw = (
-            warm_input_tokens * FAST_CACHED_INPUT_RATE_MICROUNITS
-            + cold_input_tokens * FAST_INPUT_RATE_MICROUNITS
-            + output_tokens * FAST_OUTPUT_RATE_MICROUNITS
-        )
-    else:
-        raw = (
-            warm_input_tokens * FRONTIER_CACHED_INPUT_RATE_MICROUNITS
-            + cold_input_tokens * FRONTIER_INPUT_RATE_MICROUNITS
-            + output_tokens * FRONTIER_OUTPUT_RATE_MICROUNITS
-        )
+    rates = model_token_rates(model, tier=tier)
+    raw = (
+        warm_input_tokens * rates.cached_input_microunits
+        + cold_input_tokens * rates.input_microunits
+        + output_tokens * rates.output_microunits
+    )
     return math.ceil(raw / 1_000_000)
+
+
+def model_token_rates(model: str, *, tier: ModelTier) -> ModelTokenRates:
+    """Return verified exact-model rates or the compatible assumed tier default."""
+    verified = _VERIFIED_MODEL_RATES.get(model)
+    if verified is not None:
+        return verified
+    if tier is ModelTier.FAST:
+        return ModelTokenRates(
+            input_microunits=_ASSUMED_FAST_INPUT_RATE_MICROUNITS,
+            cached_input_microunits=_ASSUMED_FAST_CACHED_INPUT_RATE_MICROUNITS,
+            output_microunits=_ASSUMED_FAST_OUTPUT_RATE_MICROUNITS,
+            source=ModelRateSource.ASSUMED_TIER_DEFAULT,
+        )
+    return ModelTokenRates(
+        input_microunits=_ASSUMED_FRONTIER_INPUT_RATE_MICROUNITS,
+        cached_input_microunits=_ASSUMED_FRONTIER_CACHED_INPUT_RATE_MICROUNITS,
+        output_microunits=_ASSUMED_FRONTIER_OUTPUT_RATE_MICROUNITS,
+        source=ModelRateSource.ASSUMED_TIER_DEFAULT,
+    )
 
 
 def _parse_tier_choice(entry: object) -> tuple[ModelTier, float]:
@@ -1517,27 +1865,196 @@ def _parse_tier_choice(entry: object) -> tuple[ModelTier, float]:
     return tier, fast_prob
 
 
-def _extract_user_goal(messages: Sequence[dict[str, object]]) -> str:
+def _extract_user_goal(
+    messages: Sequence[dict[str, object]],
+) -> tuple[str, bool]:
     for message in reversed(messages):
         if message.get("role") != "user":
             continue
-        contents = message.get("contents")
-        if not isinstance(contents, list | tuple):
+        text = _message_text(message)
+        if text:
+            return _bounded_safe_text(
+                text,
+                maximum_chars=_DECISION_USER_GOAL_MAX_CHARS,
+            )
+    return "", False
+
+
+def _build_decision_state(
+    *,
+    request: OneStepModelRequest,
+    messages: Sequence[dict[str, object]],
+    executable_tools: frozenset[str],
+    completed_tools: Sequence[str],
+    last_tool_status: str,
+    fast_model: str,
+    frontier_model: str,
+    cost_estimate: StepCostEstimate,
+) -> dict[str, object]:
+    tool_catalog, omitted_tool_count, truncated_tool_description_count = (
+        _project_tool_catalog(
+            request.catalog,
+            executable_tools=executable_tools,
+        )
+    )
+    (
+        recent_conversation,
+        omitted_message_count,
+        truncated_message_count,
+    ) = _project_recent_conversation(messages)
+    user_goal, user_goal_truncated = _extract_user_goal(messages)
+    agent_instructions, agent_instructions_truncated = _bounded_safe_text(
+        request.instructions,
+        maximum_chars=_DECISION_AGENT_INSTRUCTIONS_MAX_CHARS,
+    )
+    bounded_completed_tools = list(completed_tools[-_DECISION_COMPLETED_TOOLS_MAX_COUNT:])
+    return {
+        "step_index": request.step_index,
+        "user_goal": user_goal,
+        "user_goal_truncated": user_goal_truncated,
+        "agent_instructions": agent_instructions,
+        "agent_instructions_truncated": agent_instructions_truncated,
+        "recent_conversation": recent_conversation,
+        "omitted_conversation_message_count": omitted_message_count,
+        "truncated_conversation_message_count": truncated_message_count,
+        "completed_tools": bounded_completed_tools,
+        "omitted_completed_tool_count": max(
+            0,
+            len(completed_tools) - len(bounded_completed_tools),
+        ),
+        "last_tool_status": last_tool_status,
+        "available_tools": tool_catalog,
+        "omitted_available_tool_count": omitted_tool_count,
+        "truncated_tool_description_count": truncated_tool_description_count,
+        "configured_tiers": {
+            ModelTier.FAST.value: {"model": fast_model},
+            ModelTier.FRONTIER.value: {"model": frontier_model},
+        },
+        "estimated_input_tokens": cost_estimate.estimated_input_tokens,
+        "frontier_cache_warm": cost_estimate.frontier_cache_warm,
+    }
+
+
+def _project_recent_conversation(
+    messages: Sequence[dict[str, object]],
+) -> tuple[list[dict[str, object]], int, int]:
+    projected_reversed: list[dict[str, object]] = []
+    eligible_count = 0
+    truncated_count = 0
+    remaining_chars = _DECISION_RECENT_CONVERSATION_MAX_CHARS
+    for message in reversed(messages):
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
             continue
-        for item in contents:
-            if isinstance(item, Mapping) and item.get("type") == "text":
-                text = item.get("text")
-                if isinstance(text, str) and text.strip():
-                    return text.strip()[:512]
-    return ""
+        text = _message_text(message)
+        if not text:
+            continue
+        eligible_count += 1
+        if (
+            len(projected_reversed) >= _DECISION_RECENT_CONVERSATION_MAX_MESSAGES
+            or remaining_chars <= 0
+        ):
+            continue
+        bounded, truncated = _bounded_safe_text(
+            text,
+            maximum_chars=min(_DECISION_RECENT_MESSAGE_MAX_CHARS, remaining_chars),
+        )
+        if not bounded:
+            continue
+        projected_reversed.append({"role": str(role), "text": bounded})
+        truncated_count += int(truncated)
+        remaining_chars -= len(bounded)
+    projected = list(reversed(projected_reversed))
+    return (
+        projected,
+        max(0, eligible_count - len(projected)),
+        truncated_count,
+    )
+
+
+def _project_tool_catalog(
+    catalog: FrozenToolCatalogV1,
+    *,
+    executable_tools: frozenset[str],
+) -> tuple[list[dict[str, object]], int, int]:
+    projected: list[dict[str, object]] = []
+    eligible_count = 0
+    truncated_description_count = 0
+    remaining_chars = _DECISION_TOOL_CATALOG_MAX_CHARS
+    for tool in catalog.tools:
+        if tool.name not in executable_tools:
+            continue
+        eligible_count += 1
+        if (
+            len(projected) >= _DECISION_TOOL_CATALOG_MAX_TOOLS
+            or remaining_chars <= 0
+        ):
+            continue
+        description, description_truncated = _bounded_safe_text(
+            tool.description,
+            maximum_chars=min(_DECISION_TOOL_DESCRIPTION_MAX_CHARS, remaining_chars),
+        )
+        projected.append(
+            {
+                "name": tool.name,
+                "description": description,
+                "behavior": tool.behavior.value,
+                "parallel_safe": tool.parallel_safe,
+            }
+        )
+        truncated_description_count += int(description_truncated)
+        remaining_chars -= len(description)
+    return (
+        projected,
+        max(0, eligible_count - len(projected)),
+        truncated_description_count,
+    )
+
+
+def _message_text(message: Mapping[str, object]) -> str:
+    contents = message.get("contents")
+    if not isinstance(contents, list | tuple):
+        return ""
+    text_parts = [
+        text.strip()
+        for item in contents
+        if isinstance(item, Mapping) and item.get("type") == "text"
+        if isinstance((text := item.get("text")), str) and text.strip()
+    ]
+    return "\n".join(text_parts)
+
+
+def _bounded_safe_text(
+    text: str,
+    *,
+    maximum_chars: int,
+) -> tuple[str, bool]:
+    redacted = _BEARER_TOKEN_PATTERN.sub("Bearer <redacted>", text.strip())
+    redacted = _CREDENTIAL_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}<redacted>",
+        redacted,
+    )
+    if len(redacted) <= maximum_chars:
+        return redacted, False
+    if maximum_chars <= len(_TRUNCATION_MARKER):
+        return _TRUNCATION_MARKER[:maximum_chars], True
+    retained_chars = maximum_chars - len(_TRUNCATION_MARKER)
+    prefix_chars = (retained_chars + 1) // 2
+    suffix_chars = retained_chars - prefix_chars
+    suffix = redacted[-suffix_chars:] if suffix_chars else ""
+    return (
+        redacted[:prefix_chars]
+        + _TRUNCATION_MARKER
+        + suffix,
+        True,
+    )
 
 
 def _inspect_tool_history(
     messages: Sequence[dict[str, object]],
-) -> tuple[list[str], str, str]:
+) -> tuple[list[str], str]:
     completed: list[str] = []
     last_status = "none"
-    latest_preview = ""
     for message in messages:
         if message.get("role") != "tool":
             continue
@@ -1558,11 +2075,7 @@ def _inspect_tool_history(
                 last_status = "failed"
             else:
                 last_status = "succeeded"
-            try:
-                latest_preview = canonical_json_bytes(result).decode("utf-8")[:256]
-            except Exception:
-                latest_preview = str(result)[:256]
-    return completed, last_status, latest_preview
+    return completed, last_status
 
 
 def _strip_foreign_reasoning(

@@ -177,6 +177,14 @@ publisher drain time independently of model and tool budgets. Its failure is
 visible as degraded or status-only UI behavior, but cannot fail an otherwise
 successful execution, force a model/tool retry, or block cleanup.
 
+Initialization failures are logged to the Functions console with `error_details`:
+exception-chain types, file/line/function locations, and validation field names
+and error codes. Exception messages and rejected values are omitted to avoid
+logging credentials or conversation content. Follow the reported source location
+to diagnose the failure. Missing orchestration instances or unavailable input
+return the same owner-safe `run_not_found` response and are logged at debug level,
+not as validation warnings. Malformed non-null input still produces a warning.
+
 UI initialization is create-once and bound to the admitted run, including the
 effective model mode, request hash, plan/input references, lifetime, and
 diagnostic metadata. Recovery reuses that winner; it does not rebuild a plan

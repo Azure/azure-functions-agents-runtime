@@ -57,7 +57,7 @@ dev = [
     # Bring the exporter into the dev/test/type-check env so the observability tests (which import
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
-    "azure-monitor-opentelemetry==1.8.8",
+    "azurefunctions-agents-runtime[monitor]",
     # Self-reference the aca_sandbox extra rather than duplicating its pins, so dev/CI
     # type-checks against the real preview SDK and cannot drift out of sync.
     "azurefunctions-agents-runtime[aca_sandbox]",
