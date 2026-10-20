@@ -402,7 +402,7 @@ Current supported direction:
 - SDK-owned session files behind SessionFs; and
 - no silent weakening of policy or validation.
 
-Under the pending supplied-ID amendment, both HTTP caller IDs and MCP transport
+Under the approved supplied-ID amendment, both HTTP caller IDs and MCP transport
 IDs select create only on confirmed storage absence, otherwise SDK resume.
 This is not fallback after a resume error and does not add history replay,
 storage recovery, distributed coordination, or an SDK dependency change.

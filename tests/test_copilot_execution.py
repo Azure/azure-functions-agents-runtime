@@ -52,7 +52,10 @@ from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     OpenAIProvider,
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
-from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
+from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import (
+    CopilotSessionFs,
+    open_session_fs,
+)
 from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     CopilotSessionError,
     resolve_route,
@@ -90,6 +93,16 @@ def _sdk_event(event_type, data):
     from copilot.session_events import SessionEvent
 
     return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=event_type)
+
+
+async def _seed_session_state(preview, *, agent_slug="main", session_id="example"):
+    provider = await open_session_fs(
+        copilot_state(preview).session_storage, agent_slug, session_id
+    )
+    try:
+        await provider.write_file("/session-state/native", "")
+    finally:
+        await provider.close()
 
 
 def _fake_client():
@@ -143,6 +156,14 @@ async def test_sdk_owns_create_and_resume_without_history_scans(preview, monkeyp
         "Host must not load native history."
     )
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    if not new_session:
+        seeded = await open_session_fs(
+            copilot_state(preview).session_storage, "main", "example"
+        )
+        try:
+            await seeded.write_file("/session-state/native", "")
+        finally:
+            await seeded.close()
     try:
         result = await _copilot.run(preview, _request(new_session=new_session))
         assert result.content == "synthetic reply"
@@ -160,6 +181,95 @@ async def test_sdk_owns_create_and_resume_without_history_scans(preview, monkeyp
         if not new_session:
             assert client.resume_session.call_args.kwargs["continue_pending_work"] is False
         session.disconnect.assert_awaited_once()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_fresh_supplied_session_id_creates_requested_native_session(preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(preview, _request(new_session=False))
+        assert result.session_id == "example"
+        client.create_session.assert_awaited_once()
+        assert client.create_session.call_args.kwargs["session_id"] == "main-example"
+        client.resume_session.assert_not_awaited()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_use_of_supplied_session_creates_once_then_resumes(
+    preview, monkeypatch
+):
+    import copilot
+
+    monkeypatch.setattr(_execution, "_SESSION_LOCKS", {})
+    monkeypatch.setattr(_execution, "_SESSION_LOCKS_GUARD", asyncio.Lock())
+    create_started = asyncio.Event()
+    release_create = asyncio.Event()
+    client = _fake_client()
+    created_session = client.create_session.return_value
+
+    async def create_session(**options):
+        storage = options["create_session_fs_handler"](created_session)
+        create_started.set()
+        await release_create.wait()
+        await storage.write_file("/session-state/native", "")
+        return created_session
+
+    client.create_session.side_effect = create_session
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    first = asyncio.create_task(_copilot.run(preview, _request(new_session=False)))
+    second = None
+    try:
+        await asyncio.wait_for(create_started.wait(), timeout=5)
+        second = asyncio.create_task(_copilot.run(preview, _request(new_session=False)))
+        await asyncio.sleep(0)
+        client.create_session.assert_awaited_once()
+        client.resume_session.assert_not_awaited()
+
+        release_create.set()
+        first_result, second_result = await asyncio.gather(first, second)
+
+        assert first_result.session_id == second_result.session_id == "example"
+        client.create_session.assert_awaited_once()
+        client.resume_session.assert_awaited_once()
+        assert client.create_session.call_args.kwargs["session_id"] == "main-example"
+        assert client.resume_session.call_args.args[0] == "main-example"
+    finally:
+        release_create.set()
+        if second is not None:
+            await asyncio.gather(first, second, return_exceptions=True)
+        else:
+            await asyncio.gather(first, return_exceptions=True)
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_supplied_session_state_classification_failure_never_opens_native_session(
+    preview, monkeypatch
+):
+    import copilot
+
+    original = CopilotSessionError(errno.EACCES, "State classification failed.")
+    classify = AsyncMock(side_effect=original)
+    client = _fake_client()
+    client_factory = Mock(return_value=client)
+    monkeypatch.setattr(CopilotSessionFs, "has_persisted_state", classify)
+    monkeypatch.setattr(copilot, "CopilotClient", client_factory)
+
+    try:
+        with pytest.raises(CopilotSessionError) as caught:
+            await _copilot.run(preview, _request(new_session=False))
+
+        assert caught.value is original
+        classify.assert_awaited_once()
+        client.create_session.assert_not_awaited()
+        client.resume_session.assert_not_awaited()
     finally:
         await _lifecycle._shutdown_harnesses()
 
@@ -263,6 +373,7 @@ async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_tur
     try:
         first = await _copilot.run(preview, request)
         assert session.handlers == []
+        await _seed_session_state(preview)
         second = await _copilot.run(preview, replace(request, new_session=False))
 
         assert first.content == "reply-1"
@@ -724,6 +835,7 @@ async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_h
     monkeypatch.setattr(copilot, "CopilotClient", factory)
     try:
         first = await _copilot.run(preview, request)
+        await _seed_session_state(preview, session_id="one.two-three")
         second = await _copilot.run(preview, replace(request, new_session=False))
         assert first.session_id == second.session_id == "one.two-three"
         created = client.create_session.call_args.kwargs
@@ -813,6 +925,8 @@ async def test_native_skill_exposure_matches_approved_inventory_on_create_and_re
         return client.create_session.return_value.send_and_wait.return_value
 
     client.create_session.return_value.send_and_wait.side_effect = read_resource_during_turn
+    if not new_session:
+        await _seed_session_state(preview)
     try:
         await _copilot.run(preview, replace(
             _request(new_session=new_session),
@@ -945,6 +1059,8 @@ async def test_mcp_session_failure_does_not_drop_capabilities_reset_or_retry(
     method = client.create_session if new_session else client.resume_session
     method.side_effect = RuntimeError("private MCP connection detail")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    if not new_session:
+        await _seed_session_state(preview)
     try:
         with pytest.raises(RuntimeError, match="private MCP connection detail") as caught:
             await _copilot.run(preview, replace(
@@ -1437,6 +1553,7 @@ async def test_provider_options_use_sdk_declared_types(
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         result = await _copilot.run(selected, replace(_request(), max_output_tokens=256))
+        await _seed_session_state(selected)
         resumed = await _copilot.run(selected, replace(_request(new_session=False), max_output_tokens=512))
         assert result.content == "synthetic reply"
         assert resumed.content == "synthetic reply"
@@ -1497,6 +1614,7 @@ async def test_request_output_limit_is_isolated_per_turn(preview, monkeypatch):
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         await _copilot.run(preview, replace(_request(), max_output_tokens=128))
+        await _seed_session_state(preview)
         await _copilot.run(preview, replace(_request(new_session=False), max_output_tokens=384))
         await _copilot.run(preview, _request())
     finally:
@@ -1760,6 +1878,7 @@ async def test_provider_config_is_resupplied_on_resume(preview, monkeypatch):
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         await _copilot.run(preview, _request())
+        await _seed_session_state(preview)
         await _copilot.run(preview, _request(new_session=False))
     finally:
         await _lifecycle._shutdown_harnesses()
@@ -1792,6 +1911,8 @@ async def test_session_open_preserves_native_exception_and_cause(
     close = AsyncMock(side_effect=RuntimeError("secondary close failed") if cleanup_fails else None)
     monkeypatch.setattr(_copilot, "_close_storage", close)
     request = _request(new_session=new_session)
+    if not new_session:
+        await _seed_session_state(preview)
     try:
         with pytest.raises(RuntimeError, match="native session open failed") as caught:
             await _copilot.run(preview, request)
@@ -1855,6 +1976,13 @@ async def test_native_session_open_failure_reaches_endpoint_and_shared_telemetry
     method.side_effect = fail_open
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     chat = _registered_azure_chat(monkeypatch, tmp_path, surface=surface)
+    if not new_session:
+        route = resolve_route(tmp_path)
+        seeded = await open_session_fs(route, "main", "continued")
+        try:
+            await seeded.write_file("/session-state/native", "")
+        finally:
+            await seeded.close()
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "fixture-key-not-to-log")
     payload = {"prompt": "fixture prompt not to log"}
     headers = {} if new_session else {"x-ms-session-id": "continued"}
@@ -1909,6 +2037,7 @@ async def test_sdk_resume_failure_is_preserved_and_never_creates_a_session(previ
     client = _fake_client()
     client.resume_session.side_effect = RuntimeError(f"{failure}: private-sdk-details")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    await _seed_session_state(preview)
     try:
         with pytest.raises(RuntimeError, match=failure) as error:
             await _copilot.run(preview, _request(new_session=False))
@@ -2299,6 +2428,14 @@ async def test_same_session_wait_is_bounded_while_other_sessions_remain_concurre
 
     client.resume_session.side_effect = resume_session
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    for agent_slug, session_id in (
+        ("main", "example"),
+        ("main", "other"),
+        ("billing", "example"),
+    ):
+        await _seed_session_state(
+            preview, agent_slug=agent_slug, session_id=session_id
+        )
     first = asyncio.create_task(_copilot.run(preview, _request(new_session=False)))
     try:
         await asyncio.wait_for(started.wait(), timeout=5)

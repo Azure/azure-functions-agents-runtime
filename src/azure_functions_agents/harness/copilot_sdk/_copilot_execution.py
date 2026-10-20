@@ -601,11 +601,15 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     create_session_fs_handler=lambda _session: storage,
                 )
                 lifecycle.apply_session_options(options)
-                operation = "create_session" if request.new_session else "resume_session"
+                new_session = request.new_session
+                if not new_session and not lifecycle.leaf:
+                    operation = "session_state"
+                    new_session = not await storage.has_persisted_state()
+                operation = "create_session" if new_session else "resume_session"
                 session = await _open_session(
                     client,
                     lifecycle.copilot_id,
-                    new_session=request.new_session,
+                    new_session=new_session,
                     options=options,
                     on_permission_request=on_permission_request,
                     reasoning_effort=owner._runner.reasoning_effort,

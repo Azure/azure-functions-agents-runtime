@@ -363,6 +363,17 @@ where `agent_id` comes directly from the shared `_agent_identity.agent_id(slug)`
 helper. Only the selected harness's persistence implementation is imported,
 initialized, and cleaned up.
 
+For caller-supplied HTTP IDs and normalized inbound MCP transport IDs, Copilot
+classifies that namespace after storage opens and before native session open,
+inside the existing process-local same-session lock and deadline. An empty root,
+or a root containing only a correctly typed empty `/workspace` directory, selects
+native create with the requested ID. Any other entry selects strict SDK resume.
+The check uses typed root and workspace listings only; it does not parse native
+filenames or contents. Listing, type, path, permission, and storage failures
+propagate, and a failed resume is never retried as create. Generated sessions and
+disposable leaf sessions keep their existing creation paths. This classification
+adds no cross-worker serialization guarantee.
+
 The same request-owned `SkillPolicy` used by the permission handler also lets
 SessionFs read, stat, and check existence of approved physical skill files outside
 the virtual workspace. This is a read-only file projection, not a directory mount:
