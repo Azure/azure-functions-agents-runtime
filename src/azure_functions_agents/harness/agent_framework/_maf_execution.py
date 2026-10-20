@@ -7,6 +7,7 @@ import contextlib
 import json
 import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 
@@ -92,6 +93,32 @@ class _ReasoningOptions(TypedDict, total=False):
 
 class _ChatOptions(TypedDict):
     reasoning: _ReasoningOptions
+
+
+@dataclass(frozen=True)
+class _MafPreparedInputs:
+    """Normalized MAF inputs before executable SDK adaptation."""
+
+    tools: tuple[ToolDescriptor, ...]
+    mcp_servers: tuple[MCPServerDescriptor, ...]
+    delegate_tools: tuple[ToolDescriptor, ...]
+    instructions: str | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        tools: Sequence[ToolInput],
+        mcp_servers: Sequence[MCPServerDescriptor],
+        delegate_tools: Sequence[ToolInput],
+        instructions: str | None,
+    ) -> _MafPreparedInputs:
+        return cls(
+            tools=tuple(normalize_tool(tool) for tool in tools),
+            mcp_servers=tuple(mcp_servers),
+            delegate_tools=tuple(normalize_tool(tool) for tool in delegate_tools),
+            instructions=instructions,
+        )
 
 
 class _ToolResultEvent(TypedDict):
@@ -268,7 +295,7 @@ def _build_chat_options_from_environment() -> _ChatOptions | None:
     return {"reasoning": reasoning}
 
 
-def assemble_agent_inputs(
+def _prepare_agent_inputs(
     *,
     instructions: str | None,
     tools: Sequence[ToolInput] | None,
@@ -284,9 +311,9 @@ def assemble_agent_inputs(
     delegate_tools: Sequence[ToolInput] | None,
     workflow_policy: WorkflowPlanPolicy | None,
     app_root: Path | None = None,
-) -> tuple[list[AgentTool], str | None]:
+) -> _MafPreparedInputs:
     root = app_root or get_app_root()
-    descriptors = [
+    candidates = [
         *(discover_user_tools(root).tools if tools is None else tools),
         *(sandbox_tools or ()),
         *(web_request_tools or ()),
@@ -294,7 +321,7 @@ def assemble_agent_inputs(
     if workflow_enabled:
         from ...workflows.tools import build_workflow_tools
 
-        descriptors.extend(
+        candidates.extend(
             build_workflow_tools(
                 session_id=resolved_id or "",
                 workflow_agent_slug=workflow_agent_slug or agent_name or "main",
@@ -303,24 +330,48 @@ def assemble_agent_inputs(
                 policy=workflow_policy,
             )
         )
-    resolved_tools: list[AgentTool] = list(
-        build_maf_tools(tuple(map(normalize_tool, descriptors)))
-    )
     servers = (
         tuple(discover_mcp_servers(root).servers.values())
         if mcp_tools is None
         else tuple(mcp_tools)
     )
-    if servers:
-        from ._maf_mcp import build_maf_mcp_tools
-
-        resolved_tools.extend(build_maf_mcp_tools(servers))
-    if delegate_tools:
-        resolved_tools.extend(build_maf_tools(tuple(map(normalize_tool, delegate_tools))))
     effective = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:
         effective = (effective or "") + system_addendum
-    return resolved_tools, effective
+    return _MafPreparedInputs.create(
+        tools=candidates,
+        mcp_servers=servers,
+        delegate_tools=delegate_tools or (),
+        instructions=effective,
+    )
+
+
+def _build_direct_role_agent(
+    chat_client: SupportsChatGetResponse[Any],
+    *,
+    prepared: _MafPreparedInputs,
+    skill_paths: Sequence[Path] | None,
+    agent_name: str | None,
+    history_provider: HistoryProvider | None,
+    agent_configuration: AgentConfiguration,
+) -> Agent[Any]:
+    """Adapt prepared declarations into the executable direct MAF agent."""
+    resolved_tools: list[AgentTool] = list(build_maf_tools(prepared.tools))
+    if prepared.mcp_servers:
+        from ._maf_mcp import build_maf_mcp_tools
+
+        resolved_tools.extend(build_maf_mcp_tools(prepared.mcp_servers))
+    if prepared.delegate_tools:
+        resolved_tools.extend(build_maf_tools(prepared.delegate_tools))
+    return _build_role_agent(
+        chat_client,
+        agent_instructions=prepared.instructions,
+        tools=resolved_tools,
+        skill_paths=skill_paths,
+        agent_name=agent_name,
+        history_provider=history_provider,
+        agent_configuration=agent_configuration,
+    )
 
 
 def _build_role_agent(
@@ -371,7 +422,7 @@ def _build_delegated_agent(
 ) -> tuple[Agent[Any], InferenceTarget]:
     """Build a stateless specialist without expanding its own subagents."""
     chat_client, inference_target = build_chat_client(resolved.model)
-    resolved_tools, effective_instructions = assemble_agent_inputs(
+    prepared = _prepare_agent_inputs(
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
         mcp_tools=list(capabilities.filtered_mcp_tools or []),
@@ -387,10 +438,9 @@ def _build_delegated_agent(
         workflow_policy=None,
         app_root=capabilities._harness.app_root if capabilities._harness is not None else None,
     )
-    agent = _build_role_agent(
+    agent = _build_direct_role_agent(
         chat_client,
-        agent_instructions=effective_instructions,
-        tools=resolved_tools,
+        prepared=prepared,
         skill_paths=capabilities.enabled_skill_paths,
         agent_name=resolved.slug,
         history_provider=None,
@@ -502,7 +552,7 @@ async def _build_agent_session(
             subagents, catalog, coordinator_deadline=effective_deadline, harness=_harness
         )
 
-    resolved_tools, effective_instructions = assemble_agent_inputs(
+    prepared = _prepare_agent_inputs(
         instructions=instructions,
         tools=tools,
         mcp_tools=mcp_tools,
@@ -518,10 +568,9 @@ async def _build_agent_session(
         delegate_tools=delegate_tools,
         workflow_policy=workflow_policy,
     )
-    agent = _build_role_agent(
+    agent = _build_direct_role_agent(
         chat_client,
-        agent_instructions=effective_instructions,
-        tools=resolved_tools,
+        prepared=prepared,
         skill_paths=skill_paths,
         agent_name=agent_name,
         history_provider=history_provider,

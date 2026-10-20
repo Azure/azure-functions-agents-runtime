@@ -173,6 +173,37 @@ def test_role_constructor_keeps_identity_options_native_compaction_and_skills(
     )
 
 
+def test_agent_preparation_keeps_capabilities_declarative(monkeypatch, tmp_path):
+    user_tool = tool(name="user")(lambda: "user")
+    server = MCPServerDescriptor.create(name="server", url="https://fixture.invalid/mcp")
+    monkeypatch.setattr(
+        maf,
+        "build_maf_tools",
+        Mock(side_effect=AssertionError("preparation must not bind executable tools")),
+    )
+
+    prepared = maf._prepare_agent_inputs(
+        instructions="  instructions  ",
+        tools=[user_tool],
+        mcp_tools=[server],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum="\naddendum",
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name="billing",
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+        app_root=tmp_path,
+    )
+
+    assert prepared.instructions == "instructions\naddendum"
+    assert prepared.tools == (user_tool,)
+    assert prepared.mcp_servers == (server,)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("overrides", [False, True])
 async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
@@ -191,8 +222,8 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     tracker = runner._DelegateErrorTracker()
     delegates = AsyncMock(return_value=([delegate_tool], tracker))
     monkeypatch.setattr(runner, "build_subagent_tools", delegates)
-    assemble = Mock(wraps=maf.assemble_agent_inputs)
-    monkeypatch.setattr(maf, "assemble_agent_inputs", assemble)
+    prepare = Mock(wraps=maf._prepare_agent_inputs)
+    monkeypatch.setattr(maf, "_prepare_agent_inputs", prepare)
     build_client = Mock(return_value=(object(), InferenceTarget()))
     monkeypatch.setattr(maf, "build_chat_client", build_client)
     history = object()
@@ -225,7 +256,7 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     delegates.assert_awaited_once_with(
         references, catalog, coordinator_deadline=123.0, harness=None
     )
-    assemble.assert_called_once()
+    prepare.assert_called_once()
     expected = [web_tool, delegate_tool] if overrides else [user_tool, web_tool, mcp_tool, delegate_tool]
     actual = role.call_args.kwargs["tools"]
     assert [item.name for item in actual if item is not mcp_tool] == [

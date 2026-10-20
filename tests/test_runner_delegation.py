@@ -296,15 +296,15 @@ def test_sanitize_delegate_failure_message_identical_across_exception_classes() 
 
 
 # ---------------------------------------------------------------------------
-# _assemble_agent_inputs: direct vs. delegated tool composition
+# _prepare_agent_inputs: direct vs. delegated tool composition
 # ---------------------------------------------------------------------------
 
 
-def test_assemble_agent_inputs_for_delegated_role_has_only_its_own_tools() -> None:
+def test_prepare_agent_inputs_for_delegated_role_has_only_its_own_tools() -> None:
     user_tool = _static_tool("own_user_tool")
     mcp_tool = _mcp_descriptor("own_mcp_tool")
 
-    resolved_tools, instructions = maf.assemble_agent_inputs(
+    prepared = maf._prepare_agent_inputs(
         instructions="be a specialist",
         tools=[user_tool],
         mcp_tools=[mcp_tool],
@@ -323,11 +323,12 @@ def test_assemble_agent_inputs_for_delegated_role_has_only_its_own_tools() -> No
     # Own static tools are present; per-request sandbox and main-only
     # Dynamic-Workflow tools are naturally absent (never passed), and there
     # are no delegate_* tools (delegate_tools=None) — Decisions #13/#15/#6.
-    assert {item.name for item in resolved_tools} == {"own_user_tool", "own_mcp_tool"}
-    assert instructions == "be a specialist"
+    assert {item.name for item in prepared.tools} == {"own_user_tool"}
+    assert {server.name for server in prepared.mcp_servers} == {"own_mcp_tool"}
+    assert prepared.instructions == "be a specialist"
 
 
-def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
+def test_prepare_agent_inputs_for_direct_role_has_full_tool_superset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user_tool = _static_tool("own_user_tool")
@@ -354,7 +355,7 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
         _build_workflow_tools,
     )
 
-    resolved_tools, _ = maf.assemble_agent_inputs(
+    prepared = maf._prepare_agent_inputs(
         instructions="be a coordinator",
         tools=[user_tool],
         mcp_tools=[mcp_tool],
@@ -370,10 +371,11 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
         workflow_policy=policy,
     )
 
-    tool_names = {item.name for item in resolved_tools}
+    tool_names = {
+        item.name for item in (*prepared.tools, *prepared.delegate_tools)
+    }
     assert {
         "own_user_tool",
-        "own_mcp_tool",
         "run_code",
         "web_request",
         "delegate_billing",
@@ -381,6 +383,7 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
         FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
         FHS_LIST_WORKFLOWS_TOOL_NAME,
     } <= tool_names
+    assert {server.name for server in prepared.mcp_servers} == {"own_mcp_tool"}
     assert captured["policy"] is policy
 
 

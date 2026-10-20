@@ -508,7 +508,7 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
     assert [item.name for item in seen[0]["tools"]] == ["user_root_a"]
     assert [item.name for item in seen[0]["mcp_tools"]] == ["mcp_root_a"]
     assert seen[0]["_harness"] is harness
-    resolved_tools, _ = maf.assemble_agent_inputs(
+    prepared = maf._prepare_agent_inputs(
         instructions=None,
         tools=seen[0]["tools"],
         mcp_tools=seen[0]["mcp_tools"],
@@ -524,13 +524,14 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
         delegate_tools=None,
         workflow_policy=None,
     )
-    assert {tool.name for tool in resolved_tools} == {"user_root_a", "mcp_root_a"}
+    assert {tool.name for tool in prepared.tools} == {"user_root_a"}
+    assert {server.name for server in prepared.mcp_servers} == {"mcp_root_a"}
 
     assert seen[1]["tools"] == ()
     assert seen[1]["mcp_tools"] == ()
     assert seen[1]["_harness"] is harness
     assert seen[1]["app_root"] == root_a
-    resolved_disabled, _ = maf.assemble_agent_inputs(
+    prepared_disabled = maf._prepare_agent_inputs(
         instructions=None,
         tools=seen[1]["tools"],
         mcp_tools=seen[1]["mcp_tools"],
@@ -546,7 +547,8 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
         delegate_tools=None,
         workflow_policy=None,
     )
-    assert resolved_disabled == []
+    assert prepared_disabled.tools == ()
+    assert prepared_disabled.mcp_servers == ()
 
 
 @pytest.mark.asyncio
