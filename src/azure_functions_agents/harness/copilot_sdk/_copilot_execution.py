@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._logger import logger
@@ -90,6 +91,19 @@ type _EventSink = Callable[[StreamEvent], None]
 
 _SAFE_CUSTOM_TOOL_FAILURE_MESSAGE = "Custom tool failed or returned unsupported content."
 _SAFE_CUSTOM_TOOL_FAILURE = f'{{"error":"{_SAFE_CUSTOM_TOOL_FAILURE_MESSAGE}"}}'
+
+
+class _ExecutionOperation(StrEnum):
+    PROVIDER_SETUP = "provider_setup"
+    SESSION_STORAGE = "session_storage"
+    STARTUP = "startup"
+    SESSION_STATE = "session_state"
+    CREATE_SESSION = "create_session"
+    RESUME_SESSION = "resume_session"
+    TOOL_CATALOG = "tool_catalog"
+    SEND = "send"
+    DISCONNECT = "disconnect"
+    SESSION_CLEANUP = "session_cleanup"
 
 
 def _emit_event(event_sink: _EventSink | None, event: StreamEvent | None) -> None:
@@ -541,7 +555,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
 
     sdk_tools = [_tool(function, calls, request.event_sink) for function in request.tools]
     token_source = _RequestTokenSource(owner)
-    operation = "provider_setup"
+    operation = _ExecutionOperation.PROVIDER_SETUP
     try:
         provider = _provider(
             harness,
@@ -558,7 +572,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 discovered=request.skill_catalog,
                 working_directory=owner.workspace,
             )
-            operation = "session_storage"
+            operation = _ExecutionOperation.SESSION_STORAGE
             storage = await open_session_fs(
                 route,
                 request.agent_slug,
@@ -577,7 +591,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     request.mcp_servers, protect_headers=calls.protect_headers
                 )
                 on_permission_request = permission_handler(skill_policy)
-                operation = "startup"
+                operation = _ExecutionOperation.STARTUP
                 client = await _acquire_client(owner, request.deadline)
                 options = _SessionOptions(
                     model=request.model,
@@ -603,9 +617,13 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 lifecycle.apply_session_options(options)
                 new_session = request.new_session
                 if not new_session and not lifecycle.leaf:
-                    operation = "session_state"
+                    operation = _ExecutionOperation.SESSION_STATE
                     new_session = not await storage.has_persisted_state()
-                operation = "create_session" if new_session else "resume_session"
+                operation = (
+                    _ExecutionOperation.CREATE_SESSION
+                    if new_session
+                    else _ExecutionOperation.RESUME_SESSION
+                )
                 session = await _open_session(
                     client,
                     lifecycle.copilot_id,
@@ -619,7 +637,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 async with _bounded_cleanup(
                     session.disconnect, "Copilot native session could not be disconnected."
                 ):
-                    operation = "tool_catalog"
+                    operation = _ExecutionOperation.TOOL_CATALOG
                     if not request.mcp_servers and not request.skills:
                         await _verify_tool_catalog(session, sdk_tools)
                     _emit_event(
@@ -631,7 +649,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         owner._runner.provider.kind,
                         request.model,
                     )
-                    operation = "send"
+                    operation = _ExecutionOperation.SEND
                     content = await _run_session_turn(
                         session,
                         prompt=request.prompt,
@@ -641,8 +659,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         get_usage=lambda: (input_tokens, output_tokens),
                         token_source=token_source,
                     )
-                    operation = "disconnect"
-                operation = "session_cleanup"
+                    operation = _ExecutionOperation.DISCONNECT
+                operation = _ExecutionOperation.SESSION_CLEANUP
                 return AgentResult(
                     session_id=request.session_id,
                     content=content,
@@ -663,7 +681,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         token_error = token_source.take_error()
         if token_error is not None:
             raise token_error from None
-        logger.exception("Copilot execution failed: operation=%s", operation)
+        logger.exception("Copilot execution failed: operation=%s", operation.value)
         raise
     finally:
         calls.finish_telemetry()

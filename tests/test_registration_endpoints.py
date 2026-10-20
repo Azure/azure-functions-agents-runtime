@@ -839,8 +839,13 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
 
 @pytest.mark.parametrize("surface", ["chat", "mcp"])
 @pytest.mark.parametrize("capture_sensitive_data", [False, True])
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
 def test_copilot_builtin_ingress_records_exception_once(
-    monkeypatch: Any, surface: str, capture_sensitive_data: bool, tmp_path: Path
+    monkeypatch: Any,
+    surface: str,
+    capture_sensitive_data: bool,
+    error_type: type[Exception],
+    tmp_path: Path,
 ) -> None:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -874,8 +879,10 @@ def test_copilot_builtin_ingress_records_exception_once(
         observability.start_span,
     )
 
+    failure = error_type("private builtin failure")
+
     async def fail_run_builtin_agent(*_args: Any, **_kwargs: Any) -> AgentResult:
-        raise RuntimeError("private builtin failure")
+        raise failure
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
@@ -901,11 +908,14 @@ def test_copilot_builtin_ingress_records_exception_once(
     assert span.name == f"agent.run {resolved.slug}"
     assert span.attributes["af.agent.outcome"] == "error"
     assert span.attributes["af.fault_domain"] == "unknown"
-    assert span.attributes["error.type"] == "RuntimeError"
-    assert span.status.description == "RuntimeError('private builtin failure')"
+    assert span.attributes["error.type"] == error_type.__name__
+    assert span.status.description == f"{error_type.__name__}('private builtin failure')"
     [event] = [item for item in span.events if item.name == "exception"]
     assert event.attributes["exception.message"] == "private builtin failure"
-    assert "RuntimeError: private builtin failure" in event.attributes["exception.stacktrace"]
+    assert (
+        f"{error_type.__name__}: private builtin failure"
+        in event.attributes["exception.stacktrace"]
+    )
 
 
 @pytest.mark.parametrize("surface", ["chat", "mcp"])
@@ -1978,6 +1988,40 @@ def test_entra_chatstream_without_identity_emits_sse_error(
 class _BadJsonRequest(DummyRequest):
     async def json(self) -> Any:
         raise ValueError("invalid json")
+
+
+@pytest.mark.parametrize(
+    ("input_request", "message"),
+    [
+        pytest.param(_BadJsonRequest(None), "invalid json", id="invalid-json"),
+        pytest.param(DummyRequest({}), "Missing 'prompt'", id="missing-prompt"),
+    ],
+)
+def test_chat_rejected_requests_return_bad_request(
+    monkeypatch: Any, tmp_path: Path, input_request: DummyRequest, message: str
+) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    invoked = {"count": 0}
+
+    async def fail_if_invoked(*args: Any, **kwargs: Any) -> Any:
+        invoked["count"] += 1
+        raise AssertionError("_run_builtin_agent should not run")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fail_if_invoked,
+    )
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(
+        route for route in app.routes if route["route"] == "agents/test_agent/chat"
+    )
+
+    response = asyncio.run(chat_route["handler"](input_request))
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": message}
+    assert invoked["count"] == 0
 
 
 @pytest.mark.parametrize(

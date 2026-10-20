@@ -1893,13 +1893,14 @@ async def test_provider_config_is_resupplied_on_resume(preview, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("new_session", [True, False])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
 async def test_session_open_preserves_native_exception_and_cause(
-    preview, monkeypatch, caplog, new_session, cleanup_fails
+    preview, monkeypatch, caplog, new_session, cleanup_fails, error_type
 ):
     import copilot
 
     client = _fake_client()
-    original = RuntimeError("native session open failed")
+    original = error_type("native session open failed")
     cause = OSError("native transport failed")
 
     async def fail_open(*_args, **_kwargs):
@@ -1914,7 +1915,7 @@ async def test_session_open_preserves_native_exception_and_cause(
     if not new_session:
         await _seed_session_state(preview)
     try:
-        with pytest.raises(RuntimeError, match="native session open failed") as caught:
+        with pytest.raises(error_type, match="native session open failed") as caught:
             await _copilot.run(preview, request)
         assert caught.value is original
         assert caught.value.__cause__ is cause
