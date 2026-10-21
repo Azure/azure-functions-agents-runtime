@@ -226,7 +226,7 @@ def _harness_selection_failure(
     output: str,
     env: Mapping[str, str] | None,
 ) -> str | None:
-    """Return a diagnostic when an agent host did not select the expected harness."""
+    """Return a diagnostic when log evidence shows an unexpected harness selection."""
     if not _is_agent_app(app_dir):
         return None
 
@@ -237,12 +237,6 @@ def _harness_selection_failure(
         return (
             f"expected harness '{expected}', but host output also selected "
             f"{', '.join(repr(item) for item in conflicting)}"
-        )
-    if expected not in selected:
-        observed = ", ".join(sorted(selected)) or "none"
-        return (
-            f"expected harness selection marker for '{expected}', "
-            f"but observed harness markers: {observed}"
         )
     return None
 

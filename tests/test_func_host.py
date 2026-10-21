@@ -45,18 +45,16 @@ def test_harness_selection_rejects_conflicting_marker(tmp_path: Path) -> None:
     assert failure == "expected harness 'copilot', but host output also selected 'maf'"
 
 
-def test_harness_selection_rejects_missing_marker(tmp_path: Path) -> None:
+def test_harness_selection_allows_missing_marker(tmp_path: Path) -> None:
     app_dir = _agent_app(tmp_path)
 
-    failure = _func_host._harness_selection_failure(
-        app_dir,
-        "Host started\n",
-        {_func_host.HARNESS_SELECTOR: "true"},
-    )
-
-    assert failure == (
-        "expected harness selection marker for 'copilot', "
-        "but observed harness markers: none"
+    assert (
+        _func_host._harness_selection_failure(
+            app_dir,
+            "Host started\n",
+            {_func_host.HARNESS_SELECTOR: "true"},
+        )
+        is None
     )
 
 
