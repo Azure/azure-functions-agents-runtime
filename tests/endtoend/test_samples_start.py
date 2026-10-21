@@ -19,6 +19,7 @@ from tests.endtoend._func_host import overlay_provider_settings, start_and_verif
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SAMPLES_DIR = REPO_ROOT / "samples"
+RUNTIME_LOG_LEVEL = "AzureFunctionsJobHost__logging__logLevel__azure.functions.AgentRuntime"
 
 pytestmark = [
     pytest.mark.e2e,
@@ -35,19 +36,24 @@ SAMPLE_APPS = _discover_sample_apps()
 
 
 def _startup_env(app_dir: Path) -> dict[str, str]:
-    """Disable timers while testing host startup so scheduled work cannot race CI."""
-    return {
+    """Configure startup-smoke logging and disable timers so scheduled work cannot race CI."""
+    env = {
         f"AzureWebJobs.{_function_name_from_source(spec.source_file, spec.name)}.Disabled": "true"
         for spec in load_agent_specs(app_dir)
         if spec.trigger is not None and spec.trigger.type == "timer_trigger"
     }
+    env[RUNTIME_LOG_LEVEL] = "Information"
+    return env
 
 
-def test_startup_env_disables_timer_functions_only() -> None:
+def test_startup_env_enables_runtime_marker_and_disables_timer_functions() -> None:
     assert _startup_env(SAMPLES_DIR / "daily-tech-news-email" / "src") == {
-        "AzureWebJobs.daily_tech_news.Disabled": "true"
+        "AzureWebJobs.daily_tech_news.Disabled": "true",
+        RUNTIME_LOG_LEVEL: "Information",
     }
-    assert _startup_env(SAMPLES_DIR / "workflow-queue-p0-report" / "src") == {}
+    assert _startup_env(SAMPLES_DIR / "workflow-queue-p0-report" / "src") == {
+        RUNTIME_LOG_LEVEL: "Information"
+    }
 
 
 def _start_sample_app(app_dir: Path):
