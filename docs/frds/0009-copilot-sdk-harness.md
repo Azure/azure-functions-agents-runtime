@@ -396,74 +396,24 @@ path. The shared run-log sensitive-data gate applies to both harnesses.
 2026-10-16, including the clarification that invocation usage totals are optional
 enrichment, not a semantic-conventions or discovery prerequisite.
 
-Copilot execution emits one runtime-owned semantic agent invocation beneath
-the existing `agent.run {slug}` boundary. This extends the telemetry addendum:
-the outer invocation remains harness-neutral, while the Copilot adapter supplies
-the GenAI execution boundary that MAF already supplies through its framework
-instrumentation. MAF instrumentation is unchanged.
+Copilot execution adds one `INTERNAL` `invoke_agent {readable-agent-name}`
+semantic span beneath the existing harness-neutral `agent.run {slug}` span.
+It covers adapter setup, execution, and cleanup for direct, streaming, delegate,
+and workflow-leaf runs; it is not an inference span. MAF instrumentation remains
+unchanged.
 
-#### Boundaries and ownership
+The semantic span carries `gen_ai.operation.name=invoke_agent`, stable agent ID
+and readable name, the public conversation ID, and the configured model when
+known. Custom and event-derived tool spans use its captured context. Runtime
+summaries, lifecycle events, usage, and skill observations remain on the outer
+runtime span when present; direct calls without one attach observations to the
+semantic span and do not mutate unrelated callers.
 
-- Keep `agent.run {slug}`, its shared `af.agent.*` fields, and
-  `af.agent.harness=maf|copilot`. Do not mark the outer span as `invoke_agent`.
-- Emit exactly one `invoke_agent {readable-agent-name}` semantic span for each
-  actual Copilot execution, including streaming, delegates, and workflow leaves.
-  Start it at the adapter execution boundary after the request identity is
-  resolved, before native session acquisition and turn execution. Its duration
-  includes adapter-owned setup and cleanup, not just model inference.
-- Use `gen_ai.operation.name=invoke_agent` and an `INTERNAL` span kind.
-  This is the host-observed execution boundary, not a claim that the native
-  subprocess runs in the Python process.
-- Parent the semantic invocation to the active caller context. Registered
-  ingress and streaming surfaces retain their outer runtime span. Direct runner
-  calls without an outer runtime span still emit the semantic invocation under
-  the available caller context; do not fabricate an ingress span.
-- Capture the semantic invocation context explicitly for custom-wrapper and
-  event-derived tool spans. Native callback context must not introduce parents
-  whose spans are not exported. Preserve the delegate tool -> specialist
-  execution relationship and isolation between concurrently running agents.
-- Keep runtime summaries and lifecycle events on their existing runtime span.
-  Keep SDK usage/skill observations on their existing owning runtime span where
-  one exists; when no runtime span exists, attach them to the semantic invocation.
-  Do not mutate an unrelated caller span to supply missing runtime telemetry.
-
-#### Attributes, usage, and failures
-
-- Reuse the existing stable agent ID and app-qualified readable name for
-  `gen_ai.agent.id` and `gen_ai.agent.name`. Set `gen_ai.conversation.id` from
-  the resolved public session ID, never the native storage/session identifier.
-  Emit the configured `gen_ai.request.model` when known. Agent description is
-  optional and follows the existing content/privacy policy.
-- Provider attributes describe proven provider semantics, not the harness name.
-  Omit unavailable values. Any legacy Azure compatibility attribute must have
-  documented semantics and exporter evidence; its presence alone is not proof
-  of Agents-view compatibility.
-- Invocation-level token totals are recommended optional enrichment, not required
-  for semantic invocation discovery or compatibility. Defer this enrichment:
-  retain the existing deduplicated public usage events and internal usage recorder
-  without changing public results or accounting. Do not infer missing usage or
-  recursively aggregate child invocation totals.
-- Record actual invocation failures with error status, `error.type`, and
-  existing fault-domain/exception policy. Recovered tool errors remain on tool
-  spans without making a successful invocation fail. Cancellation remains a
-  distinct nonfailure outcome, and original failures remain authoritative over
-  cleanup errors.
-- Preserve the existing sensitive-data gate and exception-diagnostics carve-out.
-  Emit no new prompt, response, tool arguments/results, credentials, reasoning,
-  or skill content merely to satisfy a monitoring view.
-
-#### Compatibility and non-goals
-
-Discovery, configuration translation, and registration contracts do not change.
-Execution instrumentation belongs to the Copilot adapter; shared helpers remain
-SDK-neutral. Use the existing provider, sampling policy, resource, processors,
-and exporter, and remain no-op when observability is inactive.
-
-This amendment adds no native file bridge, OTLP receiver, exporter, telemetry
-setting, native telemetry opt-in, or dependency upgrade. It does not fabricate
-model-call spans, inference latency, standard model metrics, cost estimates,
-or complete native topology. The existing native session-telemetry policy stays
-unchanged. Agent-level compatibility does not imply inference-level parity.
+Existing failure, cancellation, privacy, cleanup-precedence, and usage-accounting
+contracts apply. Invocation token totals remain optional deferred enrichment.
+The adapter uses the existing telemetry pipeline and does not add a file bridge,
+receiver, exporter, setting, dependency, fabricated model spans, or inferred
+provider data.
 
 ## 5. Decisions log
 

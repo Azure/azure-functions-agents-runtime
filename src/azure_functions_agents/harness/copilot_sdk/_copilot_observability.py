@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -47,6 +48,9 @@ if TYPE_CHECKING:
     from .._harness_binding import HarnessRequest
 
 _USAGE_EVENT_NAME = "af.agent.model.usage"
+_STREAM_RUN_SPAN: ContextVar[RuntimeSpan | None] = ContextVar(
+    "copilot_stream_run_span", default=None
+)
 
 
 def _owning_run_span(request: HarnessRequest) -> RuntimeSpan | None:
@@ -69,21 +73,38 @@ def _owning_run_span(request: HarnessRequest) -> RuntimeSpan | None:
     return current_span()
 
 
+def invocation_span_attributes(
+    request: HarnessRequest,
+) -> dict[str, TelemetryAttributeValue]:
+    """Build the semantic invocation attributes from stable runtime identity."""
+    return {
+        ATTR_GEN_AI_OPERATION_NAME: GenAiOperationName.INVOKE_AGENT,
+        ATTR_GEN_AI_AGENT_ID: agent_id(request.agent_slug),
+        ATTR_GEN_AI_AGENT_NAME: gen_ai_agent_name(request.agent_slug),
+        ATTR_GEN_AI_CONVERSATION_ID: request.session_id,
+        ATTR_GEN_AI_REQUEST_MODEL: request.model,
+    }
+
+
+@contextmanager
+def bind_stream_run_span(span: RuntimeSpan) -> Iterator[None]:
+    """Bind the exact runtime span inherited by a streaming execution task."""
+    token = _STREAM_RUN_SPAN.set(span)
+    try:
+        yield
+    finally:
+        _STREAM_RUN_SPAN.reset(token)
+
+
 @contextmanager
 def invocation_span(request: HarnessRequest) -> Iterator[RuntimeSpan]:
     """Own one semantic execution while preserving runtime observation ownership."""
-    runtime_span = _owning_run_span(request)
+    runtime_span = _STREAM_RUN_SPAN.get() or _owning_run_span(request)
     name = gen_ai_agent_name(request.agent_slug)
     with start_span(
         f"invoke_agent {name}",
         record_exception=False,
-        attributes={
-            ATTR_GEN_AI_OPERATION_NAME: GenAiOperationName.INVOKE_AGENT,
-            ATTR_GEN_AI_AGENT_ID: agent_id(request.agent_slug),
-            ATTR_GEN_AI_AGENT_NAME: name,
-            ATTR_GEN_AI_CONVERSATION_ID: request.session_id,
-            ATTR_GEN_AI_REQUEST_MODEL: request.model,
-        },
+        attributes=invocation_span_attributes(request),
     ) as span:
         try:
             yield runtime_span if runtime_span is not None else span

@@ -460,7 +460,21 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
 
 
 @pytest.mark.asyncio
-async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, monkeypatch):
+@pytest.mark.parametrize(
+    ("agent_name", "workflow_agent_slug", "outer_name"),
+    [
+        ("sse_agent", None, "agent.run sse_agent"),
+        (None, None, "agent.run agent"),
+        (None, "workflow", "agent.run agent"),
+    ],
+)
+async def test_sse_execution_attaches_usage_event_to_stream_run_span(
+    preview,
+    monkeypatch,
+    agent_name,
+    workflow_agent_slug,
+    outer_name,
+):
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -475,16 +489,23 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
     monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
 
     async def fake_execution(harness, request):
-        observability.current_span().add_event(
-            "af.agent.model.usage",
-            {"gen_ai.usage.output_tokens": 5},
+        from azure_functions_agents.harness.copilot_sdk._copilot_observability import (
+            invocation_span,
         )
-        return runner.AgentResult(
-            session_id=request.session_id,
-            content="stream reply",
-            tool_calls=[],
-            model=request.model,
-        )
+
+        with invocation_span(request) as observation_span:
+            observation_span.add_event(
+                "af.agent.model.usage",
+                {"gen_ai.usage.output_tokens": 5},
+            )
+            observation_span.add_event("af.skill.invoked", {"gen_ai.tool.name": "review"})
+            observation_span.add_event("af.tool.incomplete", {"gen_ai.tool.name": "search"})
+            return runner.AgentResult(
+                session_id=request.session_id,
+                content="stream reply",
+                tool_calls=[],
+                model=request.model,
+            )
 
     monkeypatch.setattr(_copilot_execution, "run", fake_execution)
     harness_runner = copilot_state(preview)
@@ -495,23 +516,34 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
             deadline=asyncio.get_running_loop().time() + 5,
             model="test-model",
             session_id="sse-session",
-            agent_name="sse_agent",
+            agent_name=agent_name,
+            workflow_agent_slug=workflow_agent_slug,
             tools=[],
             mcp_tools=[],
         )
     ]
 
     assert [event["type"] for event in events] == ["delta", "done"], events
-    [span] = exporter.get_finished_spans()
-    assert span.name == "agent.run sse_agent"
+    finished_spans = exporter.get_finished_spans()
+    span = next(item for item in finished_spans if item.name == outer_name)
+    semantic = next(
+        item
+        for item in finished_spans
+        if item.attributes.get("gen_ai.operation.name") == "invoke_agent"
+    )
+    assert semantic.parent.span_id == span.context.span_id
     assert span.attributes["af.agent.harness"] == "copilot"
     assert "af.harness" not in span.attributes
     assert span.attributes["af.agent.session_id"] == "sse-session"
     assert "gen_ai.operation.name" not in span.attributes
-    [usage_event] = [
-        event for event in span.events if event.name == "af.agent.model.usage"
+    assert [event.name for event in span.events] == [
+        "af.agent.model.usage",
+        "af.skill.invoked",
+        "af.tool.incomplete",
     ]
+    usage_event = span.events[0]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 5
+    assert semantic.events == ()
 
 
 @pytest.mark.asyncio

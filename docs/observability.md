@@ -145,18 +145,11 @@ below. Neither path fabricates unavailable provider/model hierarchy.
 
 This follows [FRD 0009 §4.10](frds/0009-copilot-sdk-harness.md#410-runtime-owned-genai-invocation-amendment).
 
-Each actual Copilot execution emits exactly one
-`invoke_agent {readable-agent-name}` span with `gen_ai.operation.name=invoke_agent`
-and span kind `INTERNAL`. The readable name uses the app qualification rules below.
-The outer `agent.run {slug}` remains neutral and is not marked `invoke_agent`.
-The semantic span starts after request identity resolution, before native session
-acquisition, and ends after adapter cleanup. Its duration includes host-observed
-setup, execution, and cleanup: it is **not** inference latency or a claim that
-the native subprocess executes in Python.
-
-This applies to direct, streaming, delegate, and workflow-leaf executions.
-A direct runner call without an outer runtime span still creates the semantic
-span beneath the available caller context; it does not fabricate ingress.
+Each direct, streaming, delegate, or workflow-leaf Copilot execution emits one
+`INTERNAL` `invoke_agent {readable-agent-name}` span beneath `agent.run {slug}`
+when that outer span exists. Its duration covers adapter setup through cleanup,
+not model inference. Direct runner calls create only the semantic span beneath
+their available caller context.
 
 | Attribute | Meaning |
 | --- | --- |
@@ -166,45 +159,15 @@ span beneath the available caller context; it does not fabricate ingress.
 | `gen_ai.conversation.id` | Resolved public session ID, never the native session/storage identifier. |
 | `gen_ai.request.model` | Configured model, only when known. |
 
-Provider attributes require proven provider semantics; neither `copilot` nor
-a legacy Azure compatibility attribute establishes a provider or Agents-view
-compatibility. Unavailable values are omitted.
+Custom and event-derived tool spans use the semantic invocation context. Runtime
+summaries, lifecycle events, usage, and skill observations stay on the outer
+runtime span when available; otherwise they attach to the semantic span, never
+an unrelated caller. Invocation token totals are optional and currently deferred.
 
-Custom-tool wrappers and event-derived native tool spans explicitly use the
-captured semantic invocation context, not incidental native callback context.
-This preserves `coordinator invoke_agent` -> `execute_tool delegate_<slug>` ->
-specialist execution (with its outer runtime span where present and semantic
-invocation), while isolating concurrent agents. Native timing still requires
-coherent matched records; incomplete timing and full native topology are not inferred.
-
-Runtime lifecycle events and summaries stay on the outer runtime span.
-SDK usage and name-only skill observations also stay on their owning runtime
-span when present. Without one, these observations attach to the semantic span,
-never to an unrelated caller span. Existing deduplicated usage events and
-once-only usage accounting remain unchanged. Invocation-level token totals on
-the semantic span are recommended **optional** enrichment, not a discovery or
-compatibility prerequisite, and are explicitly deferred; missing usage and
-recursive child totals are not inferred.
-
-Actual invocation failures receive error status, `error.type`, and the existing
-fault-domain/exception diagnostics. Recovered tool errors remain tool failures,
-not failures of a successful invocation. Cancellation is a distinct nonfailure
-outcome, and original failures take precedence over cleanup errors. The existing
-sensitive-data gate and exception-diagnostics carve-out still apply; no new
-prompt, response, tool content, credentials, reasoning, or skill content is
-emitted to satisfy a monitoring view.
-
-This uses the existing tracer, provider, resource, sampling policy, processors,
-and exporter, remaining no-op when observability is inactive. There is no native
-file bridge, OTLP receiver, new dependency, telemetry setting, or native telemetry
-opt-in. This agent-level boundary does not fabricate inference spans/latency,
-standard model metrics, or cost, and does not promise portal parity or live Azure
-verification.
-
-Exporter envelopes are not a byte-for-byte copy of span attributes. For example,
-the supported Azure Monitor exporter filters `error.type` from custom dependency
-properties; the source span retains it and the envelope carries failure status.
-Offline envelope conversion does not qualify Agents-view behavior.
+The span uses the existing telemetry pipeline and privacy/error contracts.
+Unavailable provider data, model-call spans, inference latency, metrics, cost,
+and native topology are not inferred. This change adds no file bridge, receiver,
+exporter, telemetry setting, or native telemetry opt-in.
 
 #### Stable agent ID
 

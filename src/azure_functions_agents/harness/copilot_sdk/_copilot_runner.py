@@ -315,7 +315,10 @@ class CopilotRunner:
                     execution_surface=execution_surface,
                 ),
             ) as span:
-                execution = asyncio.create_task(execute())
+                from ._copilot_observability import bind_stream_run_span
+
+                with bind_stream_run_span(span):
+                    execution = asyncio.create_task(execute())
                 try:
                     while (event := await events.next_event()) is not None:
                         if event["type"] == "session":
