@@ -62,7 +62,6 @@ if TYPE_CHECKING:
         Message,
         ResponseStream,
         RoleLiteral,
-        SupportsChatGetResponse,
         ToolTypes,
         UsageDetails,
     )
@@ -71,6 +70,7 @@ if TYPE_CHECKING:
     from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
+    from ._maf_client import MAFChatClient
 type AgentFunctionTool = ToolInput
 type AgentTool = ToolTypes
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
@@ -353,15 +353,15 @@ def _prepare_agent_inputs(
     )
 
 
-def _build_direct_role_agent[OptionsT](
-    chat_client: SupportsChatGetResponse[OptionsT],
+def _build_direct_role_agent(
+    chat_client: MAFChatClient,
     *,
     prepared: _MafPreparedInputs,
     skill_paths: Sequence[Path] | None,
     agent_name: str | None,
     history_provider: HistoryProvider | None,
     agent_configuration: AgentConfiguration,
-) -> Agent[OptionsT]:
+) -> Agent[Any]:
     """Adapt prepared declarations into the executable direct MAF agent."""
     resolved_tools: list[AgentTool] = list(
         build_maf_tools(
@@ -390,8 +390,8 @@ def _build_direct_role_agent[OptionsT](
     )
 
 
-def _build_role_agent[OptionsT](
-    chat_client: SupportsChatGetResponse[OptionsT],
+def _build_role_agent(
+    chat_client: MAFChatClient,
     *,
     agent_instructions: str | None,
     tools: Sequence[AgentTool],
@@ -399,7 +399,7 @@ def _build_role_agent[OptionsT](
     agent_name: str | None,
     history_provider: HistoryProvider | None,
     agent_configuration: AgentConfiguration,
-) -> Agent[OptionsT]:
+) -> Agent[Any]:
     """Build one conservatively configured MAF harness agent for any role."""
     from agent_framework import SkillsProvider, create_harness_agent
 
