@@ -353,15 +353,15 @@ def _prepare_agent_inputs(
     )
 
 
-def _build_direct_role_agent(
-    chat_client: SupportsChatGetResponse[Any],
+def _build_direct_role_agent[OptionsT](
+    chat_client: SupportsChatGetResponse[OptionsT],
     *,
     prepared: _MafPreparedInputs,
     skill_paths: Sequence[Path] | None,
     agent_name: str | None,
     history_provider: HistoryProvider | None,
     agent_configuration: AgentConfiguration,
-) -> Agent[Any]:
+) -> Agent[OptionsT]:
     """Adapt prepared declarations into the executable direct MAF agent."""
     resolved_tools: list[AgentTool] = list(
         build_maf_tools(
@@ -390,8 +390,8 @@ def _build_direct_role_agent(
     )
 
 
-def _build_role_agent(
-    chat_client: SupportsChatGetResponse[Any],
+def _build_role_agent[OptionsT](
+    chat_client: SupportsChatGetResponse[OptionsT],
     *,
     agent_instructions: str | None,
     tools: Sequence[AgentTool],
@@ -399,7 +399,7 @@ def _build_role_agent(
     agent_name: str | None,
     history_provider: HistoryProvider | None,
     agent_configuration: AgentConfiguration,
-) -> Agent[Any]:
+) -> Agent[OptionsT]:
     """Build one conservatively configured MAF harness agent for any role."""
     from agent_framework import SkillsProvider, create_harness_agent
 
