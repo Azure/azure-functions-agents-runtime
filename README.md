@@ -674,12 +674,6 @@ preview; the default MAF path and its `agent-sessions/` history layout are
 unchanged. Only the selected harness's persistence adapter is initialized or
 closed, with no opposite-harness history probes.
 
-In the Copilot preview, a caller-supplied HTTP session ID or inbound MCP
-transport ID creates that native session when its selected namespace contains
-only empty host scaffolding; otherwise the SDK resumes the existing state.
-Storage classification errors and failed resumes are surfaced without
-replacement-session fallback or state reset.
-
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
 The same caller-visible session id may be reused across agents for correlation, but each agent's
 transcript remains independent.

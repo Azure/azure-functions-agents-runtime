@@ -7,12 +7,20 @@ into each app to avoid repeatedly installing the same dependencies.
 from __future__ import annotations
 
 import os
+import runpy
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-COPILOT_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
+
+def _load_copilot_env_var() -> str:
+    repo_root = Path(__file__).resolve().parents[2]
+    env_module = runpy.run_path(repo_root / "src" / "azure_functions_agents" / "config" / "env.py")
+    return str(env_module["EnvVar"].ENABLE_COPILOT)
+
+
+COPILOT_ENV_VAR = _load_copilot_env_var()
 
 
 def _link_app_dependencies(repo_root: Path, shared_packages: Path) -> None:

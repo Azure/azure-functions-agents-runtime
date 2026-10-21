@@ -174,11 +174,6 @@ By default, the handler returns the agent response as `text/plain`. When `respon
 
 HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a session id and returns it in the response header. The built-in debug chat UI surfaces this id (with a copy button) and lets you paste one into its settings dialog to resume an existing conversation. The dialog also keeps a per-browser **Recent sessions** list — scoped to each base URL and agent (`/agents/{slug}/`) — with auto-derived titles (from the first message) and optional rename, so you can pick a previous conversation to resume. That list is stored in browser local storage only — it is not synced across devices/browsers or aware of sessions created through the raw HTTP API by other clients. When you resume a session, the chat UI repaints up to the 200 most recent user/assistant messages by calling `GET agents/{slug}/history` (header `x-ms-session-id`), which reads the stored transcript and returns truncation metadata when older messages were omitted. Replay requires blob-backed session storage and degrades gracefully (an empty window) when storage is unconfigured or the runtime predates the endpoint.
 
-For the internal Copilot preview, a supplied ID creates that native session
-when its selected durable namespace contains only empty host scaffolding;
-otherwise it resumes through the SDK. Classification failures and failed
-resumes are returned without creating a replacement session.
-
 An HTTP request receives the agent's immediate response, not the eventual
 workflow result. The configured response schema/example continues to govern the
 immediate response. Runtime workflow monitoring routes are available only when

@@ -323,7 +323,7 @@ Functions host.
 - Only the selected harness's persistence implementation is imported,
   initialized, and cleaned up.
 
-**Supplied session IDs — approved**
+**Supplied session IDs**
 
 Both HTTP caller-supplied session IDs (including chat and SSE) and normalized
 inbound MCP transport session IDs use open-or-create, matching MAF. The host
