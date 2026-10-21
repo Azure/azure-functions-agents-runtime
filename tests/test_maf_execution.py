@@ -181,6 +181,11 @@ def test_agent_preparation_keeps_capabilities_declarative(monkeypatch, tmp_path)
         "build_maf_tools",
         Mock(side_effect=AssertionError("preparation must not bind executable tools")),
     )
+    monkeypatch.setattr(
+        _maf_mcp,
+        "build_maf_mcp_tools",
+        Mock(side_effect=AssertionError("preparation must not bind executable MCP tools")),
+    )
 
     prepared = maf._prepare_agent_inputs(
         instructions="  instructions  ",
@@ -200,7 +205,10 @@ def test_agent_preparation_keeps_capabilities_declarative(monkeypatch, tmp_path)
     )
 
     assert prepared.instructions == "instructions\naddendum"
-    assert prepared.tools == (user_tool,)
+    assert prepared.user_tools == (user_tool,)
+    assert prepared.sandbox_tools == ()
+    assert prepared.web_request_tools == ()
+    assert prepared.workflow_tools == ()
     assert prepared.mcp_servers == (server,)
 
 

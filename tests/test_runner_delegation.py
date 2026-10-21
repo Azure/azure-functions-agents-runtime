@@ -323,7 +323,10 @@ def test_prepare_agent_inputs_for_delegated_role_has_only_its_own_tools() -> Non
     # Own static tools are present; per-request sandbox and main-only
     # Dynamic-Workflow tools are naturally absent (never passed), and there
     # are no delegate_* tools (delegate_tools=None) — Decisions #13/#15/#6.
-    assert {item.name for item in prepared.tools} == {"own_user_tool"}
+    assert {item.name for item in prepared.user_tools} == {"own_user_tool"}
+    assert prepared.sandbox_tools == ()
+    assert prepared.web_request_tools == ()
+    assert prepared.workflow_tools == ()
     assert {server.name for server in prepared.mcp_servers} == {"own_mcp_tool"}
     assert prepared.instructions == "be a specialist"
 
@@ -371,18 +374,15 @@ def test_prepare_agent_inputs_for_direct_role_has_full_tool_superset(
         workflow_policy=policy,
     )
 
-    tool_names = {
-        item.name for item in (*prepared.tools, *prepared.delegate_tools)
-    }
-    assert {
-        "own_user_tool",
-        "run_code",
-        "web_request",
-        "delegate_billing",
+    assert {item.name for item in prepared.user_tools} == {"own_user_tool"}
+    assert {item.name for item in prepared.sandbox_tools} == {"run_code"}
+    assert {item.name for item in prepared.web_request_tools} == {"web_request"}
+    assert {item.name for item in prepared.delegate_tools} == {"delegate_billing"}
+    assert {item.name for item in prepared.workflow_tools} == {
         FHS_START_WORKFLOW_TOOL_NAME,
         FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
         FHS_LIST_WORKFLOWS_TOOL_NAME,
-    } <= tool_names
+    }
     assert {server.name for server in prepared.mcp_servers} == {"own_mcp_tool"}
     assert captured["policy"] is policy
 

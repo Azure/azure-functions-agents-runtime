@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         Message,
         ResponseStream,
         RoleLiteral,
+        SupportsChatGetResponse,
         ToolTypes,
         UsageDetails,
     )
@@ -70,7 +71,6 @@ if TYPE_CHECKING:
     from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
-    from ._maf_client import MAFChatClient
 type AgentFunctionTool = ToolInput
 type AgentTool = ToolTypes
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
@@ -99,7 +99,10 @@ class _ChatOptions(TypedDict):
 class _MafPreparedInputs:
     """Normalized MAF inputs before executable SDK adaptation."""
 
-    tools: tuple[ToolDescriptor, ...]
+    user_tools: tuple[ToolDescriptor, ...]
+    sandbox_tools: tuple[ToolDescriptor, ...]
+    web_request_tools: tuple[ToolDescriptor, ...]
+    workflow_tools: tuple[ToolDescriptor, ...]
     mcp_servers: tuple[MCPServerDescriptor, ...]
     delegate_tools: tuple[ToolDescriptor, ...]
     instructions: str | None
@@ -108,13 +111,19 @@ class _MafPreparedInputs:
     def create(
         cls,
         *,
-        tools: Sequence[ToolInput],
+        user_tools: Sequence[ToolInput],
+        sandbox_tools: Sequence[ToolInput],
+        web_request_tools: Sequence[ToolInput],
+        workflow_tools: Sequence[ToolInput],
         mcp_servers: Sequence[MCPServerDescriptor],
         delegate_tools: Sequence[ToolInput],
         instructions: str | None,
     ) -> _MafPreparedInputs:
         return cls(
-            tools=tuple(normalize_tool(tool) for tool in tools),
+            user_tools=tuple(normalize_tool(tool) for tool in user_tools),
+            sandbox_tools=tuple(normalize_tool(tool) for tool in sandbox_tools),
+            web_request_tools=tuple(normalize_tool(tool) for tool in web_request_tools),
+            workflow_tools=tuple(normalize_tool(tool) for tool in workflow_tools),
             mcp_servers=tuple(mcp_servers),
             delegate_tools=tuple(normalize_tool(tool) for tool in delegate_tools),
             instructions=instructions,
@@ -313,22 +322,17 @@ def _prepare_agent_inputs(
     app_root: Path | None = None,
 ) -> _MafPreparedInputs:
     root = app_root or get_app_root()
-    candidates = [
-        *(discover_user_tools(root).tools if tools is None else tools),
-        *(sandbox_tools or ()),
-        *(web_request_tools or ()),
-    ]
+    user_tools = discover_user_tools(root).tools if tools is None else tools
+    workflow_tools: Sequence[ToolInput] = ()
     if workflow_enabled:
         from ...workflows.tools import build_workflow_tools
 
-        candidates.extend(
-            build_workflow_tools(
-                session_id=resolved_id or "",
-                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
-                agent_name=agent_name or "main",
-                durable_client=workflow_durable_client,
-                policy=workflow_policy,
-            )
+        workflow_tools = build_workflow_tools(
+            session_id=resolved_id or "",
+            workflow_agent_slug=workflow_agent_slug or agent_name or "main",
+            agent_name=agent_name or "main",
+            durable_client=workflow_durable_client,
+            policy=workflow_policy,
         )
     servers = (
         tuple(discover_mcp_servers(root).servers.values())
@@ -339,7 +343,10 @@ def _prepare_agent_inputs(
     if system_addendum:
         effective = (effective or "") + system_addendum
     return _MafPreparedInputs.create(
-        tools=candidates,
+        user_tools=user_tools,
+        sandbox_tools=sandbox_tools or (),
+        web_request_tools=web_request_tools or (),
+        workflow_tools=workflow_tools,
         mcp_servers=servers,
         delegate_tools=delegate_tools or (),
         instructions=effective,
@@ -347,7 +354,7 @@ def _prepare_agent_inputs(
 
 
 def _build_direct_role_agent(
-    chat_client: MAFChatClient,
+    chat_client: SupportsChatGetResponse[Any],
     *,
     prepared: _MafPreparedInputs,
     skill_paths: Sequence[Path] | None,
@@ -356,7 +363,16 @@ def _build_direct_role_agent(
     agent_configuration: AgentConfiguration,
 ) -> Agent[Any]:
     """Adapt prepared declarations into the executable direct MAF agent."""
-    resolved_tools: list[AgentTool] = list(build_maf_tools(prepared.tools))
+    resolved_tools: list[AgentTool] = list(
+        build_maf_tools(
+            (
+                *prepared.user_tools,
+                *prepared.sandbox_tools,
+                *prepared.web_request_tools,
+                *prepared.workflow_tools,
+            )
+        )
+    )
     if prepared.mcp_servers:
         from ._maf_mcp import build_maf_mcp_tools
 
@@ -375,7 +391,7 @@ def _build_direct_role_agent(
 
 
 def _build_role_agent(
-    chat_client: MAFChatClient,
+    chat_client: SupportsChatGetResponse[Any],
     *,
     agent_instructions: str | None,
     tools: Sequence[AgentTool],

@@ -203,7 +203,7 @@ async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound
         delegate_tools=None,
         workflow_policy=None,
     )
-    assert {tool.name for tool in prepared.tools} == {"user_root_a"}
+    assert {tool.name for tool in prepared.user_tools} == {"user_root_a"}
     assert {server.name for server in prepared.mcp_servers} == {"mcp_root_a"}
 
     assert seen[1]["tools"] == ()
@@ -226,7 +226,7 @@ async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound
         delegate_tools=None,
         workflow_policy=None,
     )
-    assert prepared_disabled.tools == ()
+    assert prepared_disabled.user_tools == ()
     assert prepared_disabled.mcp_servers == ()
 
 
