@@ -28,13 +28,11 @@ runners own SDK object creation, provider auth timing, native event translation,
 and persistence details. Authored tools remain user-owned code, not a promise of
 compatibility with every harness.
 
-The supplied-session-ID amendment completed independent architecture review and
-received human sign-off on 2026-10-19. A 2026-10-21 follow-up confirmed that the
-same contract applies to every caller-supplied primary session ID, including the
-direct runner APIs and HostedSkill, matching MAF. Copilot creates with the
-requested ID only when its selected storage namespace has no persisted state;
-otherwise it resumes through the SDK. A failed resume is never retried as
-create. Historical finalized contracts and sign-offs remain recorded below.
+Every caller-supplied primary session ID, including direct runner APIs and
+HostedSkill, uses the same open-or-create contract as MAF. Copilot creates with
+the requested ID only when its selected storage namespace has no persisted
+state; otherwise it resumes through the SDK. A failed resume is never retried
+as create.
 
 ## 2. Motivation / problem
 
