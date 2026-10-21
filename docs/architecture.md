@@ -363,10 +363,13 @@ where `agent_id` comes directly from the shared `_agent_identity.agent_id(slug)`
 helper. Only the selected harness's persistence implementation is imported,
 initialized, and cleaned up.
 
-For caller-supplied HTTP IDs and normalized inbound MCP transport IDs, Copilot
-classifies that namespace after storage opens and before native session open,
-inside the existing process-local same-session lock and deadline. An empty root,
-or a root containing only a correctly typed empty `/workspace` directory, selects
+For every caller-supplied primary session ID, including HTTP, inbound MCP,
+direct runner API, and HostedSkill calls, Copilot classifies that namespace
+after storage opens and before native session open, inside the existing
+process-local same-session lock and deadline. This matches MAF's surface-neutral
+construction of `AgentSession(session_id=...)`, whose history provider loads an
+empty or existing transcript under the same identity. An empty Copilot root, or
+a root containing only a correctly typed empty `/workspace` directory, selects
 native create with the requested ID. Any other entry selects strict SDK resume.
 The check uses typed root and workspace listings only; it does not parse native
 filenames or contents. Listing, type, path, permission, and storage failures

@@ -318,13 +318,14 @@ az storage blob show --account-name "<account>" --container-name "<container>" `
 Native files may contain conversation content or tool output. Do not publish
 their contents in diagnostics or hand-edit them; the SDK owns their format.
 
-Caller-supplied HTTP IDs and normalized inbound MCP transport IDs use
-open-or-create. After the session namespace opens, an empty root or only an
-empty, correctly typed `/workspace` directory is treated as host scaffolding
-and creates the requested native session. Any other entry, including a
-zero-byte file, empty native directory, or nonempty workspace, selects SDK
-resume. The host reads entry names and types only; it does not parse native
-filenames or contents.
+Every caller-supplied primary session ID uses open-or-create, including HTTP,
+inbound MCP, direct runner API, and HostedSkill calls. This is the same
+surface-neutral continuity behavior as MAF. After the Copilot session namespace
+opens, an empty root or only an empty, correctly typed `/workspace` directory
+is treated as host scaffolding and creates the requested native session. Any
+other entry, including a zero-byte file, empty native directory, or nonempty
+workspace, selects SDK resume. The host reads entry names and types only; it
+does not parse native filenames or contents.
 
 ## Error behavior
 

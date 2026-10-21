@@ -173,8 +173,11 @@ The injected parameter is runtime-managed and hidden from Azure Functions
 binding discovery. Each Function invocation receives a fresh lightweight
 facade; model clients, agents, MCP resources, sandbox closures, and sessions
 are created only when `skill.run()` or `skill.stream()` is called. Supply a
-valid `session_id` to continue a conversation, or omit it to receive a new
-public session ID in the result/events.
+valid `session_id` to open or continue that conversation identity, or omit it
+to receive a new public session ID in the result/events. A supplied ID with no
+persisted state starts a conversation under that ID; existing state continues.
+Storage and native session errors propagate without replacement creation or
+state reset.
 
 The handler must be a plain `async def`, the HostedSkill decorator must be
 immediately above the handler and below its Azure Functions trigger decorator,

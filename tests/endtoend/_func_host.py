@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import queue
+import re
 import shutil
 import signal
 import socket
@@ -42,6 +43,12 @@ FAILURE_MARKERS: tuple[str, ...] = (
     "traceback (most recent call last)",
     "exception has been thrown",
     "unhandled exception",
+)
+
+HARNESS_SELECTOR = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
+HARNESS_SELECTION_PATTERN = re.compile(
+    r"Agent harness selected: harness=(maf|copilot)",
+    re.IGNORECASE,
 )
 
 
@@ -198,6 +205,45 @@ def configured_provider(app_dir: Path) -> str | None:
         return explicit or "foundry"
     if str(values.get("OPENAI_API_KEY") or "").strip():
         return explicit or "openai"
+    return None
+
+
+def _is_agent_app(app_dir: Path) -> bool:
+    function_app = app_dir / "function_app.py"
+    if not function_app.is_file():
+        return False
+    source = function_app.read_text(encoding="utf-8")
+    return "create_function_app" in source or "HostedSkillFunctionApp" in source
+
+
+def _expected_harness(env: Mapping[str, str] | None) -> str:
+    selector = (env or {}).get(HARNESS_SELECTOR, os.environ.get(HARNESS_SELECTOR, ""))
+    return "copilot" if selector.strip().lower() in {"1", "true"} else "maf"
+
+
+def _harness_selection_failure(
+    app_dir: Path,
+    output: str,
+    env: Mapping[str, str] | None,
+) -> str | None:
+    """Return a diagnostic when an agent host did not select the expected harness."""
+    if not _is_agent_app(app_dir):
+        return None
+
+    expected = _expected_harness(env)
+    selected = {match.lower() for match in HARNESS_SELECTION_PATTERN.findall(output)}
+    conflicting = sorted(selected - {expected})
+    if conflicting:
+        return (
+            f"expected harness '{expected}', but host output also selected "
+            f"{', '.join(repr(item) for item in conflicting)}"
+        )
+    if expected not in selected:
+        observed = ", ".join(sorted(selected)) or "none"
+        return (
+            f"expected harness selection marker for '{expected}', "
+            f"but observed harness markers: {observed}"
+        )
     return None
 
 
@@ -431,10 +477,17 @@ def start_and_verify(
     )
     _stop_host(host)
 
+    output = "".join(host.lines)
+    selection_failure = None
+    if ready and not failed:
+        selection_failure = _harness_selection_failure(app_dir, output, env)
+    if selection_failure is not None:
+        reason = selection_failure
+
     return FuncStartResult(
-        started=ready and not failed,
+        started=ready and not failed and selection_failure is None,
         reason=reason,
-        output="".join(host.lines),
+        output=output,
     )
 
 
@@ -473,6 +526,14 @@ def running_host(
         _stop_host(host)
         raise RuntimeError(
             f"host for {app_dir.name} failed to start ({reason}):\n{''.join(host.lines)}"
+        )
+
+    selection_failure = _harness_selection_failure(app_dir, "".join(host.lines), env)
+    if selection_failure is not None:
+        _stop_host(host)
+        raise RuntimeError(
+            f"host for {app_dir.name} selected the wrong harness "
+            f"({selection_failure}):\n{''.join(host.lines)}"
         )
 
     try:

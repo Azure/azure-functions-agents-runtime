@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-19
+updated: 2026-10-21
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -29,12 +29,12 @@ and persistence details. Authored tools remain user-owned code, not a promise of
 compatibility with every harness.
 
 The supplied-session-ID amendment completed independent architecture review and
-received human sign-off on 2026-10-19.
-It specifies open-or-create for both HTTP caller IDs and inbound MCP transport
-IDs, matching MAF: create with the requested ID only when its selected storage
-namespace has no persisted state; otherwise resume through the SDK. A failed
-resume is never retried as create. Historical finalized contracts and sign-offs
-remain recorded below.
+received human sign-off on 2026-10-19. A 2026-10-21 follow-up confirmed that the
+same contract applies to every caller-supplied primary session ID, including the
+direct runner APIs and HostedSkill, matching MAF. Copilot creates with the
+requested ID only when its selected storage namespace has no persisted state;
+otherwise it resumes through the SDK. A failed resume is never retried as
+create. Historical finalized contracts and sign-offs remain recorded below.
 
 ## 2. Motivation / problem
 
@@ -325,11 +325,14 @@ Functions host.
 
 **Supplied session IDs**
 
-Both HTTP caller-supplied session IDs (including chat and SSE) and normalized
-inbound MCP transport session IDs use open-or-create, matching MAF. The host
-selects create or resume from storage absence **before** attempting native
-session opening, not by retrying a failed resume. SDK `resume_session` remains
-strict continuation of an existing native session; no SDK upgrade is required.
+Every caller-supplied primary session ID uses open-or-create, including HTTP
+chat/SSE IDs, normalized inbound MCP transport IDs, direct runner API IDs, and
+HostedSkill `run()` / `stream()` IDs. This matches MAF, which constructs an
+`AgentSession` with the supplied ID for every entry point and lets the selected
+history provider load zero or more existing messages. The Copilot host selects
+create or resume from storage absence **before** attempting native session
+opening, not by retrying a failed resume. SDK `resume_session` remains strict
+continuation of an existing native session; no SDK upgrade is required.
 
 Keep the change inside the execute-stage boundary:
 `harness/copilot_sdk/_copilot_execution.py` chooses the native operation, and
@@ -545,6 +548,7 @@ error-preservation, and process-local concurrency contracts remain.
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
 | 33 | Supplied-ID session opening | strict resume-only / storage-absence open-or-create / retry failed resume as create | Use open-or-create for both HTTP caller IDs and MCP transport IDs, matching MAF. Create with the requested ID only when typed storage listings confirm no state beyond empty host scaffolding; otherwise resume and let the SDK validate. Never retry failed resume as create or reset partial/corrupt state. | Human (larohra) | 2026-10-19 |
+| 34 | Supplied-ID caller scope | HTTP and MCP only / every caller-supplied primary session ID | Apply the same open-or-create contract to direct runner APIs and HostedSkill `run()` / `stream()` as well as HTTP and MCP. This matches MAF's entry-point-independent `AgentSession(session_id=...)` plus history-provider loading. Preserve typed storage classification and propagate initialization, listing, native create/resume, and cleanup failures without fallback creation or reset. | Human (larohra) | 2026-10-21 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -565,10 +569,11 @@ error-preservation, and process-local concurrency contracts remain.
 
 ### Supplied-ID amendment behavioral acceptance
 
-- Fresh caller-supplied HTTP IDs and inbound MCP transport IDs open a new
-  session with the supplied identity when no durable state exists.
-- Continued supplied IDs preserve their existing session state across HTTP and
-  MCP entry points.
+- Fresh caller-supplied IDs from HTTP, inbound MCP, direct runner APIs, and
+  HostedSkill open a new session with the supplied identity when no durable
+  state exists.
+- Continued supplied IDs preserve their existing session state across those
+  entry points.
 - Existing, partial, or corrupt durable state is never reset, replaced, or
   retried through a create fallback.
 - Storage initialization and state-classification failures remain explicit and
@@ -595,12 +600,17 @@ error-preservation, and process-local concurrency contracts remain.
 ## 8. Status & sign-off
 
 - **Status:** Finalized. The supplied-session-ID behavioral contract received
-  human sign-off on 2026-10-19; the earlier feature contract remains governed
+  human sign-off on 2026-10-19 and its all-caller scope received follow-up
+  human sign-off on 2026-10-21; the earlier feature contract remains governed
   by the historical sign-offs below.
 - **Supplied-ID amendment review:** On 2026-10-19, larohra selected
   open-or-create for both HTTP caller IDs and inbound MCP transport IDs and
   approved that behavioral direction after independent architecture review
   completed with **APPROVE-FOR-HUMAN-REVIEW** and no blocking issues.
+- **Supplied-ID scope follow-up:** On 2026-10-21, larohra confirmed that
+  open-or-create is also the intended direct runner and HostedSkill behavior
+  after verification that MAF applies the same supplied-ID history contract
+  independently of the calling surface.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.
