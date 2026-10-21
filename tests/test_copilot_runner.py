@@ -292,6 +292,13 @@ async def test_preparation_keeps_capability_categories_declarative(preview, monk
     assert [item.name for item in prepared.workflow_tools] == ["workflow_tool"]
     assert [item.name for item in prepared.delegate_tools] == ["delegate_tool"]
     assert returned_tracker is tracker
+    assert [item.name for item in prepared.direct_tools] == [
+        "user_tool",
+        "sandbox_tool",
+        "web_request_tool",
+        "workflow_tool",
+        "delegate_tool",
+    ]
     direct_request = _copilot_runner._build_direct_request(prepared)
     assert [item.name for item in direct_request.tools] == [
         "user_tool",

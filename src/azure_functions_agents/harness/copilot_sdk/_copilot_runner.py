@@ -76,7 +76,7 @@ class _CopilotPreparedInputs:
     delegate_tools: tuple[ToolDescriptor, ...]
 
     @property
-    def tools(self) -> tuple[ToolDescriptor, ...]:
+    def direct_tools(self) -> tuple[ToolDescriptor, ...]:
         return (
             *self.user_tools,
             *self.sandbox_tools,
@@ -208,7 +208,7 @@ def _build_direct_request(
     event_sink: Callable[[StreamEvent], None] | None = None,
 ) -> HarnessRequest:
     """Attach prepared declarations to the existing direct request."""
-    return replace(prepared.request, tools=prepared.tools, event_sink=event_sink)
+    return replace(prepared.request, tools=prepared.direct_tools, event_sink=event_sink)
 
 
 class _StreamEventQueue:
