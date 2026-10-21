@@ -62,7 +62,6 @@ if TYPE_CHECKING:
         Message,
         ResponseStream,
         RoleLiteral,
-        SupportsChatGetResponse,
         ToolTypes,
         UsageDetails,
     )
@@ -71,6 +70,7 @@ if TYPE_CHECKING:
     from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
+    from ._maf_client import MAFChatClient
 type AgentFunctionTool = ToolInput
 type AgentTool = ToolTypes
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
@@ -347,7 +347,7 @@ def _prepare_agent_inputs(
 
 
 def _build_direct_role_agent(
-    chat_client: SupportsChatGetResponse[Any],
+    chat_client: MAFChatClient,
     *,
     prepared: _MafPreparedInputs,
     skill_paths: Sequence[Path] | None,
@@ -375,7 +375,7 @@ def _build_direct_role_agent(
 
 
 def _build_role_agent(
-    chat_client: SupportsChatGetResponse[Any],
+    chat_client: MAFChatClient,
     *,
     agent_instructions: str | None,
     tools: Sequence[AgentTool],
