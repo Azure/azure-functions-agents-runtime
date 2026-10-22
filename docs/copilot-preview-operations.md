@@ -52,8 +52,9 @@ shared configuration does not initialize or probe the other implementation.
 Runtime-owned telemetry keeps the same invocation surface under either
 harness. Direct, streaming, built-in chat, inbound MCP, non-HTTP, delegate, and
 leaf runtime spans use `agent.run {slug}` plus the shared `af.agent.*`
-attributes and `af.agent.harness=maf|copilot`. Copilot adds observed tool spans
-and usage events without changing the runtime-owned surface.
+attributes and `af.agent.harness=maf|copilot`. Copilot adds one semantic execution
+child span plus observed tool spans and usage events without changing that outer
+surface or MAF's framework-owned instrumentation.
 
 ## Authored Python tools
 
@@ -255,33 +256,63 @@ that every host termination awaits that async shutdown path.
 
 ## Telemetry addendum
 
+The semantic execution boundary follows
+[FRD 0009 §4.10](frds/0009-copilot-sdk-harness.md#410-runtime-owned-genai-invocation-amendment).
+
 Copilot telemetry reuses the active turn's existing public session-event
-subscription, the current OpenTelemetry provider, and the custom-tool wrapper.
-It adds no new telemetry settings and leaves MAF behavior unchanged.
+subscription and custom-tool wrapper, with the existing tracer, provider,
+resource, sampling policy, processors, and exporter. It remains no-op when
+observability is inactive and leaves MAF's framework-owned instrumentation unchanged.
+There is no native file bridge, OTLP receiver, new dependency, telemetry setting,
+or native telemetry opt-in; native session-telemetry policy is unchanged.
+
+Each actual Copilot execution has exactly one
+`invoke_agent {readable-agent-name}` semantic span beneath the unchanged neutral
+`agent.run {slug}` outer span. It has `gen_ai.operation.name=invoke_agent` and
+kind `INTERNAL`. It starts after resolved request identity, before native
+session acquisition, and continues through adapter cleanup. Its duration includes
+setup and cleanup, not just model inference. Direct runner calls without an outer
+runtime span still emit this span under available caller context, without inventing
+ingress or mutating an unrelated caller span.
+
+`gen_ai.agent.id` and `gen_ai.agent.name` reuse the existing stable ID and
+app-qualified readable name. `gen_ai.conversation.id` is the resolved public
+session ID, never a native storage/session identifier; `gen_ai.request.model`
+is the configured model when known. Provider fields require proven provider
+semantics, not a harness label or a legacy Azure compatibility assumption.
+Unavailable values are omitted.
 
 Each unique public `ASSISTANT_USAGE` event is recorded as a custom
-`af.agent.model.usage` span event on the owning runtime invocation span.
+`af.agent.model.usage` span event on the owning runtime invocation span, or on
+the semantic span when no runtime span exists. Name-only skill observations
+follow the same rule; runtime summaries and lifecycle events remain outer.
 It uses standard `gen_ai.usage.*` fields where reported semantics match
 exactly; reported duration, TTFT, and inter-token measures remain custom
 `af.agent.usage.*` values. The existing once-only eight-field invocation totals
-stay unchanged.
+stay unchanged, as do deduplication, public results, and accounting. Token totals
+on the semantic invocation are recommended optional enrichment, not a semantic
+discovery or compatibility prerequisite, and are explicitly deferred. Missing
+usage and recursive child totals are not inferred.
 
 Completion records, including completion-only records, continue to contribute
 to `AgentResult` and aggregate tool counts. A timed telemetry span requires a
 coherent call-ID/timestamp-matched `tool.execution_start` /
 `tool.execution_complete` pair. Custom tools restore captured host context
 before invocation, and the wrapper owns each wrapped call ID so one wrapped
-call is counted once. This preserves the host's nested coordinator invocation
--> `execute_tool delegate_<slug>` -> child invocation trace shape for delegates
-while leaving coordinator-visible SSE limited to the delegate tool boundary and
-final child text.
+call is counted once. Both custom-wrapper and event-derived native tool spans
+explicitly use the captured semantic invocation parent, rather than incidental
+native callback context. This preserves the host's nested coordinator semantic invocation
+-> `execute_tool delegate_<slug>` -> specialist execution (including its outer
+runtime span where present and semantic invocation) trace shape for delegates,
+with isolated contexts for concurrent agents. Coordinator-visible SSE remains
+limited to the delegate tool boundary and final child text.
 
 | Source | Expectation |
 | --- | --- |
 | Direct HTTP and built-in chat UI turns | Use the same turn-scoped runtime invocation span, tool accounting, and usage observations. |
 | `/chatstream` SSE | Mirrors translated callbacks for the current turn only; it is not evidence of full native child-span hierarchy. |
 | Delegates | Preserve the nested host trace shape above; native specialist session events do not appear as a second coordinator stream. |
-| Workflow Sub Agent leaves | Each leaf is observed as its own invocation span; model/duration appear only when reported by the SDK. |
+| Workflow Sub Agent leaves | Each leaf has its own semantic execution span including setup/cleanup; its configured model is attached when known. Inference timing is not fabricated. |
 | Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
 
 `ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but
@@ -295,6 +326,13 @@ cancellation, or SSE termination.
 Caught Python exception messages and stack traces are recorded regardless of
 `ENABLE_SENSITIVE_DATA`, matching MAF behavior; application exception text
 may contain sensitive data.
+
+Actual invocation errors receive error status, `error.type`, and existing
+fault-domain/exception diagnostics. Recovered tool errors do not fail a successful
+invocation; cancellation is a distinct nonfailure outcome. Original errors remain
+authoritative over cleanup errors. This adds no fabricated inference spans/latency,
+standard model metrics, cost, or complete native hierarchy. Agent-level telemetry
+does not establish portal parity or live Azure/Application Insights verification.
 
 ## Inspecting a session
 

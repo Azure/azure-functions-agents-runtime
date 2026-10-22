@@ -5,7 +5,7 @@ import errno
 import json
 import shutil
 import threading
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +18,7 @@ import pytest
 from azure.core.credentials import AccessToken
 from pydantic import BaseModel, Field
 
+from azure_functions_agents._agent_run_diagnostics import start_agent_run_span
 from azure_functions_agents._function_tool import tool, workflow_tool
 from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.app import create_function_app
@@ -89,10 +90,10 @@ def _request(*, new_session=True):
     )
 
 
-def _sdk_event(event_type, data):
+def _sdk_event(event_type, data, *, timestamp=None):
     from copilot.session_events import SessionEvent
 
-    return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=event_type)
+    return SessionEvent(data=data, id=uuid4(), timestamp=timestamp or datetime.now(UTC), type=event_type)
 
 
 async def _seed_session_state(preview, *, agent_slug="main", session_id="example"):
@@ -144,6 +145,445 @@ def _fake_client():
         create_session=AsyncMock(return_value=session),
         resume_session=AsyncMock(return_value=session),
     )
+
+
+@pytest.fixture
+def invocation_spans(monkeypatch):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import azure_functions_agents._observability as observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("copilot-invocation-test")
+    monkeypatch.setattr(observability, "_enabled", True)
+    monkeypatch.setattr(observability, "_capture_sensitive_data", False)
+    monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
+    yield tracer, exporter
+    provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("new_session", [False, True])
+async def test_semantic_invocation_wraps_session_setup_through_cleanup(
+    preview, monkeypatch, invocation_spans, streaming, new_session,
+):
+    import copilot
+    from opentelemetry import trace
+    from opentelemetry.trace import SpanKind
+
+    from azure_functions_agents._agent_identity import agent_id
+
+    _, exporter = invocation_spans
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "fixture-app")
+    if not new_session:
+        await _seed_session_state(preview)
+    client = _fake_client()
+    session = client.create_session.return_value
+    observed = []
+    original_open = _copilot.open_session_fs
+
+    async def open_storage(*args, **kwargs):
+        observed.append(("storage-open", trace.get_current_span().get_span_context().span_id))
+        storage = await original_open(*args, **kwargs)
+        original_close = storage.close
+
+        async def close():
+            observed.append(("storage-close", trace.get_current_span().get_span_context().span_id))
+            await original_close()
+
+        storage.close = close
+        return storage
+
+    async def create(*_args, **_kwargs):
+        observed.append(("session-create", trace.get_current_span().get_span_context().span_id))
+        return session
+
+    async def disconnect():
+        observed.append(("session-disconnect", trace.get_current_span().get_span_context().span_id))
+
+    client.create_session.side_effect = create
+    client.resume_session.side_effect = create
+    session.disconnect.side_effect = disconnect
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    monkeypatch.setattr(_copilot, "open_session_fs", open_storage)
+    events = []
+    request = replace(
+        _request(new_session=new_session), event_sink=events.append if streaming else None,
+    )
+    try:
+        with start_agent_run_span("main", display_name="Main", model=request.model):
+            await _copilot.run(preview, request)
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    spans = exporter.get_finished_spans()
+    semantic = [span for span in spans if span.attributes.get("gen_ai.operation.name") == "invoke_agent"]
+    assert len(semantic) == 1
+    [invocation] = semantic
+    outer = next(span for span in spans if span.name == "agent.run main")
+    assert invocation.name == "invoke_agent fixture-app/main"
+    assert invocation.kind == SpanKind.INTERNAL
+    assert invocation.parent.span_id == outer.context.span_id
+    assert invocation.context.trace_id == outer.context.trace_id
+    assert observed == [
+        (stage, invocation.context.span_id)
+        for stage in ("storage-open", "session-create", "session-disconnect", "storage-close")
+    ]
+    assert invocation.attributes["gen_ai.agent.id"] == agent_id("main")
+    assert invocation.attributes["gen_ai.agent.name"] == "fixture-app/main"
+    assert invocation.attributes["gen_ai.conversation.id"] == "example"
+    assert invocation.attributes["gen_ai.request.model"] == request.model
+    assert "gen_ai.operation.name" not in outer.attributes
+    assert "gen_ai.provider.name" not in invocation.attributes
+    assert not any(key.startswith("gen_ai.usage.") for key in invocation.attributes)
+    if new_session:
+        client.create_session.assert_awaited_once()
+        client.resume_session.assert_not_awaited()
+    else:
+        client.resume_session.assert_awaited_once()
+        client.create_session.assert_not_awaited()
+    session.on.assert_called_once()
+    session.unsubscribe.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_sensitive_data", [False, True])
+@pytest.mark.parametrize("response_content", ["synthetic reply", "\u00e9 \U0001f600"])
+@pytest.mark.parametrize(
+    "caller_kind",
+    ["none", "unrelated", "wrong_agent", "wrong_session", "wrong_harness", "lookalike", "runtime"],
+)
+async def test_semantic_observations_preserve_verified_runtime_ownership(
+    preview, monkeypatch, invocation_spans, caller_kind, capture_sensitive_data, response_content,
+):
+    import copilot
+    from copilot.session_events import (
+        AssistantMessageData,
+        AssistantUsageData,
+        SessionEventType,
+        SkillInvokedData,
+    )
+
+    import azure_functions_agents._observability as observability
+
+    monkeypatch.setattr(observability, "_capture_sensitive_data", capture_sensitive_data)
+    tracer, exporter = invocation_spans
+    client = _fake_client()
+    session = client.create_session.return_value
+    session.send_and_wait.return_value = _sdk_event(
+        SessionEventType.ASSISTANT_MESSAGE,
+        AssistantMessageData(content=response_content, message_id="fixture"),
+    )
+
+    async def send(**_kwargs):
+        [observer] = session.handlers
+        observer(_sdk_event(
+            SessionEventType.ASSISTANT_USAGE,
+            AssistantUsageData(model="reported", input_tokens=3, output_tokens=4),
+        ))
+        observer(_sdk_event(
+            SessionEventType.SKILL_INVOKED,
+            SkillInvokedData(name="review", content="private skill", path="private/SKILL.md"),
+        ))
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    attributes = {}
+    if caller_kind in {"lookalike", "wrong_agent", "wrong_session", "wrong_harness"}:
+        attributes = {
+            "af.lifecycle_stage": "agent_run",
+            "af.agent.name": "other" if caller_kind == "wrong_agent" else "main",
+            "af.agent.session_id": "other" if caller_kind == "wrong_session" else "example",
+            "af.agent.harness": "maf" if caller_kind == "wrong_harness" else "copilot",
+        }
+    caller_name = "caller" if caller_kind == "unrelated" else "agent.run main"
+    manager = (
+        nullcontext()
+        if caller_kind == "none"
+        else start_agent_run_span(
+            "main", display_name="Main", model="model", session_id="example",
+        )
+        if caller_kind == "runtime"
+        else tracer.start_as_current_span(caller_name, attributes=attributes)
+    )
+    try:
+        with manager:
+            await _copilot.run(preview, _request())
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    spans = exporter.get_finished_spans()
+    invocation = next(span for span in spans if span.name.startswith("invoke_agent "))
+    observation_owner = (
+        next(span for span in spans if span.name == caller_name)
+        if caller_kind == "runtime" else invocation
+    )
+    assert [event.name for event in observation_owner.events] == [
+        "af.agent.model.usage", "af.skill.invoked",
+    ]
+    assert observation_owner.attributes["af.agent.tool_call_count"] == 0
+    assert observation_owner.attributes["af.agent.tool_error_count"] == 0
+    assert observation_owner.attributes["af.agent.response_bytes"] == len(
+        response_content.encode("utf-8")
+    )
+    assert "af.agent.response" not in observation_owner.attributes
+    assert "private skill" not in repr(observation_owner.events)
+    assert "gen_ai.usage.input_tokens" not in invocation.attributes
+    if caller_kind == "none":
+        assert invocation.parent is None
+    else:
+        caller = next(span for span in spans if span.name == caller_name)
+        assert invocation.parent.span_id == caller.context.span_id
+        if caller_kind != "runtime":
+            assert not caller.events
+            assert dict(caller.attributes) == attributes
+        else:
+            assert "af.agent.tool_call_count" not in invocation.attributes
+    session.on.assert_called_once()
+    session.unsubscribe.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected", "message"),
+    [
+        ("setup", RuntimeError, "private startup"),
+        ("send", ValueError, "private send"),
+        ("cleanup", RuntimeError, "private cleanup"),
+        ("send_and_cleanup", ValueError, "private send"),
+        ("cancel_and_cleanup", asyncio.CancelledError, "request cancelled"),
+    ],
+)
+async def test_semantic_failure_status_and_cleanup_precedence(
+    preview, monkeypatch, invocation_spans, failure, expected, message,
+):
+    import copilot
+    from opentelemetry.trace import StatusCode
+
+    _, exporter = invocation_spans
+    client = _fake_client()
+    session = client.create_session.return_value
+    if failure == "setup":
+        client.start.side_effect = RuntimeError("private startup")
+    if failure in {"send", "send_and_cleanup"}:
+        session.send_and_wait.side_effect = ValueError("private send")
+    cancellation = asyncio.CancelledError("request cancelled")
+    if failure == "cancel_and_cleanup":
+        session.send_and_wait.side_effect = cancellation
+    if "cleanup" in failure:
+        session.disconnect.side_effect = RuntimeError("private cleanup")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(expected, match=message) as caught:
+            await _copilot.run(preview, _request())
+        if failure == "cancel_and_cleanup":
+            assert caught.value is cancellation
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    [invocation] = exporter.get_finished_spans()
+    exceptions = [event for event in invocation.events if event.name == "exception"]
+    if failure == "cancel_and_cleanup":
+        assert invocation.status.status_code == StatusCode.UNSET
+        assert invocation.attributes["af.agent.outcome"] == "cancelled"
+        assert "error.type" not in invocation.attributes
+        assert not exceptions
+    else:
+        assert invocation.status.status_code == StatusCode.ERROR
+        assert invocation.attributes["af.agent.outcome"] == "error"
+        assert invocation.attributes["af.fault_domain"] == "runtime"
+        assert invocation.attributes["error.type"] == expected.__name__
+        assert len(exceptions) == 1
+        assert message in exceptions[0].attributes["exception.message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["delegate", "workflow_subagent", "recovered_error"])
+async def test_tools_override_native_callback_context_and_preserve_leaf_hierarchy(
+    preview, monkeypatch, invocation_spans, role,
+):
+    import copilot
+    from copilot.session_events import (
+        SessionEventType,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteResult,
+        ToolExecutionStartData,
+    )
+    from copilot.tools import ToolInvocation
+    from opentelemetry import trace
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, StatusCode, TraceFlags
+
+    from azure_functions_agents._agent_run_diagnostics import start_agent_run_span
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+
+    _, exporter = invocation_spans
+    client = _fake_client()
+    client.delete_session = AsyncMock()
+    sessions = []
+
+    @tool(name="delegate_specialist")
+    async def delegate() -> str:
+        if role == "recovered_error":
+            raise ValueError("private tool exception")
+        child_request = replace(
+            _request(), agent_slug="specialist", session_id="child-public", execution_role=role,
+        )
+        with start_agent_run_span(
+            "specialist", display_name="Specialist", model=child_request.model,
+            session_id=child_request.session_id,
+        ):
+            return (await _copilot.run(preview, child_request)).content
+
+    callback_span = NonRecordingSpan(SpanContext(
+        trace_id=123, span_id=456, is_remote=True, trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    ))
+
+    async def create(**options):
+        session = _fake_client().create_session.return_value
+        sessions.append(session)
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+            tools=[SimpleNamespace(name=function.name) for function in options["tools"]],
+        )
+
+        async def send(**_kwargs):
+            if not options["tools"]:
+                return session.send_and_wait.return_value
+            [observer] = session.handlers
+            with trace.use_span(callback_span):
+                now = datetime.now(UTC)
+                observer(_sdk_event(
+                    SessionEventType.TOOL_EXECUTION_START,
+                    ToolExecutionStartData(tool_call_id="native", tool_name="lookup", arguments={}),
+                    timestamp=now,
+                ))
+                observer(_sdk_event(
+                    SessionEventType.TOOL_EXECUTION_COMPLETE,
+                    ToolExecutionCompleteData(
+                        tool_call_id="native", success=True,
+                        result=ToolExecutionCompleteResult(content="safe"),
+                    ),
+                    timestamp=now + timedelta(microseconds=1),
+                ))
+                await options["tools"][0].handler(ToolInvocation(
+                    tool_call_id="custom", tool_name="delegate_specialist", arguments={},
+                ))
+            return session.send_and_wait.return_value
+
+        session.send_and_wait.side_effect = send
+        return session
+
+    client.create_session.side_effect = create
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    request = replace(
+        _request(),
+        tools=(delegate,),
+        mcp_servers=(MCPServerDescriptor(name="remote", url="https://example.test/mcp"),),
+    )
+    try:
+        with start_agent_run_span("main", display_name="Main", model=request.model):
+            result = await _copilot.run(preview, request)
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    spans = exporter.get_finished_spans()
+    main = next(
+        span for span in spans
+        if span.attributes.get("gen_ai.operation.name") == "invoke_agent"
+        and span.attributes["gen_ai.conversation.id"] == "example"
+    )
+    tools = [span for span in spans if span.attributes.get("gen_ai.operation.name") == "execute_tool"]
+    assert len(tools) == 2
+    assert all(span.parent.span_id == main.context.span_id for span in tools)
+    assert all(span.context.trace_id == main.context.trace_id for span in spans)
+    custom = next(span for span in tools if span.name == "execute_tool delegate_specialist")
+    assert main.status.status_code == StatusCode.UNSET
+    assert len(result.tool_calls) == 2
+    if role == "recovered_error":
+        assert len([span for span in spans if span.name.startswith("invoke_agent ")]) == 1
+        assert custom.status.status_code == StatusCode.ERROR
+        assert result.tool_calls[-1]["success"] is False
+    else:
+        child = next(
+            span for span in spans
+            if span.attributes.get("gen_ai.conversation.id") == "child-public"
+        )
+        outer = next(span for span in spans if span.name == "agent.run specialist")
+        assert outer.parent.span_id == custom.context.span_id
+        assert child.parent.span_id == outer.context.span_id
+        assert child.attributes["gen_ai.agent.name"].endswith("specialist")
+        assert len([span for span in spans if span.name.startswith("invoke_agent ")]) == 2
+        client.delete_session.assert_awaited_once()
+    for session in sessions:
+        session.on.assert_called_once()
+        session.unsubscribe.assert_called_once()
+        session.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_semantic_invocations_keep_tool_and_usage_ownership(
+    preview, monkeypatch, invocation_spans,
+):
+    import copilot
+    from copilot.session_events import (
+        AssistantUsageData,
+        SessionEventType,
+        ToolExecutionStartData,
+    )
+
+    _, exporter = invocation_spans
+    client = _fake_client()
+    ready = asyncio.Event()
+    sessions = []
+
+    async def create(**options):
+        session = _fake_client().create_session.return_value
+        sessions.append(session)
+
+        async def send(**_kwargs):
+            if len(sessions) == 2:
+                ready.set()
+            await asyncio.wait_for(ready.wait(), timeout=5)
+            [observer] = session.handlers
+            observer(_sdk_event(
+                SessionEventType.ASSISTANT_USAGE,
+                AssistantUsageData(model=options["model"], input_tokens=1, output_tokens=2),
+            ))
+            observer(_sdk_event(
+                SessionEventType.TOOL_EXECUTION_START,
+                ToolExecutionStartData(tool_call_id="same-call", tool_name=options["model"]),
+            ))
+            return session.send_and_wait.return_value
+
+        session.send_and_wait.side_effect = send
+        return session
+
+    client.create_session.side_effect = create
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        await asyncio.gather(*(
+            _copilot.run(preview, replace(
+                _request(), agent_slug=slug, session_id=f"{slug}-session", model=f"{slug}-model",
+            ))
+            for slug in ("alpha", "beta")
+        ))
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 2
+    assert len({span.context.trace_id for span in spans}) == 2
+    for span in spans:
+        slug = span.attributes["gen_ai.conversation.id"].removesuffix("-session")
+        assert span.attributes["gen_ai.request.model"] == f"{slug}-model"
+        assert [event.name for event in span.events] == ["af.agent.model.usage", "af.tool.incomplete"]
+        assert span.events[0].attributes["gen_ai.request.model"] == f"{slug}-model"
+        assert span.events[1].attributes["gen_ai.tool.name"] == f"{slug}-model"
 
 
 @pytest.mark.asyncio
@@ -1200,7 +1640,6 @@ async def test_usage_events_deduplicate_observations_but_keep_invocation_totals(
         SessionEventType,
         SkillInvokedData,
     )
-    from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -1255,17 +1694,16 @@ async def test_usage_events_deduplicate_observations_but_keep_invocation_totals(
 
     session.send_and_wait.side_effect = send
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    parent = tracer.start_span("agent.run primary")
     try:
         with (
-            trace.use_span(parent, end_on_exit=True),
+            start_agent_run_span("main", display_name="Main", model="gpt-4.1-mini"),
             caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
         ):
             await _copilot.run(preview, _request())
     finally:
         await _lifecycle._shutdown_harnesses()
 
-    [run_span] = exporter.get_finished_spans()
+    run_span = next(span for span in exporter.get_finished_spans() if span.name == "agent.run main")
     usage_events = [event for event in run_span.events if event.name == "af.agent.model.usage"]
     skill_events = [event for event in run_span.events if event.name == "af.skill.invoked"]
     assert len(usage_events) == 1

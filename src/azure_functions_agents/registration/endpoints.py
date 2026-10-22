@@ -27,6 +27,7 @@ from .._observability import (
     LifecycleStage,
     SpanOutcome,
     agent_run_span_name,
+    bind_agent_run_span,
     set_agent_session_attribute,
     start_span,
 )
@@ -383,7 +384,7 @@ def _register_http_chat(
                 model=resolved.model,
                 execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
             ),
-        ) as span:
+        ) as span, bind_agent_run_span(span):
             try:
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
@@ -623,7 +624,7 @@ def _register_mcp_endpoint(
                 model=resolved.model,
                 execution_surface=AgentExecutionSurface.BUILTIN_ENDPOINT,
             ),
-        ) as span:
+        ) as span, bind_agent_run_span(span):
             session_id: str | None = None
             resolved_session_id: str | None = None
             session_state = HarnessSessionState()

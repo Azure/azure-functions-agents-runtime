@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import os
 
 import pytest
 
@@ -64,3 +65,16 @@ def test_registry_contains_only_the_two_sdk_conventions():
     assert set(paths._PATH_POLICIES) == {"windows", "posix"}
     assert paths.select_session_path_policy("windows") is paths.select_session_path_policy("windows")
     assert paths.select_session_path_policy("posix") is paths.select_session_path_policy("posix")
+
+
+@pytest.mark.parametrize("append", [False, True])
+@pytest.mark.parametrize("binary_flag", [None, 0x8000])
+def test_windows_write_flags_preserve_host_binary_mode(monkeypatch, append, binary_flag):
+    if binary_flag is None:
+        monkeypatch.delattr(os, "O_BINARY", raising=False)
+    else:
+        monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+    expected = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    assert paths.select_session_path_policy("windows").write_flags(append) == (
+        expected | (binary_flag or 0)
+    )

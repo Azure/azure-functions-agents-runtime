@@ -21,6 +21,7 @@ from ..._observability import (
     LifecycleStage,
     SpanOutcome,
     agent_run_span_name,
+    bind_agent_run_span,
     start_span,
 )
 from ..._tool_descriptor import ToolDescriptor, ToolInput
@@ -226,9 +227,11 @@ class CopilotRunner:
             ),
             event_sink=event_sink,
         )
-        result = await _copilot_execution.run(self._harness, request)
-        result.delegate_error_count = delegate_tracker.count if delegate_tracker else 0
-        return result
+        if delegate_tracker is None:
+            return await _copilot_execution.run(self._harness, request)
+        return await _copilot_execution.run(
+            self._harness, request, delegate_tracker=delegate_tracker,
+        )
 
     async def run_agent_stream(
         self,
@@ -317,7 +320,8 @@ class CopilotRunner:
                     execution_surface=execution_surface,
                 ),
             ) as span:
-                execution = asyncio.create_task(execute())
+                with bind_agent_run_span(span):
+                    execution = asyncio.create_task(execute())
                 try:
                     while (event := await events.next_event()) is not None:
                         if event["type"] == "session":
@@ -392,7 +396,7 @@ class CopilotRunner:
                 ),
                 "af.agent.execution_role": execution_role,
             },
-        ) as span:
+        ) as span, bind_agent_run_span(span):
             try:
                 from . import _copilot_execution
                 result = await _copilot_execution.run(

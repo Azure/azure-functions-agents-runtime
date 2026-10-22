@@ -23,6 +23,7 @@ import logging
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -70,6 +71,7 @@ ATTR_AGENT_TOOL_CALL_COUNT = "af.agent.tool_call_count"
 ATTR_AGENT_TOOL_ERROR_COUNT = "af.agent.tool_error_count"
 ATTR_AGENT_INPUT_BYTES = "af.agent.input_bytes"
 ATTR_AGENT_RESPONSE_BYTES = "af.agent.response_bytes"
+ATTR_AGENT_RESPONSE = "af.agent.response"
 ATTR_ERROR_TYPE = "error.type"
 ATTR_GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
 ATTR_GEN_AI_AGENT_ID = "gen_ai.agent.id"
@@ -173,6 +175,7 @@ _CONTENT_ATTR_MAX_CHARS = 2048
 _configured = False
 _enabled = False
 _capture_sensitive_data = False
+_AGENT_RUN_SPAN: ContextVar[RuntimeSpan | None] = ContextVar("agent_run_span", default=None)
 
 
 def is_observability_enabled() -> bool:
@@ -456,6 +459,26 @@ def current_span() -> RuntimeSpan:
         return RuntimeSpan(trace.get_current_span())
     except Exception:  # pragma: no cover - defensive
         return RuntimeSpan(None)
+
+
+@contextmanager
+def bind_agent_run_span(span: RuntimeSpan) -> Iterator[None]:
+    """Bind an explicitly owned runtime invocation within the current task."""
+    token = _AGENT_RUN_SPAN.set(span)
+    try:
+        yield
+    finally:
+        _AGENT_RUN_SPAN.reset(token)
+
+
+def current_agent_run_span() -> RuntimeSpan | None:
+    """Return the bound runtime invocation only while that exact span is current."""
+    span = _AGENT_RUN_SPAN.get()
+    if span is None or span._span is None:
+        return None
+    from opentelemetry import trace
+
+    return span if span._span is trace.get_current_span() else None
 
 
 class RuntimeSpan:

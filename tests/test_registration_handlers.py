@@ -33,6 +33,7 @@ from azure_functions_agents.registration._handlers import (
     make_http_agent_handler,
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.runner import AgentResult
 from azure_functions_agents.system_tools.sandbox import build_sandbox_tools_for_session
 from tests._harness_helpers import make_copilot_harness
 
@@ -131,7 +132,7 @@ def _resolved_agent(
 
 def test_http_handler_response_schema_valid_output_passes(monkeypatch: Any) -> None:
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
-        return SimpleNamespace(content='{"message":"ok"}', session_id="session-123")
+        return AgentResult(content='{"message":"ok"}', session_id="session-123")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -157,7 +158,7 @@ def test_http_handler_response_schema_valid_output_passes(monkeypatch: Any) -> N
 
 def test_http_handler_response_schema_invalid_output_returns_500(monkeypatch: Any) -> None:
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
-        return SimpleNamespace(content='{"message":123}', session_id="session-123")
+        return AgentResult(content='{"message":123}', session_id="session-123")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -186,7 +187,7 @@ def test_http_handler_response_schema_invalid_output_returns_500(monkeypatch: An
 
 def test_http_handler_empty_response_schema_still_requires_json(monkeypatch: Any) -> None:
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
-        return SimpleNamespace(content="not JSON", session_id="session-123")
+        return AgentResult(content="not JSON", session_id="session-123")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -596,7 +597,7 @@ def test_http_handler_uses_case_insensitive_session_header(monkeypatch: Any) -> 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         run_kwargs.update(kwargs)
         kwargs["_session_state"].resumable = True
-        return SimpleNamespace(content="plain text", session_id=kwargs["session_id"])
+        return AgentResult(content="plain text", session_id=kwargs["session_id"])
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers.build_sandbox_tools_for_session",
@@ -631,7 +632,7 @@ def test_http_handler_generates_session_id_once_per_request(monkeypatch: Any) ->
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         run_kwargs.update(kwargs)
         kwargs["_session_state"].resumable = True
-        return SimpleNamespace(content="plain text", session_id=kwargs["session_id"])
+        return AgentResult(content="plain text", session_id=kwargs["session_id"])
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers.build_sandbox_tools_for_session",
@@ -663,7 +664,7 @@ def test_http_handler_passes_instructions_only_as_system_message(monkeypatch: An
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured["prompt"] = args[0]
         captured["instructions"] = kwargs["instructions"]
-        return SimpleNamespace(content="plain text", session_id="session-123")
+        return AgentResult(content="plain text", session_id="session-123")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -986,6 +987,7 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
     )
 
     async def fake_run_agent(*_args: Any, **kwargs: Any) -> Any:
+        assert observability.current_agent_run_span() is not None
         observability.current_span().add_event(
             "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 2},
@@ -1041,6 +1043,14 @@ def test_agent_ingress_attaches_harness_events_to_run_span(
     assert ("private" in caplog.text) is (harness_kind is HarnessKind.MAF)
     assert '"response": "ok"' in caplog.text
     assert ('"tool_calls"' in caplog.text) is (harness_kind is HarnessKind.MAF)
+
+
+def test_run_log_payload_counts_utf8_response_bytes(tmp_path: Path) -> None:
+    payload = _run_log_payload(
+        make_copilot_harness(tmp_path),
+        SimpleNamespace(content="\u00e9 \U0001f600", tool_calls=[]),
+    )
+    assert payload["response_bytes"] == 7
 
 
 @pytest.mark.parametrize("entrypoint", ["http", "timer"])
@@ -1311,7 +1321,7 @@ def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured["agent_name"] = kwargs.get("agent_name")
-        return SimpleNamespace(content="ok", session_id="session-123")
+        return AgentResult(content="ok", session_id="session-123")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -1334,7 +1344,7 @@ def test_http_workflow_handler_threads_workflow_agent_slug(
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
-        return SimpleNamespace(content="ok", session_id=kwargs["session_id"])
+        return AgentResult(content="ok", session_id=kwargs["session_id"])
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -1374,7 +1384,7 @@ def test_http_handler_entra_without_easy_auth_returns_401(monkeypatch: Any) -> N
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         nonlocal called
         called = True
-        return SimpleNamespace(content="ok", session_id="s")
+        return AgentResult(content="ok", session_id="s")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -1418,7 +1428,7 @@ def test_http_handler_entra_with_valid_principal_proceeds(monkeypatch: Any) -> N
     monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
-        return SimpleNamespace(content="plain text", session_id="session-123")
+        return AgentResult(content="plain text", session_id="session-123")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -1450,7 +1460,7 @@ def test_http_handler_default_auth_does_not_gate_requests(monkeypatch: Any) -> N
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
-        return SimpleNamespace(content="plain text", session_id="session-123")
+        return AgentResult(content="plain text", session_id="session-123")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -1699,7 +1709,7 @@ def test_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None:
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
-        return SimpleNamespace(content="ok", session_id="s1")
+        return AgentResult(content="ok", session_id="s1")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
@@ -1720,7 +1730,7 @@ def test_http_handler_forwards_empty_agent_configuration(monkeypatch: Any) -> No
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
-        return SimpleNamespace(content="ok", session_id="s1")
+        return AgentResult(content="ok", session_id="s1")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers._run_agent",
