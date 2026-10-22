@@ -12,7 +12,7 @@ The most common entry points are:
   Dynamic Workflow Activity execution.
 """
 
-__version__ = "0.1.0b16"
+__version__ = "0.1.0b17"
 
 from ._agent_validation import validate_session_id
 from ._function_tool import tool, workflow_tool
