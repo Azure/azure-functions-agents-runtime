@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
 from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -25,22 +24,18 @@ from ..._observability import (
     ATTR_GEN_AI_USAGE_INPUT_TOKENS,
     ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
     ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-    ATTR_LIFECYCLE_STAGE,
     ATTR_TOOL_SOURCE,
     FaultDomain,
     GenAiOperationName,
-    LifecycleStage,
     RuntimeSpan,
     SpanOutcome,
     TelemetryAttributeValue,
     ToolSpanSource,
-    agent_run_span_name,
-    current_span,
+    current_agent_run_span,
     gen_ai_agent_name,
     safe_telemetry_name,
     start_span,
 )
-from .._harness_binding import HarnessKind
 
 if TYPE_CHECKING:
     from copilot.session_events import AssistantUsageData
@@ -48,29 +43,6 @@ if TYPE_CHECKING:
     from .._harness_binding import HarnessRequest
 
 _USAGE_EVENT_NAME = "af.agent.model.usage"
-_STREAM_RUN_SPAN: ContextVar[RuntimeSpan | None] = ContextVar(
-    "copilot_stream_run_span", default=None
-)
-
-
-def _owning_run_span(request: HarnessRequest) -> RuntimeSpan | None:
-    """Select the active runtime invocation only when its identity matches."""
-    from opentelemetry import trace
-
-    span = trace.get_current_span()
-    # The OTel API also admits remote/no-op spans without readable local attributes.
-    attributes = getattr(span, "attributes", None)
-    if attributes is None:
-        return None
-    if (
-        getattr(span, "name", None) != agent_run_span_name(agent_name=request.agent_slug)
-        or attributes.get(ATTR_LIFECYCLE_STAGE) != LifecycleStage.AGENT_RUN
-        or attributes.get("af.agent.name") != request.agent_slug
-        or attributes.get("af.agent.session_id") not in (None, request.session_id)
-        or attributes.get("af.agent.harness") not in (None, HarnessKind.COPILOT.value)
-    ):
-        return None
-    return current_span()
 
 
 def invocation_span_attributes(
@@ -87,19 +59,9 @@ def invocation_span_attributes(
 
 
 @contextmanager
-def bind_stream_run_span(span: RuntimeSpan) -> Iterator[None]:
-    """Bind the exact runtime span inherited by a streaming execution task."""
-    token = _STREAM_RUN_SPAN.set(span)
-    try:
-        yield
-    finally:
-        _STREAM_RUN_SPAN.reset(token)
-
-
-@contextmanager
 def invocation_span(request: HarnessRequest) -> Iterator[RuntimeSpan]:
     """Own one semantic execution while preserving runtime observation ownership."""
-    runtime_span = _STREAM_RUN_SPAN.get() or _owning_run_span(request)
+    runtime_span = current_agent_run_span()
     name = gen_ai_agent_name(request.agent_slug)
     with start_span(
         f"invoke_agent {name}",

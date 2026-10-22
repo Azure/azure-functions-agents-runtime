@@ -376,7 +376,10 @@ async def test_leaf_roles_keep_project_skills_without_runtime_workflow_skill(pre
 
 
 @pytest.mark.asyncio
-async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, monkeypatch):
+@pytest.mark.parametrize("execution_role", ["delegate", "workflow_subagent"])
+async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(
+    preview, monkeypatch, execution_role,
+):
     from copilot.tools import ToolInvocation
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
@@ -386,6 +389,7 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     import azure_functions_agents._observability as observability
     from azure_functions_agents._tool_descriptor import ToolDescriptor
     from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_observability import invocation_span
     from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
 
     exporter = InMemorySpanExporter()
@@ -401,10 +405,11 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     async def fake_leaf_execution(_harness, request):
         nonlocal leaf_request
         leaf_request = request
-        observability.current_span().add_event(
-            "af.agent.model.usage",
-            {"gen_ai.usage.output_tokens": 4},
-        )
+        with invocation_span(request) as observations:
+            observations.add_event(
+                "af.agent.model.usage",
+                {"gen_ai.usage.output_tokens": 4},
+            )
         return leaf_result
 
     monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fake_leaf_execution))
@@ -416,7 +421,7 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
             AgentCapabilities(_harness=preview),
             task,
             timeout=3,
-            execution_role="delegate",
+            execution_role=execution_role,
         )
 
     descriptor = ToolDescriptor.create(
@@ -445,9 +450,12 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     root = spans["agent.run coordinator"]
     tool_span = spans["execute_tool delegate_analyst"]
     leaf_span = spans["agent.run analyst"]
+    semantic = spans["invoke_agent analyst"]
     assert tool_span.parent.span_id == root.context.span_id
     assert leaf_span.parent.span_id == tool_span.context.span_id
-    assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
+    assert semantic.parent.span_id == leaf_span.context.span_id
+    assert not semantic.events
+    assert leaf_span.attributes["af.agent.execution_role"] == execution_role
     assert leaf_span.attributes["af.agent.outcome"] == "success"
     assert leaf_span.attributes["af.agent.harness"] == "copilot"
     assert "af.harness" not in leaf_span.attributes

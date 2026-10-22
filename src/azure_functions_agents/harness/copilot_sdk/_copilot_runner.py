@@ -21,6 +21,7 @@ from ..._observability import (
     LifecycleStage,
     SpanOutcome,
     agent_run_span_name,
+    bind_agent_run_span,
     start_span,
 )
 from ..._tool_descriptor import ToolDescriptor, ToolInput
@@ -319,9 +320,7 @@ class CopilotRunner:
                     execution_surface=execution_surface,
                 ),
             ) as span:
-                from ._copilot_observability import bind_stream_run_span
-
-                with bind_stream_run_span(span):
+                with bind_agent_run_span(span):
                     execution = asyncio.create_task(execute())
                 try:
                     while (event := await events.next_event()) is not None:
@@ -397,7 +396,7 @@ class CopilotRunner:
                 ),
                 "af.agent.execution_role": execution_role,
             },
-        ) as span:
+        ) as span, bind_agent_run_span(span):
             try:
                 from . import _copilot_execution
                 result = await _copilot_execution.run(

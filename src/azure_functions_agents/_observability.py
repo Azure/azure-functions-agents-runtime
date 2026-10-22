@@ -23,6 +23,7 @@ import logging
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -173,6 +174,7 @@ _CONTENT_ATTR_MAX_CHARS = 2048
 _configured = False
 _enabled = False
 _capture_sensitive_data = False
+_AGENT_RUN_SPAN: ContextVar[RuntimeSpan | None] = ContextVar("agent_run_span", default=None)
 
 
 def is_observability_enabled() -> bool:
@@ -456,6 +458,26 @@ def current_span() -> RuntimeSpan:
         return RuntimeSpan(trace.get_current_span())
     except Exception:  # pragma: no cover - defensive
         return RuntimeSpan(None)
+
+
+@contextmanager
+def bind_agent_run_span(span: RuntimeSpan) -> Iterator[None]:
+    """Bind an explicitly owned runtime invocation within the current task."""
+    token = _AGENT_RUN_SPAN.set(span)
+    try:
+        yield
+    finally:
+        _AGENT_RUN_SPAN.reset(token)
+
+
+def current_agent_run_span() -> RuntimeSpan | None:
+    """Return the bound runtime invocation only while that exact span is current."""
+    span = _AGENT_RUN_SPAN.get()
+    if span is None or span._span is None:
+        return None
+    from opentelemetry import trace
+
+    return span if span._span is trace.get_current_span() else None
 
 
 class RuntimeSpan:

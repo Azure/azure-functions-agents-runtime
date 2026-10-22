@@ -484,8 +484,8 @@ The semantic span carries `gen_ai.operation.name=invoke_agent`, stable agent ID
 and readable name, the public conversation ID, and the configured model when
 known. Custom and event-derived tool spans use its captured context. Runtime
 summaries, lifecycle events, usage, and skill observations remain on the outer
-runtime span when present; direct calls without one attach observations to the
-semantic span and do not mutate unrelated callers.
+runtime span explicitly bound by the runtime boundary; direct calls without one
+attach observations to the semantic span and do not mutate unrelated callers.
 
 Existing failure, cancellation, privacy, cleanup-precedence, and usage-accounting
 contracts apply. Invocation token totals remain optional deferred enrichment.

@@ -752,8 +752,9 @@ def test_handle_chat_reports_delegate_error_count_on_span(
 
 
 @pytest.mark.parametrize("harness_kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+@pytest.mark.parametrize("surface", ["chat", "mcp"])
 def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
-    monkeypatch: Any, tmp_path: Path, harness_kind: HarnessKind
+    monkeypatch: Any, tmp_path: Path, harness_kind: HarnessKind, surface: str,
 ) -> None:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -772,7 +773,10 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+        builtin_endpoints=(
+            BuiltinEndpointsConfig(debug_chat_ui=True)
+            if surface == "chat" else BuiltinEndpointsConfig(mcp=True)
+        ),
         source_file=source_file,
     )
     exporter = InMemorySpanExporter()
@@ -788,6 +792,7 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
 
     async def fake_run_builtin_agent(*_args: Any, **kwargs: Any) -> AgentResult:
         assert kwargs["_session_state"].caller_supplied is True
+        assert observability.current_agent_run_span() is not None
         observability.current_span().add_event(
             "af.agent.model.usage",
             {"gen_ai.usage.output_tokens": 3},
@@ -815,16 +820,23 @@ def test_builtin_chat_ingress_attaches_harness_events_to_run_span(
         "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT",
         "false" if harness_kind is HarnessKind.COPILOT else "true",
     )
-    chat_route = next(
-        route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
-    )
-    response = asyncio.run(
-        chat_route["handler"](
-            DummyRequest({"prompt": "hello"}, headers={"x-ms-session-id": "continued"})
+    if surface == "chat":
+        chat_route = next(
+            route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
         )
-    )
+        response = asyncio.run(
+            chat_route["handler"](
+                DummyRequest({"prompt": "hello"}, headers={"x-ms-session-id": "continued"})
+            )
+        )
+        assert response.status_code == 200
+    else:
+        route = next(route for route in app.routes if route.get("mcp_tool_trigger"))
+        response = asyncio.run(route["handler"](json.dumps({
+            "arguments": {"prompt": "hello"}, "sessionId": "continued",
+        })))
+        assert json.loads(response)["response"] == "ok"
 
-    assert response.status_code == 200
     [span] = exporter.get_finished_spans()
     assert span.name == f"agent.run {resolved.slug}"
     assert span.attributes["af.agent.harness"] == harness_kind.value

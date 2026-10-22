@@ -13,6 +13,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_observability import (
     CopilotEventTelemetry,
     invocation_span,
 )
+from tests.test_copilot_execution import invocation_spans as invocation_spans
 
 
 class _RecordingSpan:
@@ -90,6 +91,59 @@ def test_uninstrumented_execution_does_not_require_otel_sdk(monkeypatch) -> None
     with trace.use_span(caller), invocation_span(request) as observations:
         observations.add_event("af.skill.invoked", {"af.skill.name": "review"})
     assert trace.get_current_span() is not caller
+
+
+def test_nested_invocation_does_not_reuse_outer_observation_owner(invocation_spans) -> None:
+    from azure_functions_agents._agent_run_diagnostics import start_agent_run_span
+
+    _, exporter = invocation_spans
+    request = HarnessRequest(
+        prompt="private", instructions=None, agent_slug="main", session_id="public",
+        new_session=True, model="model", tools=(), max_output_tokens=None, deadline=1,
+    )
+    with (
+        start_agent_run_span("main", display_name="Main", model="model") as outer,
+        invocation_span(request) as observations,
+    ):
+        assert observations is outer
+        observations.add_event("outer.before")
+        with invocation_span(request) as nested_observations:
+            assert nested_observations is not outer
+            nested_observations.add_event("nested")
+        observations.add_event("outer.after")
+
+    nested, semantic, runtime = exporter.get_finished_spans()
+    assert nested.parent.span_id == semantic.context.span_id
+    assert semantic.parent.span_id == runtime.context.span_id
+    assert [event.name for event in nested.events] == ["nested"]
+    assert semantic.events == ()
+    assert [event.name for event in runtime.events] == ["outer.before", "outer.after"]
+
+
+def test_bound_owner_does_not_authorize_matching_unrelated_child(invocation_spans) -> None:
+    from azure_functions_agents._agent_run_diagnostics import start_agent_run_span
+
+    tracer, exporter = invocation_spans
+    request = HarnessRequest(
+        prompt="private", instructions=None, agent_slug="main", session_id="public",
+        new_session=True, model="model", tools=(), max_output_tokens=None, deadline=1,
+    )
+    with (
+        start_agent_run_span("main", display_name="Main", model="model"),
+        tracer.start_as_current_span("agent.run main", attributes={
+            "af.agent.name": "main", "af.agent.session_id": "public",
+            "af.agent.harness": "copilot", "af.lifecycle_stage": "agent_run",
+        }) as unrelated,
+        invocation_span(request) as observations,
+    ):
+        observations.add_event("observation")
+
+    semantic, caller, runtime = exporter.get_finished_spans()
+    assert caller.context.span_id == unrelated.get_span_context().span_id
+    assert semantic.parent.span_id == caller.context.span_id
+    assert [event.name for event in semantic.events] == ["observation"]
+    assert caller.events == ()
+    assert runtime.events == ()
 
 
 @pytest.mark.parametrize("failed", [False, True])

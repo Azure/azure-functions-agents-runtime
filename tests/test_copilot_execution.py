@@ -18,6 +18,7 @@ import pytest
 from azure.core.credentials import AccessToken
 from pydantic import BaseModel, Field
 
+from azure_functions_agents._agent_run_diagnostics import start_agent_run_span
 from azure_functions_agents._function_tool import tool, workflow_tool
 from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.app import create_function_app
@@ -176,7 +177,6 @@ async def test_semantic_invocation_wraps_session_setup_through_cleanup(
     from opentelemetry.trace import SpanKind
 
     from azure_functions_agents._agent_identity import agent_id
-    from azure_functions_agents._agent_run_diagnostics import start_agent_run_span
 
     _, exporter = invocation_spans
     monkeypatch.setenv("WEBSITE_SITE_NAME", "fixture-app")
@@ -253,14 +253,21 @@ async def test_semantic_invocation_wraps_session_setup_through_cleanup(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capture_sensitive_data", [False, True])
+@pytest.mark.parametrize("response_content", ["synthetic reply", "\u00e9 \U0001f600"])
 @pytest.mark.parametrize(
-    "caller_kind", ["none", "unrelated", "wrong_agent", "wrong_session", "wrong_harness", "runtime"],
+    "caller_kind",
+    ["none", "unrelated", "wrong_agent", "wrong_session", "wrong_harness", "lookalike", "runtime"],
 )
 async def test_semantic_observations_preserve_verified_runtime_ownership(
-    preview, monkeypatch, invocation_spans, caller_kind, capture_sensitive_data,
+    preview, monkeypatch, invocation_spans, caller_kind, capture_sensitive_data, response_content,
 ):
     import copilot
-    from copilot.session_events import AssistantUsageData, SessionEventType, SkillInvokedData
+    from copilot.session_events import (
+        AssistantMessageData,
+        AssistantUsageData,
+        SessionEventType,
+        SkillInvokedData,
+    )
 
     import azure_functions_agents._observability as observability
 
@@ -268,6 +275,10 @@ async def test_semantic_observations_preserve_verified_runtime_ownership(
     tracer, exporter = invocation_spans
     client = _fake_client()
     session = client.create_session.return_value
+    session.send_and_wait.return_value = _sdk_event(
+        SessionEventType.ASSISTANT_MESSAGE,
+        AssistantMessageData(content=response_content, message_id="fixture"),
+    )
 
     async def send(**_kwargs):
         [observer] = session.handlers
@@ -284,7 +295,7 @@ async def test_semantic_observations_preserve_verified_runtime_ownership(
     session.send_and_wait.side_effect = send
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     attributes = {}
-    if caller_kind in {"runtime", "wrong_agent", "wrong_session", "wrong_harness"}:
+    if caller_kind in {"lookalike", "wrong_agent", "wrong_session", "wrong_harness"}:
         attributes = {
             "af.lifecycle_stage": "agent_run",
             "af.agent.name": "other" if caller_kind == "wrong_agent" else "main",
@@ -295,6 +306,10 @@ async def test_semantic_observations_preserve_verified_runtime_ownership(
     manager = (
         nullcontext()
         if caller_kind == "none"
+        else start_agent_run_span(
+            "main", display_name="Main", model="model", session_id="example",
+        )
+        if caller_kind == "runtime"
         else tracer.start_as_current_span(caller_name, attributes=attributes)
     )
     try:
@@ -314,7 +329,9 @@ async def test_semantic_observations_preserve_verified_runtime_ownership(
     ]
     assert observation_owner.attributes["af.agent.tool_call_count"] == 0
     assert observation_owner.attributes["af.agent.tool_error_count"] == 0
-    assert observation_owner.attributes["af.agent.response_bytes"] == len("synthetic reply")
+    assert observation_owner.attributes["af.agent.response_bytes"] == len(
+        response_content.encode("utf-8")
+    )
     assert "af.agent.response" not in observation_owner.attributes
     assert "private skill" not in repr(observation_owner.events)
     assert "gen_ai.usage.input_tokens" not in invocation.attributes
@@ -1623,7 +1640,6 @@ async def test_usage_events_deduplicate_observations_but_keep_invocation_totals(
         SessionEventType,
         SkillInvokedData,
     )
-    from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -1678,13 +1694,9 @@ async def test_usage_events_deduplicate_observations_but_keep_invocation_totals(
 
     session.send_and_wait.side_effect = send
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    parent = tracer.start_span(
-        "agent.run main",
-        attributes={"af.lifecycle_stage": "agent_run", "af.agent.name": "main"},
-    )
     try:
         with (
-            trace.use_span(parent, end_on_exit=True),
+            start_agent_run_span("main", display_name="Main", model="gpt-4.1-mini"),
             caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
         ):
             await _copilot.run(preview, _request())

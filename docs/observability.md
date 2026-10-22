@@ -121,7 +121,7 @@ under the semantic execution span described below.
 | `af.agent.tool_call_count` | Number of tool calls in the run. |
 | `af.agent.tool_error_count` | Tool calls that failed — includes a "successful" call whose result carried an error or non-empty stderr, **plus** any `delegate_<slug>` call the coordinator recovered from (a specialist failure or timeout — see [Span `execute_tool delegate_<slug>`](#span-execute_tool-delegate_slug-chat-time-sub-agent-delegation)). |
 | `af.agent.input_bytes` | Size of the trigger payload / HTTP body. |
-| `af.agent.response_bytes` | Size of the model's final response. |
+| `af.agent.response_bytes` | UTF-8 byte length of the model's final response. |
 | `af.agent.input` | The trigger payload / HTTP body. **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
 | `af.agent.response` | The final response text. **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
 
@@ -161,8 +161,9 @@ their available caller context.
 
 Custom and event-derived tool spans use the semantic invocation context. Runtime
 summaries, lifecycle events, usage, and skill observations stay on the outer
-runtime span when available; otherwise they attach to the semantic span, never
-an unrelated caller. Invocation token totals are optional and currently deferred.
+runtime span explicitly bound by the invocation boundary; otherwise they attach
+to the semantic span. Matching public names and attributes do not establish
+ownership. Invocation token totals are optional and currently deferred.
 
 The span uses the existing telemetry pipeline and privacy/error contracts.
 Unavailable provider data, model-call spans, inference latency, metrics, cost,
