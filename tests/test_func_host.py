@@ -9,6 +9,64 @@ import pytest
 from tests.endtoend import _func_host
 
 
+def _agent_app(tmp_path: Path) -> Path:
+    (tmp_path / "function_app.py").write_text(
+        "from azure_functions_agents import create_function_app\n"
+        "app = create_function_app()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.agent.md").write_text("---\nname: Main\n---\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_harness_selection_accepts_expected_marker(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv(_func_host.HARNESS_SELECTOR, raising=False)
+    app_dir = _agent_app(tmp_path)
+
+    assert (
+        _func_host._harness_selection_failure(
+            app_dir,
+            "Agent harness selected: harness=maf\nAgent harness selected: harness=maf\n",
+            None,
+        )
+        is None
+    )
+
+
+def test_harness_selection_rejects_conflicting_marker(tmp_path: Path) -> None:
+    app_dir = _agent_app(tmp_path)
+
+    failure = _func_host._harness_selection_failure(
+        app_dir,
+        "Agent harness selected: harness=maf\n",
+        {_func_host.HARNESS_SELECTOR: "true"},
+    )
+
+    assert failure == "expected harness 'copilot', but host output also selected 'maf'"
+
+
+def test_harness_selection_allows_missing_marker(tmp_path: Path) -> None:
+    app_dir = _agent_app(tmp_path)
+
+    assert (
+        _func_host._harness_selection_failure(
+            app_dir,
+            "Host started\n",
+            {_func_host.HARNESS_SELECTOR: "true"},
+        )
+        is None
+    )
+
+
+def test_harness_selection_ignores_non_agent_host(tmp_path: Path) -> None:
+    (tmp_path / "function_app.py").write_text(
+        "from azure.functions import FunctionApp\napp = FunctionApp()\n",
+        encoding="utf-8",
+    )
+
+    assert _func_host._harness_selection_failure(tmp_path, "Host started\n", None) is None
+
+
 def _host_process() -> _func_host._HostProcess:
     return _func_host._HostProcess(
         proc=Mock(),

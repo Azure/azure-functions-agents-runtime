@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-16
+updated: 2026-10-21
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -27,6 +27,12 @@ Discovery, merge, validation, and registration remain SDK-neutral. Selected
 runners own SDK object creation, provider auth timing, native event translation,
 and persistence details. Authored tools remain user-owned code, not a promise of
 compatibility with every harness.
+
+Every caller-supplied primary session ID, including direct runner APIs and
+HostedSkill, uses the same open-or-create contract as MAF. Copilot creates with
+the requested ID only when its selected storage namespace has no persisted
+state; otherwise it resumes through the SDK. A failed resume is never retried
+as create.
 
 ## 2. Motivation / problem
 
@@ -286,7 +292,8 @@ assistant-skill/MCP triggers, aliases, and dotted connector names remain
 outside the supported agent-trigger set under the existing authoring rules.
 
 The intended built-in Debug UI contract is live chat, streaming, and
-continuation with the explicit Copilot native session ID. It displays a clear
+open-or-create with the explicit Copilot native session ID under the
+supplied-ID rules below. It displays a clear
 notice that earlier transcript messages are not restored. The Copilot history
 endpoint does not read or project native session files as MAF transcripts; MAF
 history behavior remains unchanged. A failed native resume is surfaced as an
@@ -296,8 +303,9 @@ claims also require real Functions-host qualification.
 The inbound built-in MCP endpoint uses the same bound runner and existing
 prompt validation and transport session-ID normalization. Calls without a
 transport ID create a native session; the extension-owned `sessionid`
-requests continuation, with errors surfaced without retry-as-create (including
-when no corresponding native session exists). It is not a public tool
+uses the same open-or-create rules as HTTP caller IDs. Absent persisted state
+creates a native session with that ID; existing state requests SDK continuation.
+Errors are surfaced without retry-as-create. It is not a public tool
 argument for selecting an agent session. Broader endpoint/session API
 improvements are outside this contract. The Functions MCP extension owns the transport and
 system-key authentication; HTTP endpoint auth settings do not alter that
@@ -312,6 +320,66 @@ Functions host.
   errors only.
 - Only the selected harness's persistence implementation is imported,
   initialized, and cleaned up.
+
+**Supplied session IDs**
+
+Every caller-supplied primary session ID uses open-or-create, including HTTP
+chat/SSE IDs, normalized inbound MCP transport IDs, direct runner API IDs, and
+HostedSkill `run()` / `stream()` IDs. This matches MAF, which constructs an
+`AgentSession` with the supplied ID for every entry point and lets the selected
+history provider load zero or more existing messages. The Copilot host selects
+create or resume from storage absence **before** attempting native session
+opening, not by retrying a failed resume. SDK `resume_session` remains strict
+continuation of an existing native session; no SDK upgrade is required.
+
+Keep the change inside the execute-stage boundary:
+`harness/copilot_sdk/_copilot_execution.py` chooses the native operation, and
+`_copilot_session_fs.py` exposes a small internal `has_persisted_state()`
+operation. Discovery, translation, registration, public APIs, configuration,
+and MAF behavior do not change.
+
+The presence check uses the request's already selected `StorageRoute` and
+`copilot-native/{agent_id}/{session_id}/` namespace. Run it after
+`open_session_fs()` and before native create/resume, inside the existing
+process-local same-session lock and request deadline. It uses
+`CopilotSessionFs.readdir_with_types()` to list the virtual root (`/`) and,
+only when needed, the host-created workspace directory (`/workspace`).
+`open_session_fs()` initializes the backend root and ensures that workspace
+directory exists; their existence alone does not prove native session state.
+The local backend exposes ordinary directory entries; the Blob backend
+projects its directory markers into typed entries and omits the listed
+directory's own marker.
+
+| Observed namespace after storage opens | Native operation |
+| --- | --- |
+| Empty root | Create with the requested session ID. |
+| Root contains only the correctly typed workspace directory, whose listing is empty | Create with the requested session ID; this is empty host scaffolding. |
+| Any other root entry, including an empty native directory or a zero-byte file | Resume with the requested session ID; the SDK validates existing state. |
+| Workspace directory contains any entry | Resume with the requested session ID; the SDK validates existing state. |
+| Storage initialization, listing, permissions, entry typing, or path validation fails | Propagate the error; do not open a new native session. |
+
+Only a successfully listed, correctly typed, empty workspace directory is
+ignored as scaffolding. A workspace file or malformed scaffolding is not safe
+absence: storage opening may already reject it; otherwise it counts as
+existing state or raises a type error, never authorizing create.
+Do not use `exists()` or an SDK-adapter boolean that can conflate a type,
+permission, or storage failure with absence. Even a missing-root/workspace
+listing error after initialization propagates rather than becoming absence.
+
+The check reads names and entry types only. It does not inspect transcript or
+file contents, sizes, native filenames, schemas, or completeness; perform no
+recursive host scan, metadata-registry lookup, or process-local seen-ID caching.
+Existing partial or corrupt state is passed to SDK resume, not deleted,
+repaired, reset, or replaced. Preserve the original native exception type,
+traceback, causality, diagnostics, and existing cleanup/error precedence.
+
+Generated new sessions and disposable leaf-session creation remain unchanged.
+The history endpoint still does not project native files. The existing
+process-local lock serializes repeated IDs within a process, but this check is
+not an atomic cross-worker create or distributed lock. Sequential continuation
+on another worker or after restart uses the same durable namespace when
+available; simultaneous cross-worker creation or updates retain the existing
+concurrency limitations and have no new recovery guarantee.
 
 **Lifecycle**
 
@@ -334,6 +402,11 @@ Current supported direction:
 - direct-role execution with runtime tool/MCP/skill descriptors and user-supplied tools;
 - SDK-owned session files behind SessionFs; and
 - no silent weakening of policy or validation.
+
+Under the approved supplied-ID amendment, both HTTP caller IDs and MCP transport
+IDs select create only on confirmed storage absence, otherwise SDK resume.
+This is not fallback after a resume error and does not add history replay,
+storage recovery, distributed coordination, or an SDK dependency change.
 
 Still outside this FRD's supported preview contract:
 
@@ -397,10 +470,9 @@ path. The shared run-log sensitive-data gate applies to both harnesses.
 
 ## 5. Decisions log
 
-This cleanup intentionally consolidates earlier iterative rows into the durable
-final contract approved for PR 245. Superseded explorations, review back-and-forth,
-and temporary proposals are omitted here; the FRD retains only the decisions that
-still govern the feature.
+The original cleanup consolidated earlier iterative rows into the approved
+durable contract. Historical decisions below are retained unchanged; later
+amendments explicitly identify the behavior they supersede.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -457,6 +529,25 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | --- | --- | --- | --- | --- | --- |
 | 30 | Hosted worker/storage contract amendment | keep local-only/single-worker FRD guard / mirror the existing MAF storage and process-local concurrency contract | Remove the local-only and single-worker FRD restriction. Keep MAF as the default harness, preserve the existing storage-selection and no-fallback-on-configured-error contract, keep the existing registered surfaces enabled, and describe same-session overlap across workers/instances as the same process-local coordination limit already present on the MAF path rather than as a Copilot-only carve-out. | Human (larohra) | 2026-10-14 |
 | 31 | Copilot native reasoning/output settings | ignore invalid reasoning overrides / pass through verified SDK-native settings | Freeze valid `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`) and `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` (`none`, `concise`, `detailed`) once in the Copilot app binding and pass them through to native create/resume calls. If either environment value is invalid, emit a warning and omit the override so the SDK/provider default applies. Map `agent_configuration.max_output_tokens` into the request-local Copilot `ProviderConfig.max_output_tokens` override without mutating the shared app-level provider configuration. MAF remains unchanged. | Human (larohra) | 2026-10-16 |
+
+### Approved original-exception handling
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 32 | Native failure detail preservation | generic public Copilot errors with suppressed native details / original-exception parity with MAF | Preserve unexpected native startup, create/resume, turn, and cleanup exceptions with their Python type, traceback, and causality through existing runtime error handling. Accept that standard HTTP/SSE/MCP errors use original exception text and logs/telemetry can contain sensitive text embedded in exceptions regardless of `ENABLE_SENSITIVE_DATA`. Keep explicit configuration diagnostics, timeout/cancellation behavior, cleanup precedence, and disabled native SDK logging unchanged; do not add request, credential, or payload dumps. | Human (larohra) | 2026-10-19 |
+
+### Approved supplied-session-ID amendment
+
+The approved behavior below supersedes the resume-only treatment of supplied
+HTTP/Debug UI IDs and inbound MCP transport IDs when no native state exists.
+Earlier no-replacement-on-resume-failure, SDK-owned contents, history,
+error-preservation, and process-local concurrency contracts remain.
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 33 | Supplied-ID session opening | strict resume-only / storage-absence open-or-create / retry failed resume as create | Use open-or-create for both HTTP caller IDs and MCP transport IDs, matching MAF. Create with the requested ID only when typed storage listings confirm no state beyond empty host scaffolding; otherwise resume and let the SDK validate. Never retry failed resume as create or reset partial/corrupt state. | Human (larohra) | 2026-10-19 |
+| 34 | Supplied-ID caller scope | HTTP and MCP only / every caller-supplied primary session ID | Apply the same open-or-create contract to direct runner APIs and HostedSkill `run()` / `stream()` as well as HTTP and MCP. This matches MAF's entry-point-independent `AgentSession(session_id=...)` plus history-provider loading. Preserve typed storage classification and propagate initialization, listing, native create/resume, and cleanup failures without fallback creation or reset. | Human (larohra) | 2026-10-21 |
+
 ## 6. Feature-level acceptance and test plan
 
 | Area | Required proof |
@@ -468,11 +559,24 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 | MCP/auth/helpers | Cover existing per-agent/per-server filters, blank-scope normalization, generated bearer precedence, native MCP/helper event accounting, and scoped helper permission denials. |
 | Persistence | Exercise SessionFs read/write/append/stat/list/mkdir/remove/rename behavior on local and Blob backends, selected-harness-only initialization, and shared `agent_id` path routing. |
 | Lifecycle/errors | Verify request cleanup ordering and that execution/cancellation failures remain authoritative over later disconnect, filesystem, transport, or credential cleanup errors. |
-| Debug UI/history | Verify live chat/streaming and native continuation, display the no-transcript-restore notice, preserve MAF transcript replay, and surface native resume failures without retry-as-create. |
+| Debug UI/history | Verify live chat/streaming, supplied-ID open-or-create and native continuation, display the no-transcript-restore notice, preserve MAF transcript replay, and surface native resume failures without retry-as-create. |
 | Non-HTTP entrypoints | Exercise each existing binding serializer and shared-handler contract offline; separately qualify each trigger on a real Functions host with actual binding delivery before marking it supported. Resource-blocked triggers remain unqualified, not unsupported. |
-| Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, and errors without replacement sessions. Real-host transport and system-key auth qualification remains separate. |
+| Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, supplied-ID open-or-create, and errors without retry-as-create or replacement sessions. Real-host transport and system-key auth qualification remains separate. |
 | Harness cleanup | Verify resource-free runner creation/qualification, per-binding and clone isolation, concurrent runner caching, selected-harness-only provider/warning/observability/history ownership, legacy compaction warning/default behavior, public shutdown, and failed-turn session IDs on HTTP, chat, and SSE. |
 | Copilot telemetry | Cover direct/SSE, delegates, workflow leaves, non-HTTP and UI ingress; usage deduplication/accounting, tool ownership and ordering, incomplete timing, cancellation/error cleanup, both privacy modes, and unchanged MAF behavior. |
+
+### Supplied-ID amendment behavioral acceptance
+
+- Fresh caller-supplied IDs from HTTP, inbound MCP, direct runner APIs, and
+  HostedSkill open a new session with the supplied identity when no durable
+  state exists.
+- Continued supplied IDs preserve their existing session state across those
+  entry points.
+- Existing, partial, or corrupt durable state is never reset, replaced, or
+  retried through a create fallback.
+- Storage initialization and state-classification failures remain explicit and
+  never authorize a new session or a fallback storage route.
+- MAF behavior remains unchanged.
 
 ## 7. Docs impact
 
@@ -493,7 +597,18 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
 
 ## 8. Status & sign-off
 
-- **Status:** Finalized
+- **Status:** Finalized. The supplied-session-ID behavioral contract received
+  human sign-off on 2026-10-19 and its all-caller scope received follow-up
+  human sign-off on 2026-10-21; the earlier feature contract remains governed
+  by the historical sign-offs below.
+- **Supplied-ID amendment review:** On 2026-10-19, larohra selected
+  open-or-create for both HTTP caller IDs and inbound MCP transport IDs and
+  approved that behavioral direction after independent architecture review
+  completed with **APPROVE-FOR-HUMAN-REVIEW** and no blocking issues.
+- **Supplied-ID scope follow-up:** On 2026-10-21, larohra confirmed that
+  open-or-create is also the intended direct runner and HostedSkill behavior
+  after verification that MAF applies the same supplied-ID history contract
+  independently of the calling surface.
 - **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
   approved the consolidated capability, skills, tool-authoring, and lifecycle
   simplifications through 2026-10-06.
@@ -512,13 +627,13 @@ capability authorization, privacy, and cleanup contracts remain unchanged.
   amendment on 2026-10-15 without creating a new FRD, then approved this
   SDK-verified native-settings amendment on 2026-10-16 without creating a new
   FRD.
-- **Scope note:** This FRD records the durable feature contract only. It does
-  not preserve superseded iteration history, review churn, or qualification
+- **Scope note:** This FRD records the durable feature contract and historical
+  decisions with explicit supersession, not review churn or qualification
   narratives that no longer change the product boundary.
 - **Harness-boundary cleanup sign-off:** Laveesh Rohra (`larohra`) approved the
   cleanup amendment on 2026-10-07. Independent architecture review returned
-  **READY** on 2026-10-07; implementation may proceed under this amended
-  contract.
+  **READY** on 2026-10-07; that approval authorized the cleanup contract only,
+  not the pending supplied-ID amendment.
 - **Runner simplification sign-off:** larohra approved the bound-runner
   simplification on 2026-10-14. The shared harness discriminator is
   `af.agent.harness`. Existing authorization, lazy acquisition, isolation,

@@ -37,7 +37,7 @@ from azure_functions_agents.registration.catalog import CatalogEntry, build_cata
 from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
 from tests._harness_helpers import copilot_state, make_copilot_harness
-from tests.test_copilot_execution import _fake_client, _request
+from tests.test_copilot_execution import _fake_client, _request, _seed_session_state
 from tests.test_copilot_execution import preview as preview
 
 
@@ -155,8 +155,9 @@ async def test_leaf_delete_failure_preserves_body_outcome(preview, native, failu
             with pytest.raises(TimeoutError, match="specialist timed out"):
                 await task
         elif delete_fails:
-            with pytest.raises(CopilotPreviewError, match="ephemeral specialist"):
+            with pytest.raises(RuntimeError, match="private deletion detail") as caught:
                 await task
+            assert caught.value is native.delete_session.side_effect
         else:
             assert await task == "synthetic reply"
         native.delete_session.assert_awaited_once()
@@ -885,6 +886,7 @@ async def test_stream_invalid_session_id_emits_sse_error_without_native_executio
 async def test_sse_supplied_session_id_is_emitted_once_even_when_resume_fails(
     preview, native, fail_resume,
 ):
+    await _seed_session_state(preview, session_id="caller-id")
     if fail_resume:
         native.resume_session.side_effect = RuntimeError("private resume failure")
     try:
@@ -900,6 +902,25 @@ async def test_sse_supplied_session_id_is_emitted_once_even_when_resume_fails(
         assert events[-1]["type"] == ("error" if fail_resume else "done")
         native.create_session.assert_not_awaited()
         native.resume_session.assert_awaited_once()
+    finally:
+        await _harness_lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_sse_fresh_supplied_session_id_creates_requested_native_session(preview, native):
+    try:
+        events = [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in runner.run_agent_stream(
+                "hello", _harness=preview, tools=[], mcp_tools=[], session_id="caller-id",
+            )
+        ]
+        assert [event for event in events if event["type"] == "session"] == [
+            {"type": "session", "session_id": "caller-id"},
+        ]
+        assert events[-1]["type"] == "done"
+        assert native.create_session.call_args.kwargs["session_id"] == "main-caller-id"
+        native.resume_session.assert_not_awaited()
     finally:
         await _harness_lifecycle._shutdown_harnesses()
 

@@ -117,7 +117,6 @@ def _reasoning_summary_from_environment() -> ReasoningSummary | None:
 def select_copilot_harness(root: Path) -> AppHarness:
     """Freeze provider and storage settings without acquiring runtime resources."""
     from ._copilot_providers import _PROVIDERS
-    from ._copilot_runner import CopilotRunner
     from ._copilot_session_identity import resolve_route
 
     check_sdk_dependency()
@@ -139,6 +138,7 @@ def select_copilot_harness(root: Path) -> AppHarness:
     reasoning_effort = _reasoning_effort_from_environment()
     reasoning_summary = _reasoning_summary_from_environment()
     route = resolve_route(root)
+    from ._copilot_runner import CopilotRunner
 
     return AppHarness(
         HarnessKind.COPILOT,

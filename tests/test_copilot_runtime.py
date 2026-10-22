@@ -125,6 +125,133 @@ def _sample():
     return resolved, capabilities
 
 
+def _state_persisting_client():
+    client = _fake_client()
+    session = client.create_session.return_value
+
+    async def create_session(**options):
+        storage = options["create_session_fs_handler"](session)
+        await storage.write_file("/session-state/native", "")
+        return session
+
+    client.create_session.side_effect = create_session
+    return client
+
+
+def test_supplied_http_session_creates_then_resumes_after_runtime_restart(
+    preview, monkeypatch
+):
+    import copilot
+
+    app_root = preview / "http-app"
+    shutil.copytree(SAMPLE, app_root)
+    first_client = _state_persisting_client()
+    second_client = _fake_client()
+    monkeypatch.setattr(
+        copilot, "CopilotClient", Mock(side_effect=[first_client, second_client])
+    )
+
+    async def call():
+        try:
+            first_app = create_function_app(app_root)
+            first_handler = next(
+                function.get_user_function()
+                for function in first_app.get_functions()
+                if function.get_function_name() == "agent_main_builtin_chat"
+            )
+            first = await first_handler(
+                SimpleNamespace(
+                    headers={"x-ms-session-id": "caller-http"},
+                    json=AsyncMock(return_value={"prompt": "first"}),
+                )
+            )
+            assert first.headers["x-ms-session-id"] == "caller-http"
+
+            await lifecycle._shutdown_harnesses()
+            _harness._HARNESSES.clear()
+
+            second_app = create_function_app(app_root)
+            second_handler = next(
+                function.get_user_function()
+                for function in second_app.get_functions()
+                if function.get_function_name() == "agent_main_builtin_chat"
+            )
+            second = await second_handler(
+                SimpleNamespace(
+                    headers={"x-ms-session-id": "caller-http"},
+                    json=AsyncMock(return_value={"prompt": "second"}),
+                )
+            )
+            assert second.headers["x-ms-session-id"] == "caller-http"
+        finally:
+            await lifecycle._shutdown_harnesses()
+
+    asyncio.run(call())
+    first_client.create_session.assert_awaited_once()
+    assert first_client.create_session.call_args.kwargs["session_id"] == "main-caller-http"
+    first_client.resume_session.assert_not_awaited()
+    second_client.create_session.assert_not_awaited()
+    second_client.resume_session.assert_awaited_once()
+    assert second_client.resume_session.call_args.args[0] == "main-caller-http"
+
+
+def test_normalized_mcp_session_creates_then_resumes_after_runtime_restart(
+    preview, monkeypatch
+):
+    import copilot
+
+    app_root = preview / "mcp-restart-app"
+    app_root.mkdir()
+    (app_root / "main.agent.md").write_text(
+        (SAMPLE / "main.agent.md").read_text(encoding="utf-8").replace(
+            "  mcp: false", "  mcp: true"
+        ),
+        encoding="utf-8",
+    )
+    first_client = _state_persisting_client()
+    second_client = _fake_client()
+    monkeypatch.setattr(
+        copilot, "CopilotClient", Mock(side_effect=[first_client, second_client])
+    )
+    context = json.dumps(
+        {"arguments": {"prompt": "continue"}, "sessionid": "transport/session"}
+    )
+
+    async def call():
+        try:
+            first_app = create_function_app(app_root)
+            first_handler = next(
+                function.get_user_function()
+                for function in first_app.get_functions()
+                if function.get_function_name() == "agent_main_builtin_mcp"
+            )
+            first = json.loads(await first_handler(context))
+            assert first["session_id"].startswith("mcp-")
+
+            await lifecycle._shutdown_harnesses()
+            _harness._HARNESSES.clear()
+
+            second_app = create_function_app(app_root)
+            second_handler = next(
+                function.get_user_function()
+                for function in second_app.get_functions()
+                if function.get_function_name() == "agent_main_builtin_mcp"
+            )
+            second = json.loads(await second_handler(context))
+            assert second["session_id"] == first["session_id"]
+            return first["session_id"]
+        finally:
+            await lifecycle._shutdown_harnesses()
+
+    session_id = asyncio.run(call())
+    first_client.create_session.assert_awaited_once()
+    assert first_client.create_session.call_args.kwargs["session_id"] == f"main-{session_id}"
+    first_client.resume_session.assert_not_awaited()
+    second_client.create_session.assert_not_awaited()
+    second_client.resume_session.assert_awaited_once()
+    assert second_client.resume_session.call_args.args[0] == f"main-{session_id}"
+
+
 def test_app_context_freezes_storage_without_initializing_either_provider(preview, monkeypatch):
     from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import StorageMode
 

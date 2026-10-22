@@ -318,6 +318,15 @@ az storage blob show --account-name "<account>" --container-name "<container>" `
 Native files may contain conversation content or tool output. Do not publish
 their contents in diagnostics or hand-edit them; the SDK owns their format.
 
+Every caller-supplied primary session ID uses open-or-create, including HTTP,
+inbound MCP, direct runner API, and HostedSkill calls. This is the same
+surface-neutral continuity behavior as MAF. After the Copilot session namespace
+opens, an empty root or only an empty, correctly typed `/workspace` directory
+is treated as host scaffolding and creates the requested native session. Any
+other entry, including a zero-byte file, empty native directory, or nonempty
+workspace, selects SDK resume. The host reads entry names and types only; it
+does not parse native filenames or contents.
+
 ## Error behavior
 
 Missing files, existing destinations, wrong entry types, nonempty directory
@@ -331,7 +340,9 @@ Configured Blob auth, network and configuration failures are errors, not
 reasons to change backend or switch to MAF. Session and provider failures
 surface through the runtime's existing error responses, without prompts,
 tool payloads, file contents or credentials in diagnostics. Resume and format
-compatibility decisions belong to the SDK, not a host lifecycle/error table.
+compatibility decisions belong to the SDK. State-classification failures never
+authorize create, and a failed resume never triggers create, deletion, reset,
+or repair.
 
 ## Retention and targeted cleanup
 
@@ -383,8 +394,9 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   the agent's session ID, and normalizes the extension-owned transport
   `sessionid` (also accepting the existing `sessionId` spelling) for native
   continuation. This is not a public tool argument for choosing an agent
-  session. A transport ID requests native resume; if no matching native
-  session exists, the error is returned without retry-as-create. Omitted
+  session. A transport ID creates with that ID only when typed storage listings
+  confirm no state beyond empty host scaffolding; otherwise it requests strict
+  native resume. A failed resume is returned without retry-as-create. Omitted
   transport IDs create fresh sessions.
   The Functions MCP extension owns `/runtime/webhooks/mcp` and its system-key
   authentication (`x-functions-key`); `builtin_endpoints.http_auth` controls

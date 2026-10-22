@@ -19,10 +19,18 @@ jobs:
 
     strategy:
       matrix:
-        Python313:
+        Python313Maf:
           PYTHON_VERSION: '3.13'
-        Python314:
+          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'false'
+        Python313Copilot:
+          PYTHON_VERSION: '3.13'
+          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'true'
+        Python314Maf:
           PYTHON_VERSION: '3.14'
+          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'false'
+        Python314Copilot:
+          PYTHON_VERSION: '3.14'
+          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'true'
 
     steps:
       - task: PipAuthenticate@1
@@ -39,7 +47,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
           python eng/scripts/install_e2e_dependencies.py
-        displayName: 'Install dependencies for $(PYTHON_VERSION)'
+        displayName: 'Install dependencies for $(PYTHON_VERSION) / Copilot=$(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)'
+        env:
+          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: $(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)
 
       - template: /eng/templates/install-core-tools.yml@self
 
@@ -68,7 +78,7 @@ jobs:
       # account so it can create/run agents (agents/write). See the RBAC command
       # in the PR / repo notes.
       - task: AzureCLI@2
-        displayName: 'Run E2E tests'
+        displayName: 'Run E2E tests on $(PYTHON_VERSION) / Copilot=$(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)'
         inputs:
           azureSubscription: 'saf-foundry-connection'
           scriptType: bash
@@ -79,5 +89,6 @@ jobs:
           AzureWebJobsStorage: 'UseDevelopmentStorage=true'
           FUNCTIONS_WORKER_RUNTIME: 'python'
           AZURE_TOKEN_CREDENTIALS: 'dev'
+          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: $(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)

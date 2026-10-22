@@ -322,6 +322,13 @@ Sensitive-data capture is controlled by the single `ENABLE_SENSITIVE_DATA` envir
   `ENABLE_SENSITIVE_DATA` is off. This does **not** widen prompt/request/response/tool-argument
   capture, but arbitrary exception text can still contain sensitive data if application code
   includes it.
+  Unexpected Copilot SDK startup, session-create/resume, and turn failures retain
+  their original Python exception, traceback, and cause, matching MAF. Runtime
+  exception logs include the operation name, without separately dumping requests
+  or SDK payloads. Standard HTTP/SSE/MCP error handling also uses the original
+  exception text, so SDK exceptions containing sensitive data can expose it in
+  responses as well as logs and telemetry. `ENABLE_SENSITIVE_DATA` does not
+  suppress exception diagnostics. Native SDK logging/export remains disabled.
 
 Best-effort diagnostics and telemetry cleanup are intentionally non-throwing:
 they must not change request results, cancellations, or SSE termination.
