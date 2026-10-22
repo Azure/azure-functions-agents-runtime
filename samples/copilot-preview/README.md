@@ -4,8 +4,9 @@ This **default-off** Functions sample exercises Copilot HTTP chat and
 the authored `/preview` HTTP route with `make_receipt` and `web_request`
 (limited to `example.com`). The SDK owns sessions and their opaque files;
 the host supplies filesystem callbacks backed by local files or Blob.
-Run locally with one worker only. ACA `fhs_execute_python` is disabled in the
-checked-in configuration.
+This checked-in walkthrough stays local for a reproducible demo; that does not
+by itself define the broader preview contract. ACA `fhs_execute_python` is
+disabled in the checked-in configuration.
 
 Requires Python 3.13/3.14, Azure Functions Core Tools 4, and `uv`. Model calls
 incur charges. You need one approved target: an OpenAI API key/model, an Azure OpenAI resource
@@ -31,7 +32,6 @@ Pop-Location
 $env:VIRTUAL_ENV = "$PWD\.venv"
 $env:PATH = "$env:VIRTUAL_ENV\Scripts;$env:PATH"
 $env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT = "true"
-$env:FUNCTIONS_WORKER_PROCESS_COUNT = "1"
 $run = [Guid]::NewGuid().ToString("N")
 $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR = "$PWD\.preview-state\$run"
 if (Test-Path samples\copilot-preview\src\local.settings.json) {
@@ -159,13 +159,14 @@ and per-agent filters; see the [MCP and scoped skills guide](../../docs/copilot-
 before enabling them. This walkthrough requires neither and keeps the receipt
 and `web_request` behavior unchanged.
 
-The local adapter also supports SSE chat, declared chat delegates, Workflow
+The adapter also supports SSE chat, declared chat delegates, Workflow
 Sub Agents, and Dynamic Workflow management when authored in an agent app.
 This sample remains a single-agent tool demonstration and does not configure
-those optional capabilities. Deployed hosting remains unsupported in this
-preview. The built-in debug chat UI and non-HTTP triggers are enabled but not
-live-qualified; the UI does not restore earlier transcript messages when you
-resume a session. Provider selection still comes from the shared
+those optional capabilities. This walkthrough does not live-qualify deployed
+startup, auth, storage, restart, or overlap behavior. The built-in debug chat
+UI and non-HTTP triggers are enabled but not live-qualified; the UI does not
+restore earlier transcript messages when you resume a session. Provider
+selection still comes from the shared
 `harness/_provider_config.py` rules, while SDK client construction stays inside
 the selected harness adapter. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)

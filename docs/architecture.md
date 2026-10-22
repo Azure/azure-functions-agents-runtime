@@ -43,7 +43,7 @@ flowchart LR
     MR -.->|"neutral HarnessRequest"| L
     L -.->|"MAF-owned history"| T["harness/agent_framework/<br/>_maf_blob_history.py / _maf_file_history.py<br/>JSONL transcripts"]
     R -.->|"CopilotRunner"| CR["harness/copilot_sdk/_copilot_runner.py"]
-    CR -.->|"neutral HarnessRequest: explicit local preview"| P["harness/copilot_sdk/<br/>_copilot_execution.py + _copilot_runtime.py<br/>Copilot SDK + native stdio"]
+    CR -.->|"neutral HarnessRequest: explicit preview"| P["harness/copilot_sdk/<br/>_copilot_execution.py + _copilot_runtime.py<br/>Copilot SDK + native stdio"]
     P -.->|"SDK SessionFs callbacks"| S["harness/copilot_sdk/_copilot_session_fs.py<br/>opaque SDK files<br/>local files or one Blob per file"]
 ```
 
@@ -117,7 +117,6 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/harness/_harness_execution.py` | One shared backend-neutral usage recorder plus the bounded process-local `(agent_slug, session_id)` lock implementation, consumed through module-qualified access by both harnesses. | `_AgentUsageRecorder`, `_session_lock_bounded_by()` |
 | `azure_functions_agents/harness/_harness_binding.py` | Frozen SDK-free app identity, selected runner construction callable, neutral request, and selection vocabulary. Per-app selection is independent of the first-use standalone cache per root. A fresh guard/runner cache cell is allocated for every binding, including `dataclasses.replace` clones. Concrete provider/storage/runtime state and policy live only on selected runners. | `AppHarness`, `HarnessRequest`, `get_harness()`, `bind_harness()`, `validate_agent()` |
 | `azure_functions_agents/harness/_harness_lifecycle.py` | Acquired-owner shutdown callbacks only; visits every registered owner even if cleanup fails, without backend discovery/imports. | `_register_shutdown()`, `_unregister_shutdown()`, `_shutdown_harnesses()` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_preview.py` | Copilot dependency/provider/hosting qualification, effective-capability validation, and neutral custom-tool qualification. Rejects unsupported preview contracts before effects, without fallback. | `select_copilot_harness()`, `validate_copilot_agent()`, `prepare_tools()`, `CopilotPreviewError` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_providers.py` | Copilot provider interface, registry, sanitized settings and frozen OpenAI / Azure OpenAI / Foundry mappings. SDK provider config is built lazily. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_runner.py` | Resource-free Copilot runner owning provider, storage, default model, history/observability policy, and the lazy native-owner reference. Qualifies preview configuration and composes direct, typed-event/SSE, delegate, and workflow-leaf operations using the shared request factory while preserving caller execution-surface telemetry. | `CopilotRunner` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_execution.py` | Invocation-owned session and SessionFs create/resume, neutral custom/MCP/skill capabilities, conditional custom-only catalog validation, send-scoped synchronous `session.on`, result/usage translation, SSE event forwarding, isolated leaf-session cleanup, and bounded immediate teardown that preserves original failures/cancellation. Owns one semantic invocation from resolved request identity, before native session acquisition, through adapter cleanup. | `run()` |
@@ -257,7 +256,7 @@ The `_compose_function_app()` docstring in `src/azure_functions_agents/app.py:_c
 
 ### Where the registration stage hands off to execution
 
-Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit local Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Event calls carry approved skills, the full ownership catalog, display and execution-surface telemetry, and omitted-versus-explicit session state. `run_agent_events()` converts the shared SSE vocabulary to typed events for hosted skills. Explicit close or cancellation propagates through each adapter via `aclosing`; callers that break public async iteration early must close it for deterministic release. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
+Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Event calls carry approved skills, the full ownership catalog, display and execution-surface telemetry, and omitted-versus-explicit session state. `run_agent_events()` converts the shared SSE vocabulary to typed events for hosted skills. Explicit close or cancellation propagates through each adapter via `aclosing`; callers that break public async iteration early must close it for deterministic release. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
 
 `config/merge.py` recursively combines global and per-agent portable
 `agent_configuration` fields, using authored `null` values to clear inherited
@@ -312,6 +311,14 @@ the selected runner constructs SDK objects at execution. MAF and
 Copilot therefore share authoring and policy inputs but not SDK-specific
 construction, auth timing, or result translation.
 
+When the selected harness supports them, non-empty
+`AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` and
+`AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` values are accepted as app-level
+reasoning overrides and handed to the selected harness's native reasoning
+surface using that harness's own validation and defaulting behavior.
+`HarnessRequest.max_output_tokens` is a per-request output cap passed
+downstream without mutating shared app-level provider settings.
+
 Tool authoring is user-owned:
 
 - runtime `@tool(...)` declarations stay supported;
@@ -331,20 +338,9 @@ without an adapter object, and the app binding caches the cheap runner under a
 guard. Binding clones reuse immutable construction inputs but receive fresh
 runner/resource cells. Pre-registration qualification therefore requires no SDK
 import or native/provider acquisition and no additional strategy layer.
-
 `runner.run_agent_stream()` is the only layer that serializes neutral event
 payloads as SSE, and `runner.run_agent_events()` adapts that vocabulary to
 `AgentStreamEvent` values for hosted-skill callers.
-
-Tool authoring remains the runtime surface:
-
-- runtime `@tool(...)` declarations stay supported;
-- a `tools/*.py` module may still contribute its first public local function;
-- raw SDK tools and SDK-specific decorators are ignored with a warning;
-- runtime `@tool` accepts only `name`, `description`, `schema`, and
-  `approval_mode`; extra keyword arguments are logged once and ignored; and
-- the runtime does not accommodate harness-specific callable signatures such as
-  `FunctionInvocationContext`.
 
 MCP and skills keep their current authored inputs. `mcp.json` remains remote
 HTTP/streamable-HTTP plus existing per-agent filters. Skill discovery remains
@@ -367,6 +363,20 @@ where `agent_id` comes directly from the shared `_agent_identity.agent_id(slug)`
 helper. Only the selected harness's persistence implementation is imported,
 initialized, and cleaned up.
 
+For every caller-supplied primary session ID, including HTTP, inbound MCP,
+direct runner API, and HostedSkill calls, Copilot classifies that namespace
+after storage opens and before native session open, inside the existing
+process-local same-session lock and deadline. This matches MAF's surface-neutral
+construction of `AgentSession(session_id=...)`, whose history provider loads an
+empty or existing transcript under the same identity. An empty Copilot root, or
+a root containing only a correctly typed empty `/workspace` directory, selects
+native create with the requested ID. Any other entry selects strict SDK resume.
+The check uses typed root and workspace listings only; it does not parse native
+filenames or contents. Listing, type, path, permission, and storage failures
+propagate, and a failed resume is never retried as create. Generated sessions and
+disposable leaf sessions keep their existing creation paths. This classification
+adds no cross-worker serialization guarantee.
+
 The same request-owned `SkillPolicy` used by the permission handler also lets
 SessionFs read, stat, and check existence of approved physical skill files outside
 the virtual workspace. This is a read-only file projection, not a directory mount:
@@ -382,11 +392,22 @@ cleanup errors. Shared code normalizes only the public `AgentResult` and
 tool-call accounting contracts; MAF usage decoding remains local to MAF, and
 Copilot result/event conversion remains local to Copilot.
 
-The current preview stays intentionally narrow. It is local-only, requires a
-single Functions worker, and fails unsupported behavior explicitly rather than
-degrading quietly.
+Unexpected native startup, create/resume, and turn failures propagate as the
+original Python exception, retaining traceback and causality like MAF. The
+Copilot execution boundary logs the exception with the operation name; shared
+ingress/leaf boundaries record it through the existing exception telemetry.
+HTTP/SSE/MCP errors therefore use the original error text, not a generic
+Copilot replacement. Secondary cleanup failures are logged separately without
+replacing the active execution error or cancellation. Explicit configuration
+diagnostics and request/startup timeout behavior remain unchanged; native SDK
+logging and telemetry remain disabled.
 
-The supported local execution subset includes primary HTTP chat and SSE,
+The preview keeps the shared authoring, registration, and policy surfaces while
+leaving SDK-specific execution, persistence, and native-session behavior inside
+the selected Copilot harness. Unsupported capabilities still fail explicitly
+when the runtime cannot preserve their semantics.
+
+The supported execution subset includes primary HTTP chat and SSE,
 chat-time delegates, Workflow Sub Agent Activities, Dynamic Workflow
 management, configured MCP servers, and approved project skills. Primary
 SDK-owned sessions are backed by local files or Blob storage. The direct tool
@@ -455,6 +476,18 @@ not live-qualified. Offline adapter tests, Core Tools/local-host evidence,
 and deployed-host evidence are distinct; only offline tests were collected
 for these entrypoint changes. Missing extensions causing host indexing
 failures are setup/integration failures, not runtime capability rejection.
+Same-session turn serialization remains process-local on both harnesses.
+Sequential requests can resume on another worker or instance only when both
+see the same persisted namespace; Blob provides that namespace when
+configured, while local fallback does not create cross-instance continuity on
+its own. Overlapping same-session requests on different workers can observe
+stale prior state and commit in nondeterministic order. On the MAF path that
+means append-blob transcript entries can arrive in either order; on the
+Copilot path opaque multi-file SessionFs updates can lose updates or leave a
+mixed-file combination because writes include overwrite, read-modify-write,
+and copy/delete patterns. The runtime does not promise corruption-free overlap
+or host-managed recovery; the native SDK or provider owns its own format,
+compaction, and recovery behavior.
 The SDK owns compaction and its artifacts; the host adds no
 summarizer or recovery controller. Operational setup, supported script forms,
 inspection, and cleanup details live in

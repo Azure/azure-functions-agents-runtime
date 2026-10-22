@@ -10,7 +10,7 @@ from typing import Protocol
 
 from azure.core.exceptions import AzureError, HttpResponseError
 from azure.storage.blob import StorageErrorCode
-from copilot.generated.rpc import SessionFSReaddirWithTypesEntry
+from copilot.generated.rpc import DebugCollectLogsEntryKind, SessionFSReaddirWithTypesEntry
 from copilot.session import SessionFsConventions
 from copilot.session_fs_provider import SessionFsFileInfo, SessionFsProvider
 
@@ -174,6 +174,21 @@ class CopilotSessionFs(SessionFsProvider):
     async def readdir_with_types(self, path: str) -> Sequence[SessionFSReaddirWithTypesEntry]:
         relative = self._path(path)
         return await self._call(lambda: self.backend.readdir_with_types(relative))
+
+    async def has_persisted_state(self) -> bool:
+        """Return whether the namespace contains more than empty host scaffolding."""
+        root_entries = await self.readdir_with_types("/")
+        if not root_entries:
+            return False
+        if len(root_entries) != 1:
+            return True
+        workspace = root_entries[0]
+        if (
+            workspace.name != WORKSPACE_ROOT.lstrip("/")
+            or workspace.type != DebugCollectLogsEntryKind.DIRECTORY
+        ):
+            return True
+        return bool(await self.readdir_with_types(WORKSPACE_ROOT))
 
     async def rm(self, path: str, recursive: bool, force: bool) -> None:
         relative = self._path(path)

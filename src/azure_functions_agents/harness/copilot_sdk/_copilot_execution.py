@@ -1,4 +1,4 @@
-"""Per-request Copilot invocation, custom tools, results and safe errors."""
+"""Per-request Copilot invocation, custom tools, results and failure diagnostics."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from ..._agent_run_diagnostics import _set_run_summary_attributes
@@ -21,7 +22,7 @@ from ..._observability import (
 from ..._skill_policy import SkillPolicy
 from ..._tool_descriptor import ToolDescriptor
 from .. import _harness_execution
-from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
+from .._harness_binding import AppHarness, HarnessRequest
 from .._provider_config import InferenceTarget
 from .._stream_events import ContentEvent, SessionEvent, StreamEvent
 from ._copilot_capabilities import (
@@ -30,8 +31,12 @@ from ._copilot_capabilities import (
     permission_handler,
 )
 from ._copilot_observability import CopilotEventTelemetry, invocation_span
-from ._copilot_preview import CopilotPreviewError
-from ._copilot_runtime import CopilotRuntime, get_runtime
+from ._copilot_runtime import (
+    _CLEANUP_TIMEOUT_SECONDS,
+    CopilotPreviewError,
+    CopilotRuntime,
+    get_runtime,
+)
 from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
 from ._copilot_session_local import LocalSessionFileBackend
@@ -48,6 +53,8 @@ if TYPE_CHECKING:
         PermissionRequestResult,
         ProviderConfig,
         ProviderTokenArgs,
+        ReasoningEffort,
+        ReasoningSummary,
         SystemMessageConfig,
         ToolSearchConfig,
     )
@@ -85,6 +92,19 @@ type _EventSink = Callable[[StreamEvent], None]
 
 _SAFE_CUSTOM_TOOL_FAILURE_MESSAGE = "Custom tool failed or returned unsupported content."
 _SAFE_CUSTOM_TOOL_FAILURE = f'{{"error":"{_SAFE_CUSTOM_TOOL_FAILURE_MESSAGE}"}}'
+
+
+class _ExecutionOperation(StrEnum):
+    PROVIDER_SETUP = "provider_setup"
+    SESSION_STORAGE = "session_storage"
+    STARTUP = "startup"
+    SESSION_STATE = "session_state"
+    CREATE_SESSION = "create_session"
+    RESUME_SESSION = "resume_session"
+    TOOL_CATALOG = "tool_catalog"
+    SEND = "send"
+    DISCONNECT = "disconnect"
+    SESSION_CLEANUP = "session_cleanup"
 
 
 def _emit_event(event_sink: _EventSink | None, event: StreamEvent | None) -> None:
@@ -226,10 +246,20 @@ def _tool(
     )
 
 
-def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
+def _provider(
+    harness: AppHarness,
+    tokens: ProviderTokenSource,
+    model: str,
+    *,
+    max_output_tokens: int | None = None,
+) -> ProviderConfig:
     provider = get_runtime(harness)._runner.provider
     try:
-        return provider.sdk_config(model, tokens)
+        config = provider.sdk_config(
+            model,
+            tokens,
+            max_output_tokens=max_output_tokens,
+        )
     except CopilotPreviewError:
         raise
     except Exception:
@@ -240,17 +270,18 @@ def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> P
             provider.auth_label,
         )
         raise CopilotPreviewError(provider.setup_diagnostic()) from None
+    return config
 
 
 async def _abort(session: CopilotSession) -> None:
     try:
-        await asyncio.wait_for(session.abort(), timeout=5)
+        await asyncio.wait_for(session.abort(), timeout=_CLEANUP_TIMEOUT_SECONDS)
     except BaseException:
-        logger.error("Copilot session abort failed.")
+        logger.exception("Copilot session abort failed.")
 
 
 async def _close_storage(storage: CopilotSessionFs) -> None:
-    await asyncio.wait_for(storage.close(), timeout=5)
+    await asyncio.wait_for(storage.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
 
 
 async def _delete_leaf(
@@ -273,16 +304,15 @@ async def _bounded_cleanup(
         yield
     except BaseException:
         try:
-            await asyncio.wait_for(operation(), timeout=5)
+            await asyncio.wait_for(operation(), timeout=_CLEANUP_TIMEOUT_SECONDS)
         except BaseException:
-            logger.error("%s", diagnostic)
+            logger.exception("%s", diagnostic)
         raise
     else:
         try:
-            await asyncio.wait_for(operation(), timeout=5)
-        except Exception:
-            logger.error("%s", diagnostic)
-            raise CopilotPreviewError(diagnostic) from None
+            await asyncio.wait_for(operation(), timeout=_CLEANUP_TIMEOUT_SECONDS)
+        except TimeoutError as error:
+            raise CopilotPreviewError(diagnostic) from error
 
 
 @contextmanager
@@ -296,7 +326,7 @@ def _event_subscription(
         try:
             unsubscribe()
         except BaseException:
-            logger.error("Copilot session observer cleanup failed.")
+            logger.exception("Copilot session observer cleanup failed.")
         raise
     else:
         unsubscribe()
@@ -308,18 +338,26 @@ async def _open_session(
     *,
     new_session: bool,
     options: _SessionOptions,
+    reasoning_effort: ReasoningEffort | None,
+    reasoning_summary: ReasoningSummary | None,
     on_permission_request: Callable[
         [PermissionRequest, PermissionInvocation], PermissionRequestResult
     ],
 ) -> CopilotSession:
     if new_session:
         return await client.create_session(
-            session_id=session_id, on_permission_request=on_permission_request, **options
+            session_id=session_id,
+            on_permission_request=on_permission_request,
+            reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
+            **options,
         )
     return await client.resume_session(
         session_id,
         on_permission_request=on_permission_request,
         continue_pending_work=False,
+        reasoning_effort=reasoning_effort,
+        reasoning_summary=reasoning_summary,
         **options,
     )
 
@@ -331,11 +369,6 @@ async def _acquire_client(owner: CopilotRuntime, deadline: float) -> CopilotClie
         if asyncio.get_running_loop().time() >= deadline:
             raise
         raise CopilotPreviewError("Copilot native runtime startup timed out.") from None
-    except CopilotPreviewError:
-        raise
-    except Exception:
-        logger.error("Copilot native startup failed; native details were not logged.")
-        raise CopilotPreviewError("Copilot native runtime startup failed.") from None
 
 
 async def _verify_tool_catalog(
@@ -447,11 +480,6 @@ async def run(
     *,
     delegate_tracker: _DelegateErrorTracker | None = None,
 ) -> AgentResult:
-    if request.max_output_tokens is not None:
-        raise UnsupportedCapabilityError(
-            "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
-            "Remove the cap or use the MAF harness."
-        )
     with invocation_span(request) as run_span:
         result = await _run(harness, request, run_span)
         result.delegate_error_count = delegate_tracker.count if delegate_tracker else 0
@@ -542,8 +570,14 @@ async def _run(
 
     sdk_tools = [_tool(function, calls, request.event_sink) for function in request.tools]
     token_source = _RequestTokenSource(owner)
+    operation = _ExecutionOperation.PROVIDER_SETUP
     try:
-        provider = _provider(harness, token_source, request.model)
+        provider = _provider(
+            harness,
+            token_source,
+            request.model,
+            max_output_tokens=request.max_output_tokens,
+        )
         async with lifecycle.session_lock(request), asyncio.timeout_at(request.deadline):
             route = lifecycle.session_storage
             if route is None:
@@ -553,6 +587,7 @@ async def _run(
                 discovered=request.skill_catalog,
                 working_directory=owner.workspace,
             )
+            operation = _ExecutionOperation.SESSION_STORAGE
             storage = await open_session_fs(
                 route,
                 request.agent_slug,
@@ -571,6 +606,7 @@ async def _run(
                     request.mcp_servers, protect_headers=calls.protect_headers
                 )
                 on_permission_request = permission_handler(skill_policy)
+                operation = _ExecutionOperation.STARTUP
                 client = await _acquire_client(owner, request.deadline)
                 options = _SessionOptions(
                     model=request.model,
@@ -594,17 +630,29 @@ async def _run(
                     create_session_fs_handler=lambda _session: storage,
                 )
                 lifecycle.apply_session_options(options)
+                new_session = request.new_session
+                if not new_session and not lifecycle.leaf:
+                    operation = _ExecutionOperation.SESSION_STATE
+                    new_session = not await storage.has_persisted_state()
+                operation = (
+                    _ExecutionOperation.CREATE_SESSION
+                    if new_session
+                    else _ExecutionOperation.RESUME_SESSION
+                )
                 session = await _open_session(
                     client,
                     lifecycle.copilot_id,
-                    new_session=request.new_session,
+                    new_session=new_session,
                     options=options,
                     on_permission_request=on_permission_request,
+                    reasoning_effort=owner._runner.reasoning_effort,
+                    reasoning_summary=owner._runner.reasoning_summary,
                 )
                 request.session_state.resumable = True
                 async with _bounded_cleanup(
                     session.disconnect, "Copilot native session could not be disconnected."
                 ):
+                    operation = _ExecutionOperation.TOOL_CATALOG
                     if not request.mcp_servers and not request.skills:
                         await _verify_tool_catalog(session, sdk_tools)
                     _emit_event(
@@ -616,6 +664,7 @@ async def _run(
                         owner._runner.provider.kind,
                         request.model,
                     )
+                    operation = _ExecutionOperation.SEND
                     content = await _run_session_turn(
                         session,
                         prompt=request.prompt,
@@ -625,6 +674,8 @@ async def _run(
                         get_usage=lambda: (input_tokens, output_tokens),
                         token_source=token_source,
                     )
+                    operation = _ExecutionOperation.DISCONNECT
+                operation = _ExecutionOperation.SESSION_CLEANUP
                 return AgentResult(
                     session_id=request.session_id,
                     content=content,
@@ -645,10 +696,7 @@ async def _run(
         token_error = token_source.take_error()
         if token_error is not None:
             raise token_error from None
-        logger.error("Copilot preview execution failed; native details were not logged.")
-        raise CopilotPreviewError(
-            "Copilot preview failed. Check the SDK runtime, provider authentication, and "
-            "session storage. No fallback was attempted."
-        ) from None
+        logger.exception("Copilot execution failed: operation=%s", operation.value)
+        raise
     finally:
         calls.finish_telemetry()

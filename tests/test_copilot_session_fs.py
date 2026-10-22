@@ -23,6 +23,7 @@ from azure.core.exceptions import (
 )
 from azure.core.pipeline.transport import AsyncHttpResponse, HttpRequest
 from azure.storage.blob import BlobProperties, StorageErrorCode
+from copilot.generated.rpc import DebugCollectLogsEntryKind, SessionFSReaddirWithTypesEntry
 
 from azure_functions_agents._skill_policy import SkillPolicy
 from azure_functions_agents.discovery.skills import SkillDescriptor
@@ -33,7 +34,10 @@ from azure_functions_agents.harness.copilot_sdk import (
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_session_paths as session_paths,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
+from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import (
+    CopilotSessionFs,
+    open_session_fs,
+)
 from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     CopilotSessionError,
     StorageMode,
@@ -291,6 +295,114 @@ async def test_approved_skill_file_reads_use_physical_resource_not_session_stora
     assert not any("check.txt" in name for name in store.files)
     await provider.write_file("/workspace/opaque-sdk-file", "native state")
     assert await provider.read_file("/workspace/opaque-sdk-file") == "native state"
+
+
+@pytest.mark.asyncio
+async def test_persisted_state_ignores_only_empty_workspace_scaffolding(file_case):
+    provider, _route, _store = file_case
+    assert not await provider.has_persisted_state()
+
+    await provider.write_file("/workspace/native-state", "")
+    assert await provider.has_persisted_state()
+
+
+@pytest.mark.asyncio
+async def test_persisted_state_treats_empty_native_directory_as_present(file_case):
+    provider, _route, _store = file_case
+    await provider.mkdir("/session-state", recursive=True)
+
+    assert await provider.has_persisted_state()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root_entries", "workspace_entries", "expected"),
+    [
+        ([], [], False),
+        (
+            [
+                SessionFSReaddirWithTypesEntry(
+                    name="workspace",
+                    type=DebugCollectLogsEntryKind.DIRECTORY,
+                )
+            ],
+            [],
+            False,
+        ),
+        (
+            [
+                SessionFSReaddirWithTypesEntry(
+                    name="workspace",
+                    type=DebugCollectLogsEntryKind.FILE,
+                )
+            ],
+            [],
+            True,
+        ),
+        (
+            [
+                SessionFSReaddirWithTypesEntry(
+                    name="native-state",
+                    type=DebugCollectLogsEntryKind.DIRECTORY,
+                )
+            ],
+            [],
+            True,
+        ),
+        (
+            [
+                SessionFSReaddirWithTypesEntry(
+                    name="zero-byte",
+                    type=DebugCollectLogsEntryKind.FILE,
+                )
+            ],
+            [],
+            True,
+        ),
+        (
+            [
+                SessionFSReaddirWithTypesEntry(
+                    name="workspace",
+                    type=DebugCollectLogsEntryKind.DIRECTORY,
+                )
+            ],
+            [
+                SessionFSReaddirWithTypesEntry(
+                    name="partial",
+                    type=DebugCollectLogsEntryKind.FILE,
+                )
+            ],
+            True,
+        ),
+    ],
+)
+async def test_persisted_state_uses_typed_root_and_workspace_listings(
+    root_entries, workspace_entries, expected
+):
+    backend = AsyncMock()
+    backend.readdir_with_types.side_effect = [root_entries, workspace_entries]
+    provider = CopilotSessionFs(backend, conventions="posix")
+
+    assert await provider.has_persisted_state() is expected
+    expected_paths = [call.args[0] for call in backend.readdir_with_types.await_args_list]
+    inspect_workspace = (
+        len(root_entries) == 1
+        and root_entries[0].name == "workspace"
+        and root_entries[0].type == DebugCollectLogsEntryKind.DIRECTORY
+    )
+    assert expected_paths == (["", "workspace"] if inspect_workspace else [""])
+
+
+@pytest.mark.asyncio
+async def test_persisted_state_listing_failure_propagates():
+    original = OSError(errno.EACCES, "permission denied")
+    backend = AsyncMock()
+    backend.readdir_with_types.side_effect = original
+    provider = CopilotSessionFs(backend, conventions="posix")
+
+    with pytest.raises(OSError) as caught:
+        await provider.has_persisted_state()
+    assert caught.value.errno == errno.EACCES
 
 
 @pytest.mark.asyncio
