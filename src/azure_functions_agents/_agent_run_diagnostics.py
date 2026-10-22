@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from ._observability import (
+    ATTR_AGENT_RESPONSE,
     ATTR_AGENT_RESPONSE_BYTES,
     ATTR_AGENT_TOOL_CALL_COUNT,
     ATTR_AGENT_TOOL_ERROR_COUNT,
@@ -99,4 +100,4 @@ def _set_run_summary_attributes(span: RuntimeSpan, result: AgentResult) -> None:
 def _set_run_result_attributes(span: RuntimeSpan, result: AgentResult) -> None:
     """Attach non-sensitive run-summary attributes; content only when opted in."""
     _set_run_summary_attributes(span, result)
-    span.set_content("af.agent.response", result.content)
+    span.set_content(ATTR_AGENT_RESPONSE, result.content)
