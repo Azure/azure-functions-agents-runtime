@@ -1,2 +1,4 @@
-# Created manually when following the remediation steps.
+.venv/
+__pycache__/
+local.settings.json
 /templates/weekly-report.txt

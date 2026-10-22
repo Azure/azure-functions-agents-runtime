@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-`azure-functions-agents-runtime` turns a markdown-first agent project into an enhanced `azure.functions.FunctionApp` or Durable `DFApp`. The design goal is that you write `.agent.md` files plus a small amount of supporting configuration, and the runtime translates that authoring format into Azure Functions triggers, HTTP routes, MCP surfaces, tool wiring, and catalog-backed `HostedSkill` injection for ordinary Functions. At startup, the runtime follows a three-stage pipeline: **discover** project files and inventories, **translate** them into typed runtime objects, and **register** the resulting agents on a Function App. The default entry point remains `create_function_app()`; the additive `HostedSkillFunctionApp()` constructor delegates to the same authoritative implementation in `src/azure_functions_agents/app.py:_compose_function_app()`.
+`azure-functions-agents-runtime` turns a markdown-first agent project into an enhanced `azure.functions.FunctionApp` or Durable `DFApp`. The design goal is that you write `.agent.md` files plus a small amount of supporting configuration, and the runtime translates that authoring format into Azure Functions triggers, HTTP routes, MCP surfaces, tool wiring, catalog-backed `HostedSkill` injection, and standalone `smart_retry` recovery for ordinary Functions. At startup, the runtime follows a three-stage pipeline: **discover** project files and inventories, **translate** them into typed runtime objects, and **register** the resulting agents on a Function App. The default entry point remains `create_function_app()`; the additive `HostedSkillFunctionApp()` constructor delegates to the same authoritative implementation in `src/azure_functions_agents/app.py:_compose_function_app()`.
 
 One agent can also declare a `subagents:` list so its own model can call other agents as `delegate_<slug>` tools during a normal `agent.run()` — chat-time multi-agent delegation (FRD 0007). That feature layers a small amount of extra structure onto the same pipeline (an app-wide identity index and an immutable, slug-keyed catalog built before any `FunctionApp` mutation) rather than introducing a new one; see Section 5, "Multi-agent delegation (subagents)".
 
@@ -31,8 +31,8 @@ flowchart LR
     G2 -->|"AgentCatalog"| H["registration/triggers.py<br/>registration/endpoints.py"]
     W -->|"workflow-agent policy by slug"| H
     H -->|"Decorators applied"| I
-    G2 -->|"AgentCatalog"| HS["_hosted_skill_app.py<br/>hosted_skill decorator"]
-    HS -->|"HostedSkill facade per invocation"| I
+    G2 -->|"AgentCatalog"| HS["_hosted_skill_app.py<br/>hosted_skill + smart_retry decorators"]
+    HS -->|"injection or separate recovery wrapper"| I
     B -->|"once-per-app selection"| HB["harness/_harness_binding.py<br/>AppHarness + HarnessRequest"]
     HB -.->|"bound construction"| R["harness/_agent_runner.py<br/>AgentRunner contract + per-app cache"]
     K["runner.py<br/>public host policy + neutral request factory"] -.->|"timed execution inputs"| R
@@ -72,8 +72,13 @@ A few boundaries are worth calling out explicitly:
 | Package/module | Role | Key entry points |
 | --- | --- | --- |
 | `azure_functions_agents/app.py` | Top-level two-pass composition root. Before app mutation it builds the slug index, `AgentCatalog`, complete workflow-handler catalog, and immutable workflow-agent policy catalog. It chooses the internal Durable app when any agent enables workflows and the normal app otherwise, registers the workflow runtime once, then registers each agent. The default factory and additive constructor delegate to the same private composition function. | `create_function_app()`, `HostedSkillFunctionApp()`, `HostedSkillApp`, `_compose_function_app()`, `_fail_on_duplicate_slugs()` |
-| `azure_functions_agents/_hosted_skill_app.py` | Defines the internal enhanced normal and Durable app implementations. Its decorator selects a catalog entry by slug, applies common capability checks plus MAF-only provider preflight, hides the injected parameter from worker indexing, and creates a fresh facade per Function invocation. Copilot qualification remains owned by app selection and catalog validation. | `hosted_skill()` |
-| `azure_functions_agents/hosted_skill_binding.py` | Implements the harness-neutral application facade. Each explicit `run()` or `stream()` call resolves a public session ID, binds per-session sandbox tools, copies mutable capability lists, and delegates resource ownership to the runner. | `HostedSkill.run()`, `HostedSkill.stream()` |
+| `azure_functions_agents/_hosted_skill_app.py` | Defines the shared mixin and internal enhanced normal and Durable apps, including factory-created apps. Both decorators select a catalog entry by slug with common capability checks plus MAF-only provider preflight. Injection hides its managed parameter and creates a fresh facade; separate smart retry validates the additive `audit_only` option, preserves the authored signature, registers wrappers in the app-owned recovery-binding map, and resolves trigger arguments after SDK indexing. Copilot qualification remains owned by app selection and catalog validation. | `_HostedSkillAppMixin`, `hosted_skill()`, `smart_retry()`, `get_functions()` |
+| `azure_functions_agents/hosted_skill_binding.py` | Implements the harness-neutral application facade. Each explicit `run()` or `stream()` call resolves a public session ID, binds per-session sandbox tools, copies mutable capability lists, and delegates resource ownership to the runner. Recovery reuses its private execution path through an internal facade, never injected into application code, selecting separate audit or normal recovery system instructions. | `HostedSkill.run()`, `HostedSkill.stream()`, private `HostedSkill._run_recovery()` |
+| `azure_functions_agents/_hosted_skill_recovery.py` | Private retry-option validation shared by the decorator and invocation-local recovery engine: one agent run, a budgeted whole-handler retry tool in normal mode or source-only audit with an effective zero budget and bounded WARNING advice, shared deadline/cancellation ownership, and retention of the actual handler result. No public recovery configuration type. | `_validate_retry_options()`, `recover_handler()` |
+| `azure_functions_agents/_hosted_recovery_input.py` | Generic recovery-input interface, input adapter selection, per-adapter retry argument schemas, separate audit and normal recovery instruction policies, and the public bounded non-HTTP failure exception. | `RecoveryInput`, `prepare_recovery_input()`, `HttpRetryArguments`, `QueueRetryArguments`, `HostedSkillRecoveryError` |
+| `azure_functions_agents/_hosted_recovery_http.py` | Azure Functions and Starlette bodyless GET/HEAD adapters: bounded request preparation, cloned route/query overlays, sensitive-key filtering, and native HTTP 500 failures. | `RecoveryRequest.prepare()`, `corrected()`, `failure()` |
+| `azure_functions_agents/_hosted_recovery_queue.py` | Bounded UTF-8 Storage Queue body replacement using an SDK-compatible message subclass; preserves delivery metadata without updating or settling the real message. | `RecoveryQueueMessage.create()`, `corrected_arguments()`, `failure()` |
+| `azure_functions_agents/_hosted_recovery_source.py` | Bounded read-only Python source inspection under the bound app root; rejects traversal, links/junctions, hidden files, and environment/build paths. Does not redact source contents. | `RecoverySource.list_files()`, `read_file()`, `search_source()` |
 | `azure_functions_agents/_agent_validation.py` | Owns dependency-free validation shared by the runner, endpoint layer, HostedSkill binding, and session storage identity. | `validate_prompt()`, `validate_session_id()`, `SESSION_ID_PATTERN` |
 | `azure_functions_agents/_agent_run_diagnostics.py` | Owns SDK-, harness-, and Azure-independent run diagnostics shared by registered handlers, built-in endpoints, HostedSkill, and both harness adapters: the canonical run span, tool-error accounting, and run-summary telemetry. | `start_agent_run_span()`, `_set_run_result_attributes()`, `_total_tool_error_count()` |
 | `azure_functions_agents/streaming_events.py`, `response_contract.py` | Own the harness-neutral typed stream vocabulary and payload conversion, plus the shared structured-response instruction/validation contract used by HTTP handlers and HostedSkill. The HostedSkill event names are runtime aliases of the neutral owning classes; HTTP transport serialization stays in the public runner. | `AgentStreamEvent`, `AgentStreamEventKind`, `HostedSkillEvent`, `HostedSkillEventKind`, `validate_response_contract()` |
@@ -257,6 +262,129 @@ The `_compose_function_app()` docstring in `src/azure_functions_agents/app.py:_c
 ### Where the registration stage hands off to execution
 
 Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit local Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Event calls carry approved skills, the full ownership catalog, display and execution-surface telemetry, and omitted-versus-explicit session state. `run_agent_events()` converts the shared SSE vocabulary to typed events for hosted skills. Explicit close or cancellation propagates through each adapter via `aclosing`; callers that break public async iteration early must close it for deterministic release. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
+
+#### Opt-in smart retry handler recovery
+
+`app.smart_retry(*, agent_name, max_retries=1, timeout=60, request_arg=None, audit_only=False)`
+adds an execution-time exception boundary with plain keyword options, not a new
+discovery/schema or registration pipeline. It is a separate method of
+`_HostedSkillAppMixin`, available on enhanced normal and Durable apps, including
+the default factory's app. It preserves the authored signature and annotations,
+injects no parameter, and has no `arg_name` option. It must be immediately above
+a plain `async def` handler, below SDK trigger/binding decorators; synchronous
+handlers, SDK FunctionBuilder objects, duplicate smart retry, and injection plus
+recovery on the same handler are rejected. Ordinary injection and explicit
+`HostedSkill.run()`/`stream()` behavior are unchanged.
+
+The decorator and engine share `_validate_retry_options()` in
+`_hosted_skill_recovery.py`, not a public configuration object. `max_retries`
+must be a positive integer and `timeout` finite and positive; neither accepts
+booleans. `request_arg` is `None` or a non-keyword Python identifier naming a
+concrete handler parameter. `audit_only` defaults to `False` and requires
+`type(audit_only) is bool`, rejecting integer, string and `None` substitutes.
+With `audit_only=True`, any otherwise valid positive `max_retries` is overridden
+with an effective zero retry budget; explicit `max_retries=0` remains invalid.
+The existing defaults stay `max_retries=1`, `timeout=60`, and `request_arg=None`.
+Agent selection and capability/provider qualification reuse the immutable catalog
+without acquiring a model client.
+
+Each returned wrapper is keyed in the app-owned recovery-binding map. Both app
+classes retain their post-index resolution hook: `get_functions()` resolves the
+actual trigger binding name after outer SDK decorators have applied and validates
+it against the unchanged worker-visible signature. Explicit `request_arg`
+overrides retain precedence. Selection is trigger-neutral, with no annotation or
+parameter-name heuristics. Without indexing or an override, a direct call raises
+`RuntimeError` at invocation time, before input qualification or the original
+handler. Resolution remains per-handler.
+
+The generic `RecoveryInput` interface selects a bodyless HTTP or Storage Queue
+adapter and supplies that adapter's retry argument schema. Unsupported input
+types, invalid UTF-8 queue bodies and bodies over 32 KiB raise before
+handler/agent execution. Arguments bind once per invocation; the original
+handler runs first, and a successful initial call never starts an agent or emits
+an advice log, including in audit mode.
+
+After an uncaught handler exception, the wrapper starts one isolated agent run
+(potentially multiple model/tool roundtrips). It preserves the selected model,
+app harness and agent configuration, reusing the private
+`hosted_skill_binding.HostedSkill._run_recovery()` path through an internal facade
+that is never passed to application code. Source identity points to the original
+handler, not its wrapper. Normal recovery (`audit_only=False`) uses internal
+recovery system instructions and only runtime-owned `list_files`, `read_file`,
+`search_source`, and `retry_function` tools. Authored tools, MCP servers, skills, sandbox, web access and response
+contracts are not inherited; the immutable catalog is not changed. Source access
+is bounded to Python files under the harness app root, never the current directory.
+No manual operation context or input contract is required.
+
+Audit mode uses separate system instructions for source-grounded failure analysis,
+forbidding replay/input mutation, and exposes **only** `list_files`, `read_file`,
+and `search_source`. It does not expose `retry_function` or prepare replacement
+inputs. The model cannot invoke a retry through these tools, even if it ignores
+instructions; an effective-zero execution guard provides defense in depth.
+Diagnostics report `audit_only=true` and effective `max_retries=0`. Neither mode
+inherits authored capabilities, and normal recovery instructions remain unchanged.
+After analysis, audit advice is bounded to 2,000 characters and logged once at
+WARNING level through the shared logger. Missing advice, provider errors and
+deadline expiry use static fallback guidance. Audit retains the adapter failure
+outcomes below; it never returns advice as successful queue processing. The host
+may redeliver the original message, and each delivery may run another audit.
+
+In normal mode, `retry_function` may execute the entire original undecorated
+handler up to `max_retries` times within the same host invocation. The positive integer budget
+excludes the initial execution. Each attempt reconstructs the original input and
+preserves other arguments; patches do not accumulate between attempts. Claim
+attempts before awaiting the handler, reject overlapping calls without consuming
+budget, and allow another attempt only after a failed execution. Invalid patches
+do not consume budget. First success prevents all further handler execution,
+even with budget remaining. The tool neither makes an HTTP self-call nor requests
+another queue delivery. The actual normally returned result, including `None`
+from a queue handler, is retained out of band and returned
+unchanged, even after a later model failure or recovery timeout; the model sees
+only a tool status, not the handler result. In both modes, one shared recovery
+deadline covers analysis, source tools and any retry executions; it never resets
+between attempts. External cancellation still propagates as `CancelledError`,
+even after retained success, without an audit advice log. Invocation-local tools
+are invalidated on exit. Shutdown remains bounded and cooperative; code that
+suppresses cancellation may outlive recovery.
+
+- **HTTP:** replay-safe, bodyless GET/HEAD handlers using Azure Functions or
+  Starlette requests accept route/query overlays. Starlette `prepare()` also
+  accepts headerless requests after one bounded receive verifies an empty
+  terminal ASGI event; `Content-Length: 0` is not required. Unresolved recovery
+  returns native HTTP 500 with `requires_user_action` and remediation (no body
+  for HEAD). Corrections do not recompute authorization or other bindings.
+- **Storage Queue:** `RecoveryQueueMessage` accepts `azure.functions.QueueMessage`
+  bodies containing strict UTF-8 text, at most 32 KiB encoded bytes for both
+  original and replacement, with no silent truncation. Its retry tool requires
+  one complete `body` string, not HTTP route/query arguments; the handler owns
+  JSON parsing and business validation. An SDK-compatible subclass replaces only
+  the body and preserves `id`, `pop_receipt`, `dequeue_count`, `insertion_time`,
+  `expiration_time` and `time_next_visible`. Recovery never updates, deletes or
+  settles the stored message. A normal return, including `None`, completes the
+  invocation; unresolved recovery raises the public `HostedSkillRecoveryError`
+  with `remediation` bounded to 2,000 characters. `raise ... from None` suppresses
+  the original exception context in formatted output without automatically
+  including its text or the body. Advice remains untrusted model text; absent
+  usable advice or on infrastructure failure, the runtime uses static guidance.
+  The failed invocation retains the host's redelivery and eventual poison-queue
+  policy, separate from the same-invocation recovery budget.
+
+HTTP bodies, other non-HTTP input types, output bindings, streaming, Durable
+orchestrators and non-idempotent side effects are unsupported; no effects are
+rolled back. Corrections and semantic preservation are model-guided, not
+guaranteed; a successful replay proves handler acceptance, not preservation of
+the original intent. Opt-in is a source/input data-sharing boundary: HTTP credential-key
+filtering is not value or source-secret redaction. Queue recovery shares the
+bounded textual body, not delivery metadata or pop receipts; malformed text
+cannot be reliably field-redacted. Use reviewed source and synthetic,
+non-sensitive inputs. Audit logs remain untrusted model text; logging advice
+does not add a confidentiality or redaction guarantee. See
+[the authoring guide](front-matter-spec.md#opt-in-handler-recovery),
+[FRD 0014](frds/0014-smart-retry-decorator.md) for the standalone decorator API,
+[FRD 0015](frds/0015-smart-retry-audit-only.md) for additive audit-only behavior, and
+historical [FRD 0012](frds/0012-hosted-skill-recovery.md) and
+[FRD 0013](frds/0013-hosted-skill-queue-recovery.md) for the recovery engine and
+input contracts. FRD 0014 supersedes their recovery authoring API.
 
 `config/merge.py` recursively combines global and per-agent portable
 `agent_configuration` fields, using authored `null` values to clear inherited
@@ -553,7 +681,7 @@ path, the scheduler discards recorded wave outcomes and restores the wave.
 
 ### Registration paths in practice
 
-- **Endpoint-only or internal agent (no trigger):** app composition skips `register_agent()` whenever an agent has no `trigger`. If built-in endpoints are enabled, `register_builtin_endpoints()` can still expose the chat UI, REST, SSE, and MCP surfaces. An agent with neither a trigger nor built-in endpoints remains a fully validated inert catalog entry and registers no Function. Application code can select it later with `@app.hosted_skill`, while `subagents` and `workflows.subagents` can still make it reachable in their independent internal roles.
+- **Endpoint-only or internal agent (no trigger):** app composition skips `register_agent()` whenever an agent has no `trigger`. If built-in endpoints are enabled, `register_builtin_endpoints()` can still expose the chat UI, REST, SSE, and MCP surfaces. An agent with neither a trigger nor built-in endpoints remains a fully validated inert catalog entry and registers no Function. Application code can select it later with `@app.hosted_skill` or `@app.smart_retry`, while `subagents` and `workflows.subagents` can still make it reachable in their independent internal roles.
 - **HTTP agent:** `registration/triggers.py` routes `http_trigger` to `make_http_agent_handler()`, which enforces the trigger's inbound `auth` policy (via the shared `_auth` module, identical to built-in endpoints — the route `AuthLevel` for key/anonymous modes and the in-app Easy Auth `x-ms-client-principal` check for `entra`), validates JSON input, and optionally validates the model's JSON-shaped response before replying. The registered function name is the agent's identity slug, already guaranteed unique at stage 6 — a colliding sanitized stem is a startup error, not an auto-suffixed name.
 - **Built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which uses the native-contract-first, adapter-based trigger serializer (`registration/_trigger_serialization.py`) to turn public binding data into JSON before sending the prompt to `runner.run_agent()`.
 - **Connector trigger:** `connector_trigger` uses the Azure Functions Python `app.connector_trigger(...)` decorator when available, falling back to the equivalent generic `connectorTrigger` binding on older Azure Functions packages. It then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path.

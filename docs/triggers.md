@@ -32,7 +32,8 @@ Runtime rules:
 Any agent may omit both `trigger` and `builtin_endpoints`. It still loads into
 the immutable agent catalog but registers no Azure Function trigger and no
 `/agents/{slug}/*` routes of its own. Application code can select it with
-`@app.hosted_skill`, or another agent can reference it as a Chat or Workflow Sub
+`@app.hosted_skill` for explicit agent calls or `@app.smart_retry` for handler
+recovery, or another agent can reference it as a Chat or Workflow Sub
 Agent. See [`samples/hybrid-hosted-skill/`](../samples/hybrid-hosted-skill/) and
 [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/).
 
@@ -183,6 +184,24 @@ delivery, see
 
 Use `response_example` or `response_schema` at the top level, not under `trigger`.
 
+For a replay-safe, application-owned bodyless GET/HEAD handler, use
+`@app.smart_retry(agent_name="error_advisor")` immediately above the `async def`
+handler, below all SDK trigger/binding decorators. It injects no parameter and
+accepts plain keyword options: `max_retries=1`, `timeout=60`, and
+`request_arg=None` by default. Indexing selects the trigger argument unless
+explicitly overridden; direct calls need indexing or an override. Recovery
+corrects route/query values within the same invocation and returns the actual
+successful handler result; unresolved recovery returns native HTTP 500 with
+remediation (no body for HEAD). This is separate from runtime-authored
+`http_trigger` agents and does not automatically add recovery to them.
+
+`smart_retry` is available on enhanced normal and Durable apps, including those
+returned by `create_function_app()`, but not for replayed Durable orchestrator
+code. It has no `arg_name` option; combining it with HostedSkill injection on the
+same handler or applying it twice is rejected. Ordinary injection and explicit
+`HostedSkill.run()`/`stream()` calls remain unchanged. See
+[recovery limits](front-matter-spec.md#opt-in-handler-recovery).
+
 ## Timer Triggers
 
 Use `timer_trigger` for scheduled agents. The Azure Functions `schedule` alias is not supported in agent files.
@@ -229,6 +248,29 @@ trigger:
 | `queue_name` | Yes | Name of the queue to monitor. |
 | `connection` | Yes | App setting or setting collection for Azure Queue Storage. |
 | `data_type` | No | Forwarded to the Azure Functions decorator. |
+
+For an ordinary application-owned `@app.queue_trigger` handler receiving
+`azure.functions.QueueMessage`, opt in with
+`@app.smart_retry(agent_name="queue_advisor", max_retries=3)` immediately above
+the handler and below the SDK binding decorators. The handler keeps only its
+real Function arguments; no skill is injected. Three retries are this sample's
+choice, not a changed default: `max_retries=1`, `timeout=60`, and
+`request_arg=None` remain the defaults. Indexing selects the queue trigger's
+argument unless `request_arg` explicitly overrides it. After a handler exception,
+the recovery agent can replace the complete UTF-8 body (up to 32 KiB) and retry
+sequentially under one deadline within the same invocation; valid input needs no
+agent. Delivery metadata is
+preserved and settlement remains host-owned. A normal return, including `None`,
+completes the invocation; unresolved recovery raises `HostedSkillRecoveryError`
+with bounded remediation so host redelivery and poison-queue handling remain
+intact. This does not add recovery to every `.agent.md` queue trigger. Use only
+synthetic non-sensitive bodies, which are shared with the model without reliable
+field redaction, and reviewed source. Model-guided correction does not guarantee
+preservation of meaning even when the handler accepts the replacement. Handlers
+must be replay-safe: no HTTP bodies, output bindings, streaming or non-idempotent
+side effects, and no side-effect rollback. Cancellation propagates; cleanup is
+bounded and cooperative. See [recovery limits](front-matter-spec.md#opt-in-handler-recovery)
+and the [runnable sample](../samples/hosted-skill-remediation/).
 
 Ref: [Azure Functions queue trigger](https://learn.microsoft.com/azure/azure-functions/functions-bindings-storage-queue-trigger)
 

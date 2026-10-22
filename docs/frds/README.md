@@ -40,6 +40,10 @@ The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.co
 | [0009](0009-copilot-sdk-harness.md) | Copilot SDK agent harness | Finalized |
 | [0010](0010-agent-evaluations.md) | Vally-first agent evaluations | Finalized |
 | [0011](0011-hosted-skill-binding.md) | HostedSkill binding | Finalized |
+| [0012](0012-hosted-skill-recovery.md) | Agent-driven Hosted Skill handler recovery | Finalized |
+| [0013](0013-hosted-skill-queue-recovery.md) | Hosted Skill Storage Queue recovery | Finalized |
+| [0014](0014-smart-retry-decorator.md) | Standalone smart retry decorator | Finalized |
+| [0015](0015-smart-retry-audit-only.md) | Smart retry audit-only mode | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

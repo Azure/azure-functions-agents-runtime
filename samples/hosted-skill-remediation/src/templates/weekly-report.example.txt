@@ -1,4 +1,0 @@
-{title}
-
-The application loaded its report template successfully.
-The missing deployment asset has been supplied by the developer.

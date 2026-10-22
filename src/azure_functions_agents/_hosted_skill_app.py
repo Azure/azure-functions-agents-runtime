@@ -1,4 +1,4 @@
-"""Azure Functions app subclasses that inject catalog-backed HostedSkill facades."""
+"""Azure Functions app subclasses with catalog-backed injection and smart retry."""
 
 from __future__ import annotations
 
@@ -6,12 +6,16 @@ import functools
 import inspect
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, TypeVar, cast, get_type_hints
 
 import azure.durable_functions as df
 import azure.functions as func
+from azure.functions.decorators.function_app import Function
 
 from ._agent_run_diagnostics import AgentExecutionSurface
+from ._hosted_recovery_input import prepare_recovery_input
+from ._hosted_skill_recovery import _validate_retry_options, recover_handler
 from ._logger import logger
 from .harness._harness_binding import AppHarness, UnsupportedCapabilityError
 from .hosted_skill_binding import HostedSkill
@@ -101,9 +105,27 @@ def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
         validator(resolved)
 
 
+@dataclass
+class _RecoveryBinding:
+    signature: inspect.Signature
+    argument: str | None
+
+    def select(self, name: str) -> None:
+        """Bind recovery to a concrete worker-visible parameter."""
+        parameter = self.signature.parameters.get(name)
+        if parameter is None or parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            raise TypeError("Recovery request_arg must name a visible handler parameter")
+        self.argument = name
+
+
 class _HostedSkillAppMixin:
     _hosted_skill_catalog: AgentCatalog
     _hosted_skill_harness: AppHarness
+    _hosted_skill_recovery_bindings: dict[_Handler, _RecoveryBinding]
+    _hosted_skill_wrappers: set[_Handler]
 
     def _configure_hosted_skills(
         self,
@@ -112,6 +134,43 @@ class _HostedSkillAppMixin:
     ) -> None:
         self._hosted_skill_catalog = catalog
         self._hosted_skill_harness = harness
+        self._hosted_skill_recovery_bindings = {}
+        self._hosted_skill_wrappers = set()
+
+    def _decorator_entry(self, agent_name: str, decorator: str) -> CatalogEntry:
+        """Qualify one catalog agent without acquiring execution resources."""
+        if not isinstance(agent_name, str) or not agent_name:
+            raise ValueError(f"{decorator} agent_name must be a non-empty string")
+        entry = self._hosted_skill_catalog.get(agent_name)
+        if entry is None:
+            known = ", ".join(sorted(self._hosted_skill_catalog)) or "<none>"
+            raise ValueError(
+                f"Unknown HostedSkill agent {agent_name!r}. Known agent slugs: {known}."
+            )
+        _validate_entry(entry, self._hosted_skill_harness)
+        return entry
+
+    def _validate_decorator_handler(self, handler: _Handler, decorator: str) -> None:
+        """Require a single runtime decorator directly on an async handler."""
+        if not inspect.isfunction(handler):
+            raise TypeError(
+                f"{decorator} must be the innermost decorator, immediately above the handler"
+            )
+        if handler in self._hosted_skill_wrappers:
+            raise TypeError("hosted_skill and smart_retry cannot be combined or repeated")
+        if not inspect.iscoroutinefunction(handler):
+            raise TypeError(f"{decorator} requires an async def handler")
+
+    def _resolve_recovery_bindings(self, functions: list[Function]) -> None:
+        """Select trigger arguments after outer decorators have attached metadata."""
+        for function in functions:
+            binding = self._hosted_skill_recovery_bindings.get(function.get_user_function())
+            if binding is None or binding.argument is not None:
+                continue
+            trigger = function.get_trigger()
+            if trigger is None:
+                raise TypeError("Recovery requires a trigger binding or explicit request_arg")
+            binding.select(trigger.name)
 
     def hosted_skill(
         self,
@@ -122,23 +181,10 @@ class _HostedSkillAppMixin:
         """Inject a fresh HostedSkill facade into each handler invocation."""
         if not isinstance(arg_name, str) or not arg_name:
             raise ValueError("hosted_skill arg_name must be a non-empty string")
-        if not isinstance(agent_name, str) or not agent_name:
-            raise ValueError("hosted_skill agent_name must be a non-empty string")
-        entry = self._hosted_skill_catalog.get(agent_name)
-        if entry is None:
-            known = ", ".join(sorted(self._hosted_skill_catalog)) or "<none>"
-            raise ValueError(
-                f"Unknown HostedSkill agent {agent_name!r}. Known agent slugs: {known}."
-            )
-        _validate_entry(entry, self._hosted_skill_harness)
+        entry = self._decorator_entry(agent_name, "hosted_skill")
 
         def decorate(handler: _F) -> _F:
-            if not inspect.isfunction(handler):
-                raise TypeError(
-                    "hosted_skill must be the innermost decorator, immediately above the handler"
-                )
-            if not inspect.iscoroutinefunction(handler):
-                raise TypeError("hosted_skill requires an async def handler")
+            self._validate_decorator_handler(handler, "hosted_skill")
 
             source_signature = inspect.signature(handler)
             visible_signature = _worker_signature(handler, arg_name)
@@ -154,18 +200,69 @@ class _HostedSkillAppMixin:
             @functools.wraps(handler)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return await _source_call(
-                    handler,
-                    source_signature,
-                    visible_signature,
-                    args,
-                    kwargs,
-                    arg_name,
+                    handler, source_signature, visible_signature, args, kwargs, arg_name,
                     HostedSkill(entry, self._hosted_skill_harness),
                 )
 
             async_wrapper.__annotations__ = dict(async_wrapper.__annotations__)
             async_wrapper.__annotations__.pop(arg_name, None)
             async_wrapper.__signature__ = visible_signature  # type: ignore[attr-defined]
+            self._hosted_skill_wrappers.add(async_wrapper)
+            return cast(_F, async_wrapper)
+
+        return decorate
+
+    def smart_retry(
+        self,
+        *,
+        agent_name: str,
+        max_retries: int = 1,
+        timeout: float = 60,
+        request_arg: str | None = None,
+        audit_only: bool = False,
+    ) -> Callable[[_F], _F]:
+        """Recover a replay-safe async handler without injecting an application argument."""
+        _validate_retry_options(
+            request_arg=request_arg, timeout=timeout, max_retries=max_retries,
+            audit_only=audit_only,
+        )
+        entry = self._decorator_entry(agent_name, "smart_retry")
+
+        def decorate(handler: _F) -> _F:
+            self._validate_decorator_handler(handler, "smart_retry")
+            signature = inspect.signature(handler)
+            binding = _RecoveryBinding(signature, None)
+            if request_arg is not None:
+                binding.select(request_arg)
+
+            @functools.wraps(handler)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                bound = signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                selected = binding.argument
+                if selected is None:
+                    raise RuntimeError(
+                        "Recovery trigger argument is unresolved; index the app with "
+                        "get_functions() or supply an explicit request_arg for direct calls"
+                    )
+                request = await prepare_recovery_input(bound.arguments[selected])
+
+                async def execute(corrected_request: object) -> Any:
+                    call = signature.bind(*bound.args, **bound.kwargs)
+                    call.arguments[selected] = corrected_request
+                    return await handler(*call.args, **call.kwargs)
+
+                try:
+                    return await execute(request.request)
+                except Exception as error:
+                    return await recover_handler(
+                        HostedSkill(entry, self._hosted_skill_harness), request, error,
+                        execute, handler, self._hosted_skill_harness.app_root, timeout,
+                        max_retries=max_retries, audit_only=audit_only,
+                    )
+
+            self._hosted_skill_wrappers.add(async_wrapper)
+            self._hosted_skill_recovery_bindings[async_wrapper] = binding
             return cast(_F, async_wrapper)
 
         return decorate
@@ -184,6 +281,12 @@ class HostedSkillFunctionApp(_HostedSkillAppMixin, func.FunctionApp):
         super().__init__(http_auth_level=http_auth_level)
         self._configure_hosted_skills(catalog, harness)
 
+    def get_functions(self) -> list[Function]:
+        """Index functions and resolve automatic recovery input selection."""
+        functions = super().get_functions()
+        self._resolve_recovery_bindings(functions)
+        return functions
+
 
 class HostedSkillDFApp(_HostedSkillAppMixin, df.DFApp):
     """DFApp with catalog-backed HostedSkill injection."""
@@ -197,3 +300,9 @@ class HostedSkillDFApp(_HostedSkillAppMixin, df.DFApp):
     ) -> None:
         super().__init__(http_auth_level=http_auth_level)
         self._configure_hosted_skills(catalog, harness)
+
+    def get_functions(self) -> list[Function]:
+        """Index functions and resolve automatic recovery input selection."""
+        functions = super().get_functions()
+        self._resolve_recovery_bindings(functions)
+        return functions
