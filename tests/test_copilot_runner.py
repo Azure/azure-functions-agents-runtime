@@ -231,21 +231,34 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["cancel", "timeout", "success"])
 @pytest.mark.parametrize("delete_fails", [False, True])
-async def test_leaf_delete_failure_preserves_body_outcome(preview, native, failure, delete_fails):
+async def test_leaf_delete_failure_preserves_body_outcome(
+    preview, native, monkeypatch, failure, delete_fails,
+):
     session = native.create_session.return_value
     if delete_fails:
         native.delete_session.side_effect = RuntimeError("private deletion detail")
     started = asyncio.Event()
+    timeouts: list[asyncio.Timeout] = []
+    original_timeout_at = asyncio.timeout_at
+
+    def capture_timeout(deadline):
+        timeout = original_timeout_at(deadline)
+        timeouts.append(timeout)
+        return timeout
+
+    monkeypatch.setattr(_copilot_execution.asyncio, "timeout_at", capture_timeout)
 
     async def stall(*args, **kwargs):
         started.set()
+        if failure == "timeout":
+            timeouts[0].reschedule(asyncio.get_running_loop().time())
         await asyncio.Event().wait()
 
     if failure != "success":
         session.send_and_wait.side_effect = stall
     task = asyncio.create_task(runner.run_leaf_agent_task(
         _specialist(), AgentCapabilities(_harness=preview), "task",
-        timeout=0.03 if failure == "timeout" else 3,
+        timeout=10,
         execution_role="delegate",
     ))
     try:
@@ -257,6 +270,8 @@ async def test_leaf_delete_failure_preserves_body_outcome(preview, native, failu
         elif failure == "timeout":
             with pytest.raises(TimeoutError, match="specialist timed out"):
                 await task
+            assert started.is_set()
+            assert timeouts[0].expired()
         elif delete_fails:
             with pytest.raises(RuntimeError, match="private deletion detail") as caught:
                 await task
