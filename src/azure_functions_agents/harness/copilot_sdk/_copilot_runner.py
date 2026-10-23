@@ -42,6 +42,7 @@ from .._harness_binding import (
     UnsupportedCapabilityError,
     agent_run_attributes_for_harness,
 )
+from .._prepared_inputs import prepared_runtime_tools
 from .._stream_events import (
     ContentEvent,
     DoneEvent,
@@ -77,13 +78,7 @@ class _CopilotPreparedInputs:
 
     @property
     def direct_tools(self) -> tuple[ToolDescriptor, ...]:
-        return (
-            *self.user_tools,
-            *self.sandbox_tools,
-            *self.web_request_tools,
-            *self.workflow_tools,
-            *self.delegate_tools,
-        )
+        return (*prepared_runtime_tools(self), *self.delegate_tools)
 
 
 async def _prepare_agent_inputs(
