@@ -45,6 +45,7 @@ from .harness._harness_binding import (
     get_harness,
 )
 from .harness._history_identity import validate_agent_slug
+from .harness._prepared_inputs import compose_instructions
 from .registration.capabilities import (
     AgentCapabilities,
     _merge_skill_descriptors,
@@ -326,9 +327,7 @@ def _request(
         approved = ()
     discovered = tuple(skill_catalog) if skill_catalog is not None else approved
     validated_id = _validate_session_id(session_id)
-    effective = instructions.strip() if instructions and instructions.strip() else None
-    if system_addendum:
-        effective = (effective or "") + system_addendum
+    effective = compose_instructions(instructions, system_addendum)
     configuration = agent_configuration or AgentConfiguration()
     return HarnessRequest(
         prompt=prompt,

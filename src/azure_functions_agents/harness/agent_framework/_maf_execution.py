@@ -46,6 +46,7 @@ from .._harness_binding import (
     agent_run_attributes_for_harness,
 )
 from .._history_identity import validate_agent_slug
+from .._prepared_inputs import compose_instructions, prepared_runtime_tools
 from .._provider_config import InferenceTarget
 from ._maf_client import build_chat_client
 from ._maf_tools import build_maf_tools
@@ -339,9 +340,7 @@ def _prepare_agent_inputs(
         if mcp_tools is None
         else tuple(mcp_tools)
     )
-    effective = instructions.strip() if instructions and instructions.strip() else None
-    if system_addendum:
-        effective = (effective or "") + system_addendum
+    effective = compose_instructions(instructions, system_addendum)
     return _MafPreparedInputs.create(
         user_tools=user_tools,
         sandbox_tools=sandbox_tools or (),
@@ -364,14 +363,7 @@ def _build_direct_role_agent(
 ) -> Agent[Any]:
     """Adapt prepared declarations into the executable direct MAF agent."""
     resolved_tools: list[AgentTool] = list(
-        build_maf_tools(
-            (
-                *prepared.user_tools,
-                *prepared.sandbox_tools,
-                *prepared.web_request_tools,
-                *prepared.workflow_tools,
-            )
-        )
+        build_maf_tools(prepared_runtime_tools(prepared))
     )
     if prepared.mcp_servers:
         from ._maf_mcp import build_maf_mcp_tools

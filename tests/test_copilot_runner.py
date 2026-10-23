@@ -242,6 +242,112 @@ async def test_workflow_management_uses_native_skill_loading_without_prompt_inje
 
 
 @pytest.mark.asyncio
+async def test_preparation_keeps_capability_categories_declarative(preview, monkeypatch):
+    user_tool = tool(name="user_tool")(lambda: "user")
+    sandbox_tool = tool(name="sandbox_tool")(lambda: "sandbox")
+    web_request_tool = tool(name="web_request_tool")(lambda: "web")
+    workflow_tool = tool(name="workflow_tool")(lambda: "workflow")
+    delegate_tool = tool(name="delegate_tool")(lambda: "delegate")
+    tracker = runner._DelegateErrorTracker()
+    build_delegates = AsyncMock(return_value=([delegate_tool], tracker))
+    monkeypatch.setattr(runner, "build_subagent_tools", build_delegates)
+    monkeypatch.setattr(
+        "azure_functions_agents.workflows.tools.build_workflow_tools",
+        lambda **_kwargs: [workflow_tool],
+    )
+    sdk_adapter = Mock(side_effect=AssertionError("preparation must not bind SDK tools"))
+    monkeypatch.setattr(_copilot_execution, "_tool", sdk_adapter)
+
+    prepared, returned_tracker = await _copilot_runner._prepare_agent_inputs(
+        preview,
+        "prompt",
+        instructions=" instructions ",
+        deadline=asyncio.get_running_loop().time() + 5,
+        tools=[user_tool],
+        mcp_tools=[],
+        skill_paths=None,
+        model="test-model",
+        session_id="session",
+        sandbox_tools=[sandbox_tool],
+        system_addendum="\naddendum",
+        workflow_enabled=True,
+        workflow_durable_client=Mock(),
+        workflow_agent_slug="coordinator",
+        agent_name="coordinator",
+        web_request_tools=[web_request_tool],
+        agent_configuration=None,
+        subagents=[SubagentRef(agent="specialist")],
+        catalog=Mock(),
+        workflow_policy=WorkflowPlanPolicy(allowed_tools=frozenset()),
+        skills=None,
+        skill_catalog=None,
+        session_is_new=False,
+    )
+
+    assert prepared.request.tools == ()
+    assert prepared.request.instructions == "instructions\naddendum"
+    assert [item.name for item in prepared.user_tools] == ["user_tool"]
+    assert [item.name for item in prepared.sandbox_tools] == ["sandbox_tool"]
+    assert [item.name for item in prepared.web_request_tools] == ["web_request_tool"]
+    assert [item.name for item in prepared.workflow_tools] == ["workflow_tool"]
+    assert [item.name for item in prepared.delegate_tools] == ["delegate_tool"]
+    assert returned_tracker is tracker
+    assert [item.name for item in prepared.direct_tools] == [
+        "user_tool",
+        "sandbox_tool",
+        "web_request_tool",
+        "workflow_tool",
+        "delegate_tool",
+    ]
+    direct_request = _copilot_runner._build_direct_request(prepared)
+    assert [item.name for item in direct_request.tools] == [
+        "user_tool",
+        "sandbox_tool",
+        "web_request_tool",
+        "workflow_tool",
+        "delegate_tool",
+    ]
+    sdk_adapter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preparation_normalizes_authored_tools_before_building_delegates(
+    preview, monkeypatch
+):
+    build_delegates = AsyncMock()
+    monkeypatch.setattr(runner, "build_subagent_tools", build_delegates)
+
+    with pytest.raises(TypeError, match="must be callable"):
+        await _copilot_runner._prepare_agent_inputs(
+            preview,
+            "prompt",
+            instructions=None,
+            deadline=asyncio.get_running_loop().time() + 5,
+            tools=[],
+            mcp_tools=[],
+            skill_paths=None,
+            model="test-model",
+            session_id="session",
+            sandbox_tools=[object()],
+            system_addendum=None,
+            workflow_enabled=False,
+            workflow_durable_client=None,
+            workflow_agent_slug=None,
+            agent_name="coordinator",
+            web_request_tools=[],
+            agent_configuration=None,
+            subagents=[SubagentRef(agent="specialist")],
+            catalog=Mock(),
+            workflow_policy=None,
+            skills=None,
+            skill_catalog=None,
+            session_is_new=False,
+        )
+
+    build_delegates.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_leaf_roles_keep_project_skills_without_runtime_workflow_skill(preview, monkeypatch):
     invoke = AsyncMock(return_value=runner.AgentResult("leaf-session", "ready"))
     monkeypatch.setattr(_copilot_execution, "run", invoke)

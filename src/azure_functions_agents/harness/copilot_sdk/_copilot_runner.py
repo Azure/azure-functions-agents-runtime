@@ -8,13 +8,14 @@ import json
 import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from azure_functions_agents import runner as _runner
 
 from ..._agent_run_diagnostics import AgentExecutionSurface, _set_run_result_attributes
+from ..._function_tool import normalize_tool
 from ..._observability import (
     ATTR_AGENT_OUTCOME,
     FaultDomain,
@@ -33,6 +34,7 @@ from ...registration.catalog import AgentCatalog
 from .._agent_runner import AgentFunctionTool
 from .._harness_binding import (
     AppHarness,
+    ExecutionRole,
     HarnessRequest,
     HarnessSessionState,
     SessionHistory,
@@ -40,6 +42,7 @@ from .._harness_binding import (
     UnsupportedCapabilityError,
     agent_run_attributes_for_harness,
 )
+from .._prepared_inputs import prepared_runtime_tools
 from .._stream_events import (
     ContentEvent,
     DoneEvent,
@@ -60,6 +63,147 @@ if TYPE_CHECKING:
 
 
 _STREAM_EVENT_QUEUE_CAPACITY = 128
+
+
+@dataclass(frozen=True)
+class _CopilotPreparedInputs:
+    """Normalized Copilot inputs before executable SDK adaptation."""
+
+    request: HarnessRequest
+    user_tools: tuple[ToolDescriptor, ...]
+    sandbox_tools: tuple[ToolDescriptor, ...]
+    web_request_tools: tuple[ToolDescriptor, ...]
+    workflow_tools: tuple[ToolDescriptor, ...]
+    delegate_tools: tuple[ToolDescriptor, ...]
+
+    @property
+    def direct_tools(self) -> tuple[ToolDescriptor, ...]:
+        return (*prepared_runtime_tools(self), *self.delegate_tools)
+
+
+async def _prepare_agent_inputs(
+    harness: AppHarness,
+    prompt: str,
+    *,
+    instructions: str | None,
+    deadline: float,
+    tools: Sequence[AgentFunctionTool] | None,
+    mcp_tools: Sequence[MCPServerDescriptor] | None,
+    skill_paths: Sequence[Path] | None,
+    model: str | None,
+    session_id: str | None,
+    sandbox_tools: Sequence[ToolInput] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: DurableFunctionsClient | None,
+    workflow_agent_slug: str | None,
+    agent_name: str | None,
+    web_request_tools: Sequence[ToolInput] | None,
+    agent_configuration: AgentConfiguration | None,
+    subagents: list[SubagentRef] | None,
+    catalog: AgentCatalog | None,
+    workflow_policy: WorkflowPlanPolicy | None,
+    skills: Sequence[SkillDescriptor] | None,
+    skill_catalog: Sequence[SkillDescriptor] | None,
+    session_is_new: bool,
+    execution_role: ExecutionRole = "primary",
+    session_state: HarnessSessionState | None = None,
+) -> tuple[_CopilotPreparedInputs, _runner._DelegateErrorTracker | None]:
+    configuration = agent_configuration or AgentConfiguration()
+    _copilot_preview.validate_configuration(configuration)
+    if workflow_enabled and workflow_policy is None:
+        raise UnsupportedCapabilityError(
+            "Copilot workflow management requires a bound per-agent workflow policy."
+        )
+    if workflow_policy is not None and not workflow_enabled:
+        raise UnsupportedCapabilityError(
+            "Copilot workflow policy cannot be supplied without enabling workflows."
+        )
+    resolved_model = model or harness.default_model
+    if not resolved_model:
+        raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
+
+    base_request = _runner._request(
+        harness,
+        prompt,
+        instructions=instructions,
+        session_id=session_id,
+        session_is_new=session_is_new,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        skills=skills,
+        skill_catalog=skill_catalog,
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=system_addendum,
+        model=resolved_model,
+        agent_name=agent_name,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_configuration=configuration,
+        deadline=deadline,
+        session_state=session_state,
+    )
+    normalized_sandbox_tools = tuple(normalize_tool(tool) for tool in sandbox_tools or ())
+    normalized_web_request_tools = tuple(
+        normalize_tool(tool) for tool in web_request_tools or ()
+    )
+
+    delegate_tools: list[ToolDescriptor] = []
+    delegate_tracker = None
+    if subagents:
+        delegate_tools, delegate_tracker = await _runner.build_subagent_tools(
+            subagents,
+            catalog,
+            coordinator_deadline=deadline,
+            harness=harness,
+        )
+
+    workflow_tools: list[ToolDescriptor] = []
+    if workflow_enabled:
+        from ...workflows.tools import build_workflow_tools
+
+        workflow_tools = build_workflow_tools(
+            session_id=base_request.session_id,
+            workflow_agent_slug=workflow_agent_slug or agent_name or "main",
+            agent_name=agent_name or "main",
+            durable_client=workflow_durable_client,
+            policy=workflow_policy,
+        )
+
+    prepared_tools = _copilot_preview.prepare_tools(
+        (
+            *base_request.tools,
+            *normalized_sandbox_tools,
+            *normalized_web_request_tools,
+            *workflow_tools,
+            *delegate_tools,
+        )
+    )
+    user_end = len(base_request.tools)
+    sandbox_end = user_end + len(normalized_sandbox_tools)
+    web_request_end = sandbox_end + len(normalized_web_request_tools)
+    workflow_end = web_request_end + len(workflow_tools)
+    return (
+        _CopilotPreparedInputs(
+            request=replace(base_request, tools=(), execution_role=execution_role),
+            user_tools=prepared_tools[:user_end],
+            sandbox_tools=prepared_tools[user_end:sandbox_end],
+            web_request_tools=prepared_tools[sandbox_end:web_request_end],
+            workflow_tools=prepared_tools[web_request_end:workflow_end],
+            delegate_tools=prepared_tools[workflow_end:],
+        ),
+        delegate_tracker,
+    )
+
+
+def _build_direct_request(
+    prepared: _CopilotPreparedInputs,
+    *,
+    event_sink: Callable[[StreamEvent], None] | None = None,
+) -> HarnessRequest:
+    """Attach prepared declarations to the existing direct request."""
+    return replace(prepared.request, tools=prepared.direct_tools, event_sink=event_sink)
 
 
 class _StreamEventQueue:
@@ -157,71 +301,33 @@ class CopilotRunner:
 
         del timeout
 
-        configuration = agent_configuration or AgentConfiguration()
-        _copilot_preview.validate_configuration(configuration)
-        if workflow_enabled and workflow_policy is None:
-            raise UnsupportedCapabilityError(
-                "Copilot workflow management requires a bound per-agent workflow policy."
-            )
-        if workflow_policy is not None and not workflow_enabled:
-            raise UnsupportedCapabilityError(
-                "Copilot workflow policy cannot be supplied without enabling workflows."
-            )
-        resolved_model = model or self.default_model
-        if not resolved_model:
-            raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-
-        request = _runner._request(
+        prepared, delegate_tracker = await _prepare_agent_inputs(
             self._harness,
             prompt,
             instructions=instructions,
-            session_id=session_id,
-            session_is_new=session_is_new,
+            deadline=deadline,
             tools=tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
-            skills=skills,
-            skill_catalog=skill_catalog,
+            model=model or self.default_model,
+            session_id=session_id,
+            session_is_new=session_is_new,
             sandbox_tools=sandbox_tools,
             web_request_tools=web_request_tools,
             system_addendum=system_addendum,
-            model=resolved_model,
-            agent_name=agent_name,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
             workflow_agent_slug=workflow_agent_slug,
-            agent_configuration=configuration,
-            deadline=deadline,
+            agent_name=agent_name,
+            agent_configuration=agent_configuration,
+            subagents=subagents,
+            catalog=catalog,
+            workflow_policy=workflow_policy,
+            skills=skills,
+            skill_catalog=skill_catalog,
             session_state=session_state,
         )
-
-        delegate_tools: list[ToolDescriptor] = []
-        delegate_tracker = None
-        if subagents:
-            delegate_tools, delegate_tracker = await _runner.build_subagent_tools(
-                subagents,
-                catalog,
-                coordinator_deadline=deadline,
-                harness=self._harness,
-            )
-
-        workflow_tools: list[ToolDescriptor] = []
-        if workflow_enabled:
-            from ...workflows.tools import build_workflow_tools
-
-            workflow_tools = build_workflow_tools(
-                session_id=request.session_id,
-                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
-                agent_name=agent_name or "main",
-                durable_client=workflow_durable_client,
-                policy=workflow_policy,
-            )
-
-        request = replace(
-            request,
-            tools=_copilot_preview.prepare_tools(
-                [*request.tools, *workflow_tools, *delegate_tools]
-            ),
-            event_sink=event_sink,
-        )
+        request = _build_direct_request(prepared, event_sink=event_sink)
         result = await _copilot_execution.run(self._harness, request)
         result.delegate_error_count = delegate_tracker.count if delegate_tracker else 0
         return result
@@ -392,28 +498,36 @@ class CopilotRunner:
             },
         ) as span:
             try:
+                prepared, _ = await _prepare_agent_inputs(
+                    self._harness,
+                    task,
+                    instructions=resolved.instructions,
+                    deadline=asyncio.get_running_loop().time() + timeout,
+                    tools=list(capabilities.filtered_user_tools or []),
+                    mcp_tools=list(capabilities.filtered_mcp_tools or []),
+                    skill_paths=capabilities.enabled_skill_paths,
+                    model=resolved_model,
+                    session_id=session_id,
+                    sandbox_tools=None,
+                    system_addendum=None,
+                    workflow_enabled=False,
+                    workflow_durable_client=None,
+                    workflow_agent_slug=None,
+                    agent_name=resolved.slug,
+                    web_request_tools=capabilities.web_request_tools,
+                    agent_configuration=resolved.agent_configuration,
+                    subagents=None,
+                    catalog=None,
+                    workflow_policy=None,
+                    skills=capabilities.skills,
+                    skill_catalog=capabilities.skill_catalog,
+                    session_is_new=True,
+                    execution_role=execution_role,
+                    session_state=HarnessSessionState(),
+                )
                 result = await _copilot_execution.run(
                     self._harness,
-                    HarnessRequest(
-                        prompt=task,
-                        instructions=resolved.instructions,
-                        agent_slug=resolved.slug,
-                        session_id=session_id,
-                        new_session=True,
-                        model=resolved_model,
-                        tools=_copilot_preview.prepare_tools(
-                            [
-                                *list(capabilities.filtered_user_tools or []),
-                                *list(capabilities.web_request_tools or []),
-                            ]
-                        ),
-                        max_output_tokens=resolved.agent_configuration.max_output_tokens,
-                        deadline=asyncio.get_running_loop().time() + timeout,
-                        mcp_servers=tuple(capabilities.filtered_mcp_tools or ()),
-                        skills=tuple(capabilities.skills or ()),
-                        skill_catalog=tuple(capabilities.skill_catalog or ()),
-                        execution_role=execution_role,
-                    ),
+                    _build_direct_request(prepared),
                 )
             except asyncio.CancelledError:
                 span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.CANCELLED)
