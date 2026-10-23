@@ -415,8 +415,8 @@ class ExternalWorkRequested(_CheckpointOutcomeBase):
     continuation: ContinuationRef
 
     @model_validator(mode="after")
-    def validate_request_identity(self) -> ExternalWorkRequested:
-        """Keep paused work and resume state bound to the same active turn."""
+    def validate_requests(self) -> ExternalWorkRequested:
+        """Keep paused work dispatchable and bound to the same active turn."""
         _validate_continuation(
             self,
             self.continuation,
@@ -426,6 +426,7 @@ class ExternalWorkRequested(_CheckpointOutcomeBase):
         )
         for request in self.requests:
             _validate_external_work_identity(self, request)
+            encode_external_work_request(request)
         return self
 
 

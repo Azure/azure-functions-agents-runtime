@@ -4,6 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from azure_functions_agents.harness._checkpoint import (
+    MAX_CHECKPOINT_OUTCOME_BYTES,
+    MAX_EXTERNAL_WORK_ENVELOPE_BYTES,
     MAX_REFERENCE_ENVELOPE_BYTES,
     CheckpointContractError,
     CheckpointFailure,
@@ -251,6 +253,36 @@ def test_checkpoint_encoder_revalidates_copied_models() -> None:
 
     with pytest.raises(CheckpointContractError, match="External work result is invalid"):
         encode_external_work_result(result)
+
+
+def test_checkpoint_outcome_encoder_rejects_oversized_nested_request() -> None:
+    oversized_request = _external_request().model_copy(
+        update={"policy_snapshot": {"value": "x" * MAX_EXTERNAL_WORK_ENVELOPE_BYTES}}
+    )
+    outcome = ExternalWorkRequested(
+        **_outcome_fields(),
+        requests=(_external_request(),),
+        continuation=_continuation(ContinuationRole.MID_TURN),
+    ).model_copy(update={"requests": (oversized_request,)})
+
+    with pytest.raises(CheckpointContractError, match="Checkpoint outcome is invalid"):
+        encode_checkpoint_outcome(outcome)
+
+
+def test_checkpoint_outcome_decoder_rejects_oversized_nested_request() -> None:
+    oversized_request = _external_request().model_copy(
+        update={"policy_snapshot": {"value": "x" * MAX_EXTERNAL_WORK_ENVELOPE_BYTES}}
+    )
+    outcome = ExternalWorkRequested(
+        **_outcome_fields(),
+        requests=(_external_request(),),
+        continuation=_continuation(ContinuationRole.MID_TURN),
+    ).model_copy(update={"requests": (oversized_request,)})
+    payload = outcome.model_dump_json().encode()
+
+    assert MAX_EXTERNAL_WORK_ENVELOPE_BYTES < len(payload) < MAX_CHECKPOINT_OUTCOME_BYTES
+    with pytest.raises(CheckpointContractError, match="Checkpoint outcome is invalid"):
+        decode_checkpoint_outcome(payload)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
