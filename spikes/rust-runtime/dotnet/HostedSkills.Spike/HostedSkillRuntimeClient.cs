@@ -172,15 +172,15 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         try
         {
             var initResult = await client.SendRequestAsync<InitializeResult>(
-            "initialize",
-            new
-            {
-                app_root = appRoot,
-                env = envOverrides ?? new Dictionary<string, string>(),
-                tools = toolRegistry.Descriptors,
-                mock_llm = mockLlm
-            },
-            cancellationToken).ConfigureAwait(false);
+                "initialize",
+                new
+                {
+                    app_root = appRoot,
+                    env = envOverrides ?? new Dictionary<string, string>(),
+                    tools = toolRegistry.Descriptors,
+                    mock_llm = mockLlm
+                },
+                cancellationToken).ConfigureAwait(false);
 
             return (client, initResult);
         }
@@ -208,15 +208,23 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         {
             if (onStreamEvent is not null) _streamListeners[key] = onStreamEvent;
             return await SendRequestAsync<AgentRunResult>(
-            "agent.run",
-            new
-            {
-                agent_name = agentName,
-                prompt,
-                session_id = sessionId,
-                stream
-            },
+                "agent.run",
+                new
+                {
+                    agent_name = agentName,
+                    prompt,
+                    session_id = sessionId,
+                    stream
+                },
                 cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The spike protocol has no cancellation RPC. Stop this child rather than
+            // allowing a timed-out turn to overlap the next writer to SessionFs.
+            FailPending(new IOException("Rust turn was canceled; restart the worker before running more turns."));
+            StopChild();
+            throw;
         }
         finally
         {
@@ -243,6 +251,8 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         object parameters,
         CancellationToken cancellationToken)
     {
+        if (Volatile.Read(ref _disposed) != 0 && method != "shutdown")
+            throw new ObjectDisposedException(nameof(HostedSkillRuntimeClient));
         var id = Interlocked.Increment(ref _nextId);
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
@@ -253,15 +263,20 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         {
             if (Volatile.Read(ref _terminalError) is { } error) throw error;
             var frame = new
-        {
-            jsonrpc = "2.0",
-            id,
-            method,
-            @params = parameters
-        };
+            {
+                jsonrpc = "2.0",
+                id,
+                method,
+                @params = parameters
+            };
             await WriteFrameAsync(frame, deadline.Token).ConfigureAwait(false);
             var resultElem = await tcs.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
             return JsonSerializer.Deserialize<TResult>(resultElem.GetRawText())!;
+        }
+        catch (IOException ex)
+        {
+            FailPending(ex);
+            throw;
         }
         finally
         {
@@ -316,7 +331,9 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
                                 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                                 await WriteFrameAsync(new
                                 {
-                                    jsonrpc = "2.0", id = callId, result = toolResult
+                                    jsonrpc = "2.0",
+                                    id = callId,
+                                    result = toolResult
                                 }, deadline.Token).ConfigureAwait(false);
                             }
                             catch (Exception ex)
@@ -352,6 +369,10 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
                         {
                             tcs.TrySetResult(resProp.Clone());
                         }
+                        else
+                        {
+                            tcs.TrySetException(new InvalidDataException("RPC response has neither result nor error."));
+                        }
                     }
                 }
             }
@@ -371,6 +392,18 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         Interlocked.CompareExchange(ref _terminalError, error, null);
         foreach (var (id, pending) in _pending)
             if (_pending.TryRemove(id, out _)) pending.TrySetException(error);
+    }
+
+    private void StopChild()
+    {
+        try
+        {
+            if (!_process.HasExited) _process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException)
+        {
+            // Another shutdown path already disposed or reaped this child.
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -393,10 +426,7 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         }
         finally
         {
-            if (!_process.HasExited)
-            {
-                _process.Kill(entireProcessTree: true);
-            }
+            StopChild();
             FailPending(new ObjectDisposedException(nameof(HostedSkillRuntimeClient)));
             try
             {

@@ -68,7 +68,8 @@ public sealed class AgentToolRegistry
                 var errJson = JsonSerializer.Serialize(new { error = ex.Message });
                 return new ToolCallResult(errJson, IsError: true);
             }
-        });
+        }
+        );
     }
 
     /// <summary>

@@ -3,7 +3,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
 var host = new HostBuilder()
-    .ConfigureFunctionsWorkerDefaults()
     .ConfigureServices(services =>
     {
         services.AddSingleton<OrderTools>();
@@ -31,6 +30,7 @@ var host = new HostBuilder()
         services.AddSingleton(provider =>
             provider.GetRequiredService<RuntimeService>().Client.GetHostedSkill("order_assistant"));
     })
+    .ConfigureFunctionsWorkerDefaults()
     .Build();
 
 await host.RunAsync();

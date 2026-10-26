@@ -61,6 +61,20 @@ def stop(process):
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+    deadline = time.monotonic() + 2
+    while children and time.monotonic() < deadline:
+        for pid in children.copy():
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                children.remove(pid)
+        if children:
+            time.sleep(0.1)
+    for pid in children:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def post(base, route, payload, evidence, name, status=200):
@@ -119,7 +133,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--func", default=str(ROOT / ".tools" / "core-tools" / "func"))
     parser.add_argument("--storage", choices=("local", "azurite"), default="local")
-    parser.add_argument("--azurite", default=shutil.which("azurite-blob"))
+    parser.add_argument("--azurite", default=shutil.which("azurite-blob", mode=os.F_OK))
     parser.add_argument("--evidence-dir", type=Path)
     args = parser.parse_args()
     evidence = (args.evidence_dir or ROOT / ".tools" / "smoke" / uuid.uuid4().hex).resolve()
@@ -193,7 +207,8 @@ def main():
             log = logfile.open("w")
             logs.append(log)
             process = subprocess.Popen(
-                [str(Path(args.func).resolve()), "host", "start", "--no-build", "--port", str(port)],
+                [str(Path(shutil.which(args.func) or args.func).resolve()),
+                 "host", "start", "--no-build", "--port", str(port)],
                 cwd=APP / "bin" / "Debug" / "net10.0",
                 env=env, stdout=log, stderr=subprocess.STDOUT,
             )

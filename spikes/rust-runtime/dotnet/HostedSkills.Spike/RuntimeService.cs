@@ -29,6 +29,8 @@ public sealed class RuntimeService(
         logger.LogInformation("Rust stdio ready: MOCK inference, storage={Storage}, agents={Agents}, skills={Skills}",
             init.StorageMode, string.Join(",", init.Agents.Select(a => a.Slug)),
             string.Join(",", init.Skills.Select(s => s.Name)));
+        // Core Tools may filter ILogger messages emitted before an invocation.
+        Console.WriteLine($"Rust stdio ready: MOCK inference, storage={init.StorageMode}");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken) => await DisposeAsync();

@@ -77,6 +77,10 @@ indexed functions, initialized worker, Rust initialization and Running host**,
 and stops only its own processes with bounded waits. It retains evidence and
 storage for inspection under ignored `.tools/smoke/<run-id>/` by default.
 
+Local mode leaves `AzureWebJobsStorage` empty: these HTTP-only functions work
+without it, but Core Tools can log a storage-health warning. Azurite mode supplies
+real emulator storage to both the host and Rust; it does not use that fallback.
+
 ## Repeatable real-host verification
 
 From `spikes/rust-runtime`:
@@ -117,7 +121,18 @@ HTTP emulator tests, which are **not** the same as the real Azurite smoke):
 ```bash
 export TMPDIR="$PWD/.tools/scratch" TMP="$PWD/.tools/scratch" TEMP="$PWD/.tools/scratch"
 cargo test
+dotnet run --project dotnet/HostedSkills.Spike.Checks
 ```
+
+The dependency-free C# checks use a deliberately faulty Python stdio peer
+(**not** Rust or an LLM) to check initialize/run EOF, stderr backpressure,
+stream listener scoping/cleanup, cancellation, abandoned streams, bounded
+idempotent shutdown, and required plain-tool arguments. The executable fixture
+needs its checked-in executable bit on Linux.
+
+Verified locally with Core Tools 4.16.0, .NET SDK 10.0.402 and Azurite 3.37.0:
+both real-host storage modes pass, including full-process restart persistence;
+all 11 Rust tests and all 8 C# lifecycle/tool checks pass.
 
 ## Manual host and HTTP requests
 
@@ -171,12 +186,16 @@ test endpoints only**. Do not publish this sample unchanged to the internet.
 - `dotnet/HostedSkills.Spike`: genuine Functions SDK metadata and HTTP bindings;
   sample-only DI facade and explicit shared-handler adapter.
 - `RuntimeService`: owns a singleton Rust subprocess per worker; initializes
-  at startup and shuts it down through `IHostedService` / async DI disposal.
+  before the worker hosted service starts, and shuts it down through
+  `IHostedService` / async DI disposal.
 - `HostedSkillRuntimeClient`: drains stderr, correlates requests, fails pending
   calls on EOF, removes listeners/requests on completion or cancellation,
   serializes agent turns, and bounds RPC/shutdown waits. No automatic restart
-  or replay after a crash; restart the worker. Stream notifications are scoped
-  by agent/session; this host exposes only nonstreaming HTTP responses.
+  or replay after a crash; restart the worker. Since there is no cancellation
+  RPC, canceling/abandoning an active turn **terminates that Rust child and
+  fails closed**; restart the worker before more turns (committed storage may
+  survive, interrupted-turn completion is not guaranteed). Stream notifications
+  are scoped by agent/session; this host exposes only nonstreaming HTTP responses.
 
 There is no NuGet/native-binary deployment packaging, production custom input
 binding, SDK/CLI bundling, arbitrary trigger synthesis, distributed session
