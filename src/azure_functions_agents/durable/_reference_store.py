@@ -19,6 +19,7 @@ from azure.core.exceptions import (
 )
 
 from ..harness._checkpoint import (
+    CHECKPOINT_SCHEMA_VERSION,
     MAX_AGENT_SLUG_LENGTH,
     MAX_CONTENT_TYPE_LENGTH,
     MAX_IDENTITY_VALUE_LENGTH,
@@ -42,11 +43,12 @@ from ..harness._session_storage import (
 )
 
 if TYPE_CHECKING:
-    from azure.storage.blob import BlobProperties
+    from azure.storage.blob import BlobProperties, ContainerProperties
     from azure.storage.blob.aio import BlobClient
 
 # Dedicated namespace for runtime-owned Durable data and its storage format version.
-_REFERENCE_ROOT = "durable/v1"
+_REFERENCE_STORAGE_SCHEMA_VERSION = 1
+_REFERENCE_ROOT = f"durable/v{_REFERENCE_STORAGE_SCHEMA_VERSION}"
 
 
 class _ReferenceKind(StrEnum):
@@ -85,7 +87,7 @@ _REFERENCE_SCOPE_FACTORY_TOKEN = object()
 
 @dataclass(frozen=True)
 class ReferenceScope:
-    """Identifies the one Durable turn authorized to use a stored reference."""
+    """Identifies the Durable turn namespace that owns a stored reference."""
 
     backend_namespace: str
     agent_slug: str
@@ -114,7 +116,7 @@ class ReferenceScope:
         run_id: str,
         turn_generation: int,
     ) -> ReferenceScope:
-        """Create a validated authorization boundary for one Durable turn."""
+        """Create a validated storage namespace for one Durable turn."""
         owner_digest = _bounded_value(
             owner_scope_digest,
             maximum=MAX_OWNER_SCOPE_DIGEST_LENGTH,
@@ -229,12 +231,12 @@ class DurableReferenceStore(Protocol):
         """Store harness resume state without placing SDK data in Durable state."""
         ...
 
-    async def read_continuation(
-        self,
-        scope: ReferenceScope,
-        reference: ContinuationRef,
-    ) -> bytes:
-        """Load authorized harness state so an interrupted agent turn can continue."""
+    async def read_mid_turn_continuation(self, reference: ContinuationRef) -> bytes:
+        """Load state that resumes the interrupted turn that created it."""
+        ...
+
+    async def read_terminal_session_seed(self, reference: ContinuationRef) -> bytes:
+        """Load prior-turn state that seeds the next admitted turn."""
         ...
 
     async def delete(
@@ -307,8 +309,20 @@ class BlobDurableReferenceStore:
 
     async def initialize(self) -> None:
         """Ensure the private Blob container is ready for Durable references."""
-        with suppress(ResourceExistsError):
-            await self._container.create_container()
+        try:
+            with suppress(ResourceExistsError):
+                await self._container.create_container()
+            properties: ContainerProperties = (
+                await self._container.get_container_properties()
+            )
+        except AzureError:
+            raise ReferenceStoreError(
+                "Durable reference storage could not be initialized."
+            ) from None
+        if properties.public_access is not None:
+            raise ReferenceStoreError(
+                "Durable reference storage requires a private Blob container."
+            )
 
     def _validate_scope(self, scope: ReferenceScope) -> None:
         """Prevent references from crossing Durable storage backends."""
@@ -321,11 +335,11 @@ class BlobDurableReferenceStore:
         return f"{_REFERENCE_ROOT}/{scope.digest()}/{kind}/"
 
     def _mint_key(self, scope: ReferenceScope, kind: _ReferenceKind) -> str:
-        """Create a unique immutable key inside the authorized storage boundary."""
+        """Create a unique immutable key inside the owning storage namespace."""
         return self._prefix(scope, kind) + uuid.uuid4().hex
 
     def _blob(self, key: str) -> BlobClient:
-        """Return the Blob client for one previously authorized opaque key."""
+        """Return the Blob client for one opaque key after caller authorization."""
         return self._owned.service.get_blob_client(
             container=self._container_name,
             blob=key,
@@ -337,7 +351,7 @@ class BlobDurableReferenceStore:
         kind: _ReferenceKind,
         key: str,
     ) -> None:
-        """Reject a key that falls outside the caller's authorized turn."""
+        """Reject a key outside the caller's owning turn namespace."""
         if not key.startswith(self._prefix(scope, kind)):
             raise ReferenceIntegrityError("Reference is outside the authorized scope.")
 
@@ -392,7 +406,7 @@ class BlobDurableReferenceStore:
         created_at: datetime,
         expires_at: datetime,
     ) -> bytes:
-        """Load bytes only after authorization, lifetime, and integrity checks."""
+        """Load bytes after namespace, lifetime, metadata, and digest checks."""
         self._require_key(scope, kind, key)
         if expires_at <= datetime.now(UTC):
             raise ReferenceExpiredError("Durable reference has expired.")
@@ -466,6 +480,7 @@ class BlobDurableReferenceStore:
             expires_at=expires_at,
         )
         return ContentRef(
+            schema_version=CHECKPOINT_SCHEMA_VERSION,
             storage_kind=StorageKind.BLOB,
             opaque_content_key=stored.key,
             content_digest=stored.integrity.digest,
@@ -539,6 +554,7 @@ class BlobDurableReferenceStore:
             expires_at=expires_at,
         )
         return ContinuationRef(
+            schema_version=CHECKPOINT_SCHEMA_VERSION,
             harness_kind=validated_harness_kind,
             connector_version=normalized_connector_version,
             connector_profile_id=normalized_profile_id,
@@ -559,15 +575,32 @@ class BlobDurableReferenceStore:
             integrity_metadata=stored.integrity,
         )
 
-    async def read_continuation(
+    async def read_mid_turn_continuation(self, reference: ContinuationRef) -> bytes:
+        """Load state that resumes the interrupted turn that created it."""
+        return await self._read_continuation(
+            reference,
+            expected_role=ContinuationRole.MID_TURN,
+        )
+
+    async def read_terminal_session_seed(self, reference: ContinuationRef) -> bytes:
+        """Load prior-turn state that seeds the next admitted turn."""
+        return await self._read_continuation(
+            reference,
+            expected_role=ContinuationRole.TERMINAL_SEED,
+        )
+
+    async def _read_continuation(
         self,
-        scope: ReferenceScope,
         reference: ContinuationRef,
+        *,
+        expected_role: ContinuationRole,
     ) -> bytes:
-        """Load authorized harness state so an interrupted agent turn can continue."""
         if reference.storage_kind is not StorageKind.BLOB:
             raise ReferenceIntegrityError("Continuation uses an unsupported store.")
-        _validate_continuation_scope(scope, reference)
+        if reference.continuation_role is not expected_role:
+            raise ReferenceIntegrityError("Continuation role does not match the read operation.")
+        scope = _reference_scope(reference)
+        self._validate_scope(scope)
         return await self._read(
             scope,
             _ReferenceKind.CONTINUATION,
@@ -612,7 +645,7 @@ def _blob_metadata(
     expires_at: datetime,
 ) -> _BlobMetadata:
     return _BlobMetadata(
-        schema_version="1",
+        schema_version=str(_REFERENCE_STORAGE_SCHEMA_VERSION),
         reference_kind=kind.value,
         scope_digest=scope.digest(),
         sha256=integrity.digest,
@@ -650,7 +683,20 @@ def _validate_continuation_scope(
         scope.backend_namespace != reference.backend_namespace
         or scope.turn_identity_key() != reference.turn_identity_key()
     ):
-        raise ReferenceIntegrityError("Continuation does not match the authorized scope.")
+        raise ReferenceIntegrityError("Continuation does not match its storage scope.")
+
+
+def _reference_scope(reference: ContinuationRef) -> ReferenceScope:
+    return ReferenceScope.create(
+        backend_namespace=reference.backend_namespace,
+        agent_slug=reference.agent_slug,
+        owner_scope_digest=reference.owner_scope_digest,
+        entry_id=reference.entry_id,
+        session_id=reference.session_id,
+        session_incarnation_id=reference.session_incarnation_id,
+        run_id=reference.run_id,
+        turn_generation=reference.turn_generation,
+    )
 
 
 async def open_blob_reference_store(

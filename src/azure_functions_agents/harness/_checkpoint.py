@@ -27,13 +27,16 @@ from pydantic import (
 from ._harness_binding import HarnessKind
 
 # Version written into every persisted checkpoint contract for compatibility checks.
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION: Literal[1] = 1
 
 # Maximum size of a pointer to externally stored content or continuation state.
 MAX_REFERENCE_ENVELOPE_BYTES = 16 * 1024
 
 # Maximum size of one request or result exchanged with an external tool executor.
 MAX_EXTERNAL_WORK_ENVELOPE_BYTES = 64 * 1024
+
+# Maximum metadata size for one ordered batch of external-work results.
+MAX_EXTERNAL_WORK_RESULT_BATCH_BYTES = 128 * 1024
 
 # Maximum control-state payload returned when a harness pauses or completes.
 MAX_CHECKPOINT_OUTCOME_BYTES = 128 * 1024
@@ -70,6 +73,7 @@ type _VersionValue = Annotated[
     str,
     Field(min_length=1, max_length=MAX_VERSION_VALUE_LENGTH),
 ]
+type _CheckpointSchemaVersion = Literal[1]
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,48 @@ class ConnectorIdentityKey:
     connector_profile_id: str
     backend_namespace: str
     session: SessionIdentityKey
+
+
+@dataclass(frozen=True)
+class ExternalWorkOperationIdentity:
+    """Track one requested tool action, including its order and retry-safe key.
+
+    Answers: "Is this the exact operation we intended to run?"
+    """
+
+    sequence_index: int
+    operation_id: str
+    tool_call_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
+class ExternalWorkResultIdentity:
+    """Label one tool result so it can be matched to the requested operation.
+
+    Answers: "Does this result belong to that operation?"
+    """
+
+    sequence_index: int
+    operation_id: str
+    tool_call_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
+class ExternalWorkCommandIdentity:
+    """Describe the approved tool implementation, schema, policy, and environment.
+
+    Answers: "Can the currently available tool safely execute the approved command?"
+    """
+
+    adapter_kind: str
+    adapter_version: str
+    tool_name: str
+    canonical_schema_digest: str
+    policy_digest: str
+    execution_placement: ExternalWorkPlacement
+    implementation_compatibility_version: str
 
 
 class CheckpointContractError(ValueError):
@@ -143,7 +189,19 @@ class ToolEvidenceStatus(StrEnum):
     REQUESTED = "requested"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     OUTCOME_UNKNOWN = "outcome_unknown"
+
+
+class CheckpointFailureCategory(StrEnum):
+    """Classifies stable failure domains used by Durable coordination."""
+
+    RETRYABLE_TRANSPORT = "retryable_transport"
+    TERMINAL_CONNECTOR = "terminal_connector"
+    CONTINUATION = "continuation"
+    CAPACITY = "capacity"
+    CANCELLATION = "cancellation"
+    EXTERNAL_WORK = "external_work"
 
 
 class _CheckpointModel(BaseModel):
@@ -223,7 +281,7 @@ class _ConnectorIdentity(_TurnIdentity):
 class ContentRef(_CheckpointModel):
     """Points to stored content without placing the content in Durable state."""
 
-    schema_version: Literal[1] = 1
+    schema_version: _CheckpointSchemaVersion
     storage_kind: StorageKind
     opaque_content_key: str = Field(min_length=1, max_length=2048)
     content_digest: str = Field(pattern=_DIGEST_PATTERN)
@@ -251,7 +309,7 @@ class ContentRef(_CheckpointModel):
 class ContinuationRef(_ConnectorIdentity):
     """Points to harness-native state needed to continue agent execution."""
 
-    schema_version: Literal[1] = 1
+    schema_version: _CheckpointSchemaVersion
     storage_kind: StorageKind
     opaque_state_key: str = Field(min_length=1, max_length=2048)
     state_format_version: _VersionValue
@@ -279,21 +337,70 @@ class CheckpointUsage(_CheckpointModel):
     cached_input_tokens: int = Field(default=0, ge=0)
 
 
-class CheckpointToolEvidence(_CheckpointModel):
-    """Records the observable result of one tool call without embedding its payload."""
+class _CheckpointToolEvidenceBase(_CheckpointModel):
+    """Names one tool call represented in checkpoint evidence."""
 
     tool_call_id: _IdentityValue
     tool_name: _IdentityValue
-    status: ToolEvidenceStatus
-    result_ref: ContentRef | None = None
+
+
+class RequestedToolEvidence(_CheckpointToolEvidenceBase):
+    """Records a tool call that has not produced a terminal result."""
+
+    status: Literal[ToolEvidenceStatus.REQUESTED] = ToolEvidenceStatus.REQUESTED
+
+
+class SucceededToolEvidence(_CheckpointToolEvidenceBase):
+    """Records a successful tool call and its referenced result."""
+
+    status: Literal[ToolEvidenceStatus.SUCCEEDED] = ToolEvidenceStatus.SUCCEEDED
+    result_ref: ContentRef
+
+
+class FailedToolEvidence(_CheckpointToolEvidenceBase):
+    """Records a failed tool call and its referenced structured failure."""
+
+    status: Literal[ToolEvidenceStatus.FAILED] = ToolEvidenceStatus.FAILED
+    result_ref: ContentRef
+
+
+class CancelledToolEvidence(_CheckpointToolEvidenceBase):
+    """Records a confirmed cancellation and its structured terminal receipt."""
+
+    status: Literal[ToolEvidenceStatus.CANCELLED] = ToolEvidenceStatus.CANCELLED
+    result_ref: ContentRef
+
+
+class UnknownToolEvidence(_CheckpointToolEvidenceBase):
+    """Records a tool call whose terminal effect could not be established."""
+
+    status: Literal[ToolEvidenceStatus.OUTCOME_UNKNOWN] = (
+        ToolEvidenceStatus.OUTCOME_UNKNOWN
+    )
+
+
+type CheckpointToolEvidence = Annotated[
+    RequestedToolEvidence
+    | SucceededToolEvidence
+    | FailedToolEvidence
+    | CancelledToolEvidence
+    | UnknownToolEvidence,
+    Field(discriminator="status"),
+]
 
 
 class CheckpointFailure(_CheckpointModel):
     """Provides a stable, safe explanation of why checkpoint execution failed."""
 
-    category: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_]*$")
+    category: CheckpointFailureCategory
     code: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_]*$")
     message: str = Field(min_length=1, max_length=1024)
+
+
+class RetryableCheckpointFailure(CheckpointFailure):
+    """Names a transport failure proven safe for native Durable retry."""
+
+    category: Literal[CheckpointFailureCategory.RETRYABLE_TRANSPORT]
 
 
 class RetryGuidance(_CheckpointModel):
@@ -306,7 +413,7 @@ class RetryGuidance(_CheckpointModel):
 class CheckpointRequest(_ConnectorIdentity):
     """Describes one authorized agent turn submitted to a checkpoint connector."""
 
-    schema_version: Literal[1] = 1
+    schema_version: _CheckpointSchemaVersion
     deadline: AwareDatetime
     prompt_ref: ContentRef
     session_seed: ContinuationRef | None = None
@@ -317,20 +424,15 @@ class CheckpointRequest(_ConnectorIdentity):
         seed = self.session_seed
         if seed is None:
             return self
-        _validate_continuation(
-            self,
-            seed,
-            expected_role=ContinuationRole.TERMINAL_SEED,
-            active_turn=False,
-            subject="checkpoint request session seed",
-        )
+        _validate_terminal_session_seed(self, seed)
         return self
 
 
 class ExternalWorkRequest(_TurnIdentity):
     """Describes tool work that Durable orchestration must execute outside the harness."""
 
-    schema_version: Literal[1] = 1
+    schema_version: _CheckpointSchemaVersion
+    sequence_index: int = Field(ge=0)
     operation_id: _IdentityValue
     tool_call_id: _IdentityValue
     tool_name: _IdentityValue
@@ -345,6 +447,29 @@ class ExternalWorkRequest(_TurnIdentity):
     policy_snapshot: FrozenJsonObject
     idempotency_key: str = Field(min_length=1, max_length=512)
     deadline: AwareDatetime
+
+    def operation_identity(self) -> ExternalWorkOperationIdentity:
+        """Return the ordered idempotent identity of this request."""
+        return ExternalWorkOperationIdentity(
+            sequence_index=self.sequence_index,
+            operation_id=self.operation_id,
+            tool_call_id=self.tool_call_id,
+            idempotency_key=self.idempotency_key,
+        )
+
+    def command_identity(self) -> ExternalWorkCommandIdentity:
+        """Return every field that gates command compatibility."""
+        return ExternalWorkCommandIdentity(
+            adapter_kind=self.adapter_kind,
+            adapter_version=self.adapter_version,
+            tool_name=self.tool_name,
+            canonical_schema_digest=self.canonical_schema_digest,
+            policy_digest=self.policy_digest,
+            execution_placement=self.execution_placement,
+            implementation_compatibility_version=(
+                self.implementation_compatibility_version
+            ),
+        )
 
     @model_validator(mode="after")
     def validate_workspace(self) -> ExternalWorkRequest:
@@ -371,12 +496,23 @@ class ExternalWorkRequest(_TurnIdentity):
 class ExternalWorkResult(_TurnIdentity):
     """Returns the referenced result of external work to the waiting harness."""
 
-    schema_version: Literal[1] = 1
+    schema_version: _CheckpointSchemaVersion
+    sequence_index: int = Field(ge=0)
     operation_id: _IdentityValue
     tool_call_id: _IdentityValue
+    idempotency_key: str = Field(min_length=1, max_length=512)
     status: ExternalWorkStatus
     result_ref: ContentRef
     diagnostics: Mapping[str, str] = Field(default_factory=dict)
+
+    def result_identity(self) -> ExternalWorkResultIdentity:
+        """Return the ordered operation identity represented by this result."""
+        return ExternalWorkResultIdentity(
+            sequence_index=self.sequence_index,
+            operation_id=self.operation_id,
+            tool_call_id=self.tool_call_id,
+            idempotency_key=self.idempotency_key,
+        )
 
     @model_validator(mode="after")
     def validate_diagnostics(self) -> ExternalWorkResult:
@@ -399,10 +535,113 @@ class ExternalWorkResult(_TurnIdentity):
         return dict(value)
 
 
+class ExternalWorkResultBatch(_CheckpointModel):
+    """Carries one complete result batch in original tool-call order."""
+
+    schema_version: _CheckpointSchemaVersion
+    results: tuple[ExternalWorkResult, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_order_and_identity(self) -> ExternalWorkResultBatch:
+        """Require one unique result at every original request position."""
+        operation_ids: set[str] = set()
+        tool_call_ids: set[str] = set()
+        idempotency_keys: set[str] = set()
+        turn_identity: TurnIdentityKey | None = None
+        for expected_index, result in enumerate(self.results):
+            if result.sequence_index != expected_index:
+                raise ValueError(
+                    "external work results must be in original tool-call order"
+                )
+            if (
+                result.operation_id in operation_ids
+                or result.tool_call_id in tool_call_ids
+                or result.idempotency_key in idempotency_keys
+            ):
+                raise ValueError("external work result identities must be unique")
+            operation_ids.add(result.operation_id)
+            tool_call_ids.add(result.tool_call_id)
+            idempotency_keys.add(result.idempotency_key)
+            if turn_identity is None:
+                turn_identity = result.turn_identity_key()
+            elif turn_identity != result.turn_identity_key():
+                raise ValueError("external work results must belong to one active turn")
+        return self
+
+
+class ExternalWorkPendingOperation(_TurnIdentity):
+    """Names one authoritative pending operation accepted by the Entity."""
+
+    sequence_index: int = Field(ge=0)
+    operation_id: _IdentityValue
+    tool_call_id: _IdentityValue
+    idempotency_key: str = Field(min_length=1, max_length=512)
+
+    def operation_identity(self) -> ExternalWorkOperationIdentity:
+        """Return the ordered idempotent identity of the pending operation."""
+        return ExternalWorkOperationIdentity(
+            sequence_index=self.sequence_index,
+            operation_id=self.operation_id,
+            tool_call_id=self.tool_call_id,
+            idempotency_key=self.idempotency_key,
+        )
+
+    def expected_result_identity(self) -> ExternalWorkResultIdentity:
+        """Return the exact result identity this pending operation accepts."""
+        return ExternalWorkResultIdentity(
+            sequence_index=self.sequence_index,
+            operation_id=self.operation_id,
+            tool_call_id=self.tool_call_id,
+            idempotency_key=self.idempotency_key,
+        )
+
+
+class ExternalWorkResumeRequest(_ConnectorIdentity):
+    """Binds one continuation to its exact pending operations and completed results."""
+
+    schema_version: _CheckpointSchemaVersion
+    continuation: ContinuationRef
+    pending_operations: tuple[ExternalWorkPendingOperation, ...] = Field(min_length=1)
+    results: ExternalWorkResultBatch
+
+    @model_validator(mode="after")
+    def validate_resume_binding(self) -> ExternalWorkResumeRequest:
+        """Require one active turn and an exact ordered operation/result match."""
+        _validate_continuation_role(
+            self.continuation,
+            expected_role=ContinuationRole.MID_TURN,
+            subject="external work resume",
+        )
+        if self.connector_identity_key() != self.continuation.connector_identity_key():
+            raise ValueError("continuation identity does not match resume identity")
+        turn_identity = self.turn_identity_key()
+        if turn_identity != self.continuation.turn_identity_key():
+            raise ValueError("continuation does not match the active turn")
+        if len(self.pending_operations) != len(self.results.results):
+            raise ValueError("external work resume requires one result per pending operation")
+        for expected_index, (pending, result) in enumerate(
+            zip(self.pending_operations, self.results.results, strict=True)
+        ):
+            if pending.sequence_index != expected_index:
+                raise ValueError(
+                    "pending external work must be in original tool-call order"
+                )
+            if (
+                pending.turn_identity_key() != turn_identity
+                or result.turn_identity_key() != turn_identity
+            ):
+                raise ValueError("external work resume values must belong to one active turn")
+            if pending.expected_result_identity() != result.result_identity():
+                raise ValueError(
+                    "external work result does not match the pending operation"
+                )
+        return self
+
+
 class _CheckpointOutcomeBase(_ConnectorIdentity):
     """Carries metadata shared by every way checkpoint execution can pause or finish."""
 
-    schema_version: Literal[1] = 1
+    schema_version: _CheckpointSchemaVersion
     deadline: AwareDatetime
     provider_id: _IdentityValue
     model_id: _IdentityValue
@@ -420,11 +659,10 @@ class TurnCompleted(_CheckpointOutcomeBase):
     @model_validator(mode="after")
     def validate_continuation(self) -> TurnCompleted:
         """Save only next-turn state owned by the completed active turn."""
-        _validate_continuation(
+        _validate_active_turn_continuation(
             self,
             self.continuation,
             expected_role=ContinuationRole.TERMINAL_SEED,
-            active_turn=True,
             subject="completed turn",
         )
         return self
@@ -440,16 +678,31 @@ class ExternalWorkRequested(_CheckpointOutcomeBase):
     @model_validator(mode="after")
     def validate_requests(self) -> ExternalWorkRequested:
         """Keep paused work dispatchable and bound to the same active turn."""
-        _validate_continuation(
+        _validate_active_turn_continuation(
             self,
             self.continuation,
             expected_role=ContinuationRole.MID_TURN,
-            active_turn=True,
             subject="external work",
         )
-        for request in self.requests:
+        operation_ids: set[str] = set()
+        tool_call_ids: set[str] = set()
+        idempotency_keys: set[str] = set()
+        for expected_index, request in enumerate(self.requests):
+            if request.sequence_index != expected_index:
+                raise ValueError(
+                    "external work requests must be in original tool-call order"
+                )
             _validate_external_work_identity(self, request)
             encode_external_work_request(request)
+            if (
+                request.operation_id in operation_ids
+                or request.tool_call_id in tool_call_ids
+                or request.idempotency_key in idempotency_keys
+            ):
+                raise ValueError("external work request identities must be unique")
+            operation_ids.add(request.operation_id)
+            tool_call_ids.add(request.tool_call_id)
+            idempotency_keys.add(request.idempotency_key)
         return self
 
 
@@ -465,11 +718,10 @@ class HumanInputRequested(_CheckpointOutcomeBase):
     @model_validator(mode="after")
     def validate_continuation(self) -> HumanInputRequested:
         """Keep the human-input pause bound to the same active turn."""
-        _validate_continuation(
+        _validate_active_turn_continuation(
             self,
             self.continuation,
             expected_role=ContinuationRole.MID_TURN,
-            active_turn=True,
             subject="human input",
         )
         return self
@@ -490,8 +742,21 @@ class RetryRequested(_CheckpointOutcomeBase):
     """Asks Durable orchestration to retry a temporary harness or provider failure."""
 
     kind: Literal["retry_requested"] = "retry_requested"
-    failure: CheckpointFailure
+    failure: RetryableCheckpointFailure
     guidance: RetryGuidance
+
+    @model_validator(mode="after")
+    def validate_retry_safety(self) -> RetryRequested:
+        """Reject retry requests when an external effect may still be pending."""
+        unsafe_statuses = {
+            ToolEvidenceStatus.REQUESTED,
+            ToolEvidenceStatus.OUTCOME_UNKNOWN,
+        }
+        if any(evidence.status in unsafe_statuses for evidence in self.tool_evidence):
+            raise ValueError(
+                "retry requests cannot contain pending or outcome-unknown tool evidence"
+            )
+        return self
 
 
 class TurnFailed(_CheckpointOutcomeBase):
@@ -523,10 +788,9 @@ class HarnessCheckpointConnector(Protocol):
 
     async def resume_from_checkpoint(
         self,
-        continuation: ContinuationRef,
-        results: tuple[ExternalWorkResult, ...],
+        request: ExternalWorkResumeRequest,
     ) -> CheckpointOutcome:
-        """Resume paused harness work with results supplied by Durable orchestration."""
+        """Resume only after verifying native pending calls match the request."""
         ...
 
 
@@ -572,12 +836,10 @@ def validate_reference_expiry(
         raise ValueError(f"{subject} expiry must follow creation")
 
 
-def _validate_continuation(
-    owner: CheckpointRequest | _CheckpointOutcomeBase,
+def _validate_continuation_role(
     continuation: ContinuationRef,
     *,
     expected_role: ContinuationRole,
-    active_turn: bool,
     subject: str,
 ) -> None:
     role_label = (
@@ -587,10 +849,43 @@ def _validate_continuation(
     )
     if continuation.continuation_role is not expected_role:
         raise ValueError(f"{subject} requires a {role_label} continuation")
+
+
+def _validate_connector_session_identity(
+    owner: CheckpointRequest | _CheckpointOutcomeBase,
+    continuation: ContinuationRef,
+) -> None:
     if owner.connector_identity_key() != continuation.connector_identity_key():
         raise ValueError("continuation identity does not match checkpoint identity")
-    if active_turn and owner.turn_identity_key() != continuation.turn_identity_key():
+
+
+def _validate_active_turn_continuation(
+    owner: _CheckpointOutcomeBase,
+    continuation: ContinuationRef,
+    *,
+    expected_role: ContinuationRole,
+    subject: str,
+) -> None:
+    _validate_continuation_role(
+        continuation,
+        expected_role=expected_role,
+        subject=subject,
+    )
+    _validate_connector_session_identity(owner, continuation)
+    if owner.turn_identity_key() != continuation.turn_identity_key():
         raise ValueError("continuation does not match the active turn")
+
+
+def _validate_terminal_session_seed(
+    request: CheckpointRequest,
+    continuation: ContinuationRef,
+) -> None:
+    _validate_continuation_role(
+        continuation,
+        expected_role=ContinuationRole.TERMINAL_SEED,
+        subject="checkpoint request session seed",
+    )
+    _validate_connector_session_identity(request, continuation)
 
 
 def _validate_external_work_identity(
@@ -618,6 +913,8 @@ _CONTENT_REF_ADAPTER = TypeAdapter(ContentRef)
 _CONTINUATION_REF_ADAPTER = TypeAdapter(ContinuationRef)
 _EXTERNAL_WORK_REQUEST_ADAPTER = TypeAdapter(ExternalWorkRequest)
 _EXTERNAL_WORK_RESULT_ADAPTER = TypeAdapter(ExternalWorkResult)
+_EXTERNAL_WORK_RESULT_BATCH_ADAPTER = TypeAdapter(ExternalWorkResultBatch)
+_EXTERNAL_WORK_RESUME_REQUEST_ADAPTER = TypeAdapter(ExternalWorkResumeRequest)
 _CHECKPOINT_OUTCOME_ADAPTER: TypeAdapter[CheckpointOutcome] = TypeAdapter(
     CheckpointOutcome
 )
@@ -715,6 +1012,40 @@ def decode_external_work_result(payload: bytes) -> ExternalWorkResult:
         payload,
         maximum=MAX_EXTERNAL_WORK_ENVELOPE_BYTES,
         name="External work result",
+    )
+
+
+def encode_external_work_result_batch(batch: ExternalWorkResultBatch) -> bytes:
+    return _encode_contract(
+        batch,
+        maximum=MAX_EXTERNAL_WORK_RESULT_BATCH_BYTES,
+        name="External work result batch",
+    )
+
+
+def decode_external_work_result_batch(payload: bytes) -> ExternalWorkResultBatch:
+    return _decode_contract(
+        _EXTERNAL_WORK_RESULT_BATCH_ADAPTER,
+        payload,
+        maximum=MAX_EXTERNAL_WORK_RESULT_BATCH_BYTES,
+        name="External work result batch",
+    )
+
+
+def encode_external_work_resume_request(request: ExternalWorkResumeRequest) -> bytes:
+    return _encode_contract(
+        request,
+        maximum=MAX_CHECKPOINT_OUTCOME_BYTES,
+        name="External work resume request",
+    )
+
+
+def decode_external_work_resume_request(payload: bytes) -> ExternalWorkResumeRequest:
+    return _decode_contract(
+        _EXTERNAL_WORK_RESUME_REQUEST_ADAPTER,
+        payload,
+        maximum=MAX_CHECKPOINT_OUTCOME_BYTES,
+        name="External work resume request",
     )
 
 

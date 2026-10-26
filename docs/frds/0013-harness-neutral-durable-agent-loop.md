@@ -240,8 +240,7 @@ class HarnessCheckpointConnector(Protocol):
 
     async def resume_from_checkpoint(
         self,
-        continuation: ContinuationRef,
-        results: tuple[ExternalWorkResult, ...],
+        request: ExternalWorkResumeRequest,
     ) -> CheckpointOutcome: ...
 ```
 
@@ -267,6 +266,23 @@ Every outcome includes:
 - non-secret model/provider identity needed for diagnosis;
 - bounded usage and tool-call evidence available at that boundary; and
 - sanitized failure or retry metadata when applicable.
+
+Tool evidence is a status-discriminated union. Requested and outcome-unknown
+evidence carries no result reference; succeeded, failed and confirmed-cancelled
+evidence requires a `ContentRef` for its structured terminal result or receipt.
+Failure categories use the closed stable vocabulary `retryable_transport`,
+`terminal_connector`, `continuation`, `capacity`, `cancellation` and
+`external_work`; connector-specific detail remains in the bounded failure code.
+`RetryRequested` accepts only `retryable_transport` failures and rejects
+requested or outcome-unknown tool evidence. A connector may request native
+retry only when the current attempt is proven not to have an uncertain effect.
+
+Every independently encoded or decoded wire envelope carries an explicit
+`schema_version`: content and continuation references, external-work requests,
+external-work results, result batches, resume requests and checkpoint outcomes.
+Decoders reject a missing version rather than assuming the current version.
+Nested identity, evidence and failure values are versioned by their containing
+envelope and do not carry redundant independent versions.
 
 Any prompt, question, answer, tool payload or terminal result associated with an
 outcome is represented by `ContentRef`, not embedded content.
@@ -315,6 +331,9 @@ integrity_metadata
 - Qualified Azure hosting profiles persist both MAF and Copilot native
   continuation in Azure Blob Storage under that dedicated Durable namespace.
   Worker-local ephemeral storage is never authoritative.
+- The runtime creates or opens only a private Blob container. Initialization
+  fails closed when an existing container permits anonymous Blob or container
+  access.
 - Before returning a `ContinuationRef`, the connector fully writes, flushes and
   seals the native snapshot and records its digest/integrity metadata. A
   committed snapshot key is immutable; later checkpoints use new keys.
@@ -337,6 +356,11 @@ integrity_metadata
 - A terminal session seed may be consumed only by the next turn's initial
   `CheckpointRequest`. It cannot be passed to `resume_from_checkpoint()` or
   reused after that turn commits its first authoritative checkpoint.
+- Continuation storage names the two read operations separately:
+  `read_mid_turn_continuation()` resumes the creating turn, while
+  `read_terminal_session_seed()` loads prior-turn state for the next admitted
+  turn. The store derives the immutable storage scope from the continuation
+  envelope; Entity authorization occurs before either read.
 - Resuming through a different harness is rejected.
 - Incompatible protocol, connector or state-format versions fail explicitly as
   `continuation_incompatible`; the runtime does not reset history or silently
@@ -501,6 +525,7 @@ normal `result_ref` contract before connector resume.
 
 ```text
 schema_version
+sequence_index
 operation_id
 tool_call_id
 agent_slug
@@ -525,19 +550,37 @@ deadline
 ```
 
 `ExternalWorkResult` carries the same operation, call, session, run and
-generation identity plus terminal status, bounded diagnostic metadata and a
-`result_ref`. Tool arguments and results are never inline.
+generation identity and `sequence_index`, plus terminal status, bounded
+diagnostic metadata and a `result_ref`. Tool arguments and results are never
+inline.
 
 `workspace_ref` is required only for session-bound sandbox placement. It is a
 bounded runtime-minted workspace identity, not a credential or endpoint.
 
-The command identity is the tuple of adapter kind/version, canonical tool name,
+`ExternalWorkCommandIdentity` names adapter kind/version, canonical tool name,
 canonical input schema digest, policy digest, execution placement and declared
 implementation compatibility version. A whole-catalog or deployment digest may
 be recorded for diagnosis but is never an equality gate: unrelated catalog
 changes do not invalidate an accepted operation. Tool authors must change the
 implementation compatibility version when behavior changes incompatibly while
 the name/schema remain stable.
+
+Each checkpoint request batch has contiguous zero-based `sequence_index`
+values and unique operation IDs, tool-call IDs and idempotency keys.
+`ExternalWorkResultBatch` requires the same contiguous order, unique operation
+and tool-call identities, echoed idempotency keys, and one turn identity across
+the complete batch.
+
+`ExternalWorkResumeRequest` binds one mid-turn continuation to the Entity's
+authoritative ordered pending-operation identities and the completed result
+batch. Validation requires the continuation, pending operations and results to
+share one active turn and requires every result identity to match the pending
+operation at the same sequence index. Connectors never accept a continuation
+and an independently valid but unrelated result batch as separate arguments.
+The equality check includes sequence index, operation ID, tool-call ID and
+idempotency key. Before injecting results, the connector must also extract the
+native continuation's pending calls and prove that their ordered identities
+match the authoritative pending-operation set exactly.
 
 The activity:
 
@@ -980,6 +1023,8 @@ The feature contract is satisfied when:
 | 31 | Sandbox tool exposure | Harness-native worker tools / runtime declaration-only schemas | Expose qualified sandbox operations as shared declaration-only tools and dispatch every invocation through a generation-fenced session workspace activity | Human; review recommendation | 2026-10-19 |
 | 32 | Cross-turn seed validation | Require the new active run/generation / validate the prior committed seed separately / replace the seed after every terminal outcome | Validate a terminal seed against the Entity's prior successfully completed turn, permit it only on the next initial request and retain it across failed, cancelled or timed-out turns | Human; Agent recommendation | 2026-10-19 |
 | 33 | Architecture approval | Continue architecture review / finalize the feature contract | Finalize the harness-neutral Durable Agent Loop contract for implementation | Human | 2026-10-20 |
+| 34 | Explicit persisted meaning | Positional/convention-only batches and parallel fields / named identities, ordered batches and discriminated variants | Persist sequence explicitly, validate batch uniqueness/order, name command identity, split continuation read roles and close stable evidence/failure vocabularies | Human; review recommendation | 2026-10-26 |
+| 35 | Retry, resume and wire-version safety | Connector convention / independent continuation and results / one validated resume request with explicit versions and retry eligibility | Require explicit wire versions, bind continuation plus pending operations plus ordered results in one resume request, permit retry only for proven retryable transport failures, represent confirmed cancellation explicitly and fail closed on public Blob containers | Human; review recommendation | 2026-10-26 |
 
 ## 6. Test plan
 
@@ -999,7 +1044,8 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   schemas, observability settings, usage and tool evidence from the same
   helpers; only handler binding and dispatch differ.
 - [ ] Checkpoint contract codec: every outcome and continuation version,
-  bounded size, unknown fields, incompatible versions and sanitized errors.
+  required version fields, bounded size, unknown fields, incompatible versions
+  and sanitized errors.
 - [ ] MAF connector: tool-free completion, one/many tool calls, ordered resume,
   reasoning fidelity, compaction, terminal cross-turn seeding, provider failures
   and cold restore.
@@ -1021,7 +1067,8 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   performs no SDK/network/filesystem/credential/tool work.
 - [ ] External work: descriptor re-resolution, operation-identity
   compatibility, unrelated catalog changes, argument validation, parallel
-  ordering and policy reauthorization.
+  ordering, Entity pending-operation/result binding, native-continuation
+  pending-call equality, retry eligibility and policy reauthorization.
 - [ ] Sandbox tool exposure: MAF and Copilot receive equivalent declaration-only
   schemas; native worker execution is absent; requests carry sandbox placement
   and workspace identity; stale generation, adapter/schema/policy/package
@@ -1045,7 +1092,8 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   immutable snapshot keys, role-specific mid-turn versus terminal-seed
   validation, one-time next-turn seed consumption, retention across failure,
   cancellation and timeout, generation-safe superseded snapshot cleanup,
-  TTL/deletion retention and cleanup retry receipts.
+  TTL/deletion retention, private-container enforcement and cleanup retry
+  receipts.
 - [ ] State bounds: large low-compressibility outputs, continuation and content
   indirection, every contractual envelope limit, metadata-only Entity growth,
   pagination, storage-reference failure and no silent truncation.
@@ -1082,6 +1130,11 @@ Tests mirror source modules. Config behavior adds a scenario fixture under
   stable operation identity, exact connector profiles, restored admission/API
   guarantees, deterministic deadlines, payload limits and bounded
   cancellation. Those corrections are incorporated in this revision.
+- **Contract-hardening architecture review:** Independent amendment review
+  completed on 2026-10-26. It required an exact list of independently versioned
+  envelopes and explicit equality between Entity pending identities, returned
+  results and the native continuation's pending calls. Both blockers are
+  incorporated in Decisions 34-35 while payload streaming remains unchanged.
 - **Human sign-off:** Approved by @harshivcodes on 2026-10-20. Status is
   `Finalized`; implementation may proceed through the repository feature
   lifecycle.

@@ -8,6 +8,7 @@ from azure.core.exceptions import (
     ServiceRequestError,
 )
 
+import azure_functions_agents.durable._reference_store as reference_store_module
 from azure_functions_agents.durable._reference_store import (
     BlobDurableReferenceStore,
     ReferenceExpiredError,
@@ -15,10 +16,14 @@ from azure_functions_agents.durable._reference_store import (
     ReferenceNotFoundError,
     ReferenceScope,
     ReferenceStoreError,
+    open_blob_reference_store,
 )
 from azure_functions_agents.harness._checkpoint import ContinuationRole
 from azure_functions_agents.harness._harness_binding import HarnessKind
-from azure_functions_agents.harness._session_storage import OwnedBlobService
+from azure_functions_agents.harness._session_storage import (
+    BlobStorageSettings,
+    OwnedBlobService,
+)
 
 _OWNER_DIGEST = "b" * 64
 
@@ -75,6 +80,9 @@ class _Blob:
         return _Downloader(record["content"])
 
     async def delete_blob(self) -> None:
+        failure = self.service.failures.get(("delete", self.name))
+        if failure:
+            raise failure
         if self.name not in self.service.blobs:
             raise ResourceNotFoundError("missing")
         del self.service.blobs[self.name]
@@ -85,9 +93,18 @@ class _Container:
         self.service = service
 
     async def create_container(self) -> None:
+        failure = self.service.failures.get(("container", "create"))
+        if failure:
+            raise failure
         if self.service.container_created:
             raise ResourceExistsError("exists")
         self.service.container_created = True
+
+    async def get_container_properties(self):
+        failure = self.service.failures.get(("container", "properties"))
+        if failure:
+            raise failure
+        return SimpleNamespace(public_access=self.service.public_access)
 
 
 class _BlobService:
@@ -95,6 +112,7 @@ class _BlobService:
         self.blobs: dict[str, dict[str, object]] = {}
         self.failures: dict[tuple[str, str], Exception] = {}
         self.container_created = False
+        self.public_access: str | None = None
         self.closed = False
 
     def get_container_client(self, container: str):
@@ -139,6 +157,24 @@ def _store() -> tuple[BlobDurableReferenceStore, _BlobService]:
 
 def _expires() -> datetime:
     return datetime.now(UTC) + timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_initialize_requires_private_container_and_sanitizes_failures() -> None:
+    store, service = _store()
+    service.container_created = True
+    service.public_access = "blob"
+
+    with pytest.raises(ReferenceStoreError, match="requires a private"):
+        await store.initialize()
+
+    store, service = _store()
+    service.failures[("container", "properties")] = ServiceRequestError(
+        "fixture-secret"
+    )
+    with pytest.raises(ReferenceStoreError, match="could not be initialized") as error:
+        await store.initialize()
+    assert "fixture-secret" not in str(error.value)
 
 
 def test_reference_scope_requires_validated_factory() -> None:
@@ -195,10 +231,39 @@ async def test_content_round_trip_uses_opaque_immutable_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continuation_round_trip_verifies_authorized_scope() -> None:
+@pytest.mark.parametrize(
+    "scope",
+    [
+        _scope(session_id="different"),
+        _scope(session_incarnation_id="different"),
+        _scope(run_id="different"),
+        _scope(turn_generation=4),
+        _scope(backend_namespace="hub-b"),
+    ],
+)
+async def test_content_rejects_cross_scope_reads_and_deletes(
+    scope: ReferenceScope,
+) -> None:
+    store, _ = _store()
+    owner_scope = _scope()
+    reference = await store.write_content(
+        owner_scope,
+        b"value",
+        content_type="text/plain",
+        expires_at=_expires(),
+    )
+
+    with pytest.raises(ReferenceIntegrityError):
+        await store.read_content(scope, reference)
+    with pytest.raises(ReferenceIntegrityError):
+        await store.delete(scope, reference)
+
+
+@pytest.mark.asyncio
+async def test_continuation_reads_name_mid_turn_and_terminal_seed_roles() -> None:
     store, _ = _store()
     scope = _scope()
-    reference = await store.write_continuation(
+    mid_turn = await store.write_continuation(
         scope,
         b"native-state",
         harness_kind=HarnessKind.MAF,
@@ -208,10 +273,26 @@ async def test_continuation_round_trip_verifies_authorized_scope() -> None:
         continuation_role=ContinuationRole.MID_TURN,
         expires_at=_expires(),
     )
+    terminal_seed = await store.write_continuation(
+        scope,
+        b"terminal-state",
+        harness_kind=HarnessKind.MAF,
+        connector_version="1",
+        connector_profile_id="maf-test",
+        state_format_version="1",
+        continuation_role=ContinuationRole.TERMINAL_SEED,
+        expires_at=_expires(),
+    )
 
-    assert await store.read_continuation(scope, reference) == b"native-state"
-    with pytest.raises(ReferenceIntegrityError, match="authorized scope"):
-        await store.read_continuation(_scope(run_id="different"), reference)
+    assert await store.read_mid_turn_continuation(mid_turn) == b"native-state"
+    assert (
+        await store.read_terminal_session_seed(terminal_seed)
+        == b"terminal-state"
+    )
+    with pytest.raises(ReferenceIntegrityError, match="role"):
+        await store.read_terminal_session_seed(mid_turn)
+    with pytest.raises(ReferenceIntegrityError, match="role"):
+        await store.read_mid_turn_continuation(terminal_seed)
 
 
 @pytest.mark.asyncio
@@ -302,6 +383,38 @@ async def test_backend_failures_are_sanitized() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upload_and_delete_failures_are_sanitized() -> None:
+    store, service = _store()
+    service.failures[("upload", "fixture")] = ServiceRequestError("fixture-secret")
+    store._mint_key = lambda scope, kind: "fixture"
+
+    with pytest.raises(ReferenceStoreError, match="could not be persisted") as error:
+        await store.write_content(
+            _scope(),
+            b"value",
+            content_type="text/plain",
+            expires_at=_expires(),
+        )
+    assert "fixture-secret" not in str(error.value)
+
+    store, service = _store()
+    scope = _scope()
+    reference = await store.write_content(
+        scope,
+        b"value",
+        content_type="text/plain",
+        expires_at=_expires(),
+    )
+    service.failures[("delete", reference.opaque_content_key)] = ServiceRequestError(
+        "fixture-secret"
+    )
+
+    with pytest.raises(ReferenceStoreError, match="could not be deleted") as error:
+        await store.delete(scope, reference)
+    assert "fixture-secret" not in str(error.value)
+
+
+@pytest.mark.asyncio
 async def test_invalid_metadata_is_rejected_before_upload() -> None:
     store, service = _store()
 
@@ -345,5 +458,50 @@ async def test_store_closes_owned_blob_service() -> None:
     store, service = _store()
 
     await store.close()
+
+    assert service.closed is True
+
+
+@pytest.mark.asyncio
+async def test_open_blob_reference_store_returns_initialized_owned_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _BlobService()
+
+    async def open_service(settings: BlobStorageSettings) -> OwnedBlobService:
+        assert settings.container_name == "container"
+        return OwnedBlobService(service)
+
+    monkeypatch.setattr(reference_store_module, "open_blob_service", open_service)
+
+    store = await open_blob_reference_store(
+        BlobStorageSettings(container_name="container"),
+        backend_namespace="hub-a",
+    )
+
+    assert service.container_created is True
+    assert service.closed is False
+    await store.close()
+    assert service.closed is True
+
+
+@pytest.mark.asyncio
+async def test_open_blob_reference_store_closes_service_after_initialization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _BlobService()
+    service.public_access = "container"
+
+    async def open_service(settings: BlobStorageSettings) -> OwnedBlobService:
+        del settings
+        return OwnedBlobService(service)
+
+    monkeypatch.setattr(reference_store_module, "open_blob_service", open_service)
+
+    with pytest.raises(ReferenceStoreError, match="requires a private"):
+        await open_blob_reference_store(
+            BlobStorageSettings(container_name="container"),
+            backend_namespace="hub-a",
+        )
 
     assert service.closed is True
