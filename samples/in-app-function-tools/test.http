@@ -1,0 +1,9 @@
+@baseUrl = http://localhost:7071
+
+### Ask the agent to look up and ship an order
+POST {{baseUrl}}/api/agents/main/chat
+Content-Type: application/json
+
+{
+  "prompt": "What's the status of order 1002? Ship it with UPS, then tell me the new status."
+}

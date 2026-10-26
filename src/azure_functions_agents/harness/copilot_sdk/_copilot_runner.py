@@ -410,7 +410,7 @@ class CopilotRunner:
                         model=resolved_model,
                         tools=_copilot_capabilities.prepare_tools(
                             [
-                                *list(capabilities.filtered_user_tools or []),
+                                *list(capabilities.execution_user_tools() or []),
                                 *list(capabilities.web_request_tools or []),
                             ]
                         ),

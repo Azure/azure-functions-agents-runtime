@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from importlib import import_module
 from pathlib import Path
@@ -36,6 +36,19 @@ class AgentCapabilities:
     skills: tuple[SkillDescriptor, ...] = ()
     skill_catalog: tuple[SkillDescriptor, ...] = ()
     _harness: AppHarness | None = field(default=None, repr=False, compare=False)
+    # Late-bound: ``app.tool`` decorators run after this inventory is frozen.
+    _in_app_tools: Callable[[], tuple[ToolDescriptor, ...]] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def execution_user_tools(self) -> tuple[ToolDescriptor, ...] | None:
+        """Discovered ``tools/`` plus in-app ``app.tool`` functions for this agent."""
+        if self._in_app_tools is None:
+            return self.filtered_user_tools
+        in_app = self._in_app_tools()
+        if not in_app:
+            return self.filtered_user_tools
+        return (*(self.filtered_user_tools or ()), *in_app)
 
     @classmethod
     def create(
@@ -49,6 +62,7 @@ class AgentCapabilities:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] = (),
         _harness: AppHarness | None = None,
+        _in_app_tools: Callable[[], tuple[ToolDescriptor, ...]] | None = None,
     ) -> AgentCapabilities:
         approved = (
             describe_skill_paths(enabled_skill_paths) if skills is None else tuple(skills)
@@ -67,6 +81,7 @@ class AgentCapabilities:
             skills=approved,
             skill_catalog=catalog,
             _harness=_harness,
+            _in_app_tools=_in_app_tools,
         )
 
 

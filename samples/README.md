@@ -20,6 +20,9 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 [`hybrid-hosted-skill`](hybrid-hosted-skill/) is a local-first sample where an
 ordinary HTTP Function calls an inert markdown agent through `skill.run()`.
 
+[`in-app-function-tools`](in-app-function-tools/) is a local-first Python spike
+where an agent calls existing HTTP and queue Functions through `app.tool`.
+
 [`per-agent-workflows`](per-agent-workflows/) is the Engineering Operations Hub:
 two non-main workflow-enabled agents share one Durable engine while retaining
 separate policies. Run it locally with Azurite and use either agent's browser

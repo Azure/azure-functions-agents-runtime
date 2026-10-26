@@ -12,6 +12,7 @@ import azure.functions as func
 
 from . import _hosted_skill_app
 from ._agent_identity import agent_id
+from ._in_app_tools import InAppToolRegistry
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
@@ -228,6 +229,7 @@ def _compose_function_app(
     # `resolved_agents` than the coordinator itself, so the full catalog has to exist
     # before pass 2 (FunctionApp registration) begins.
     catalog_entries: dict[str, CatalogEntry] = {}
+    in_app_tools = InAppToolRegistry()
     for resolved in resolved_agents:
         # Validation is owned by the app factory; compose() stays a pure translation step.
         validate_resolved_agent(
@@ -257,7 +259,11 @@ def _compose_function_app(
             )
         validate_subagent_tool_names(resolved, capabilities)
         validate_agent(harness, resolved, capabilities)
-        capabilities = replace(capabilities, _harness=harness)
+        capabilities = replace(
+            capabilities,
+            _harness=harness,
+            _in_app_tools=in_app_tools.provider_for(resolved),
+        )
         catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
 
     catalog: AgentCatalog = build_catalog(catalog_entries)
@@ -270,12 +276,14 @@ def _compose_function_app(
         _hosted_skill_app.HostedSkillDFApp(
             catalog=catalog,
             harness=harness,
+            in_app_tools=in_app_tools,
             http_auth_level=func.AuthLevel.FUNCTION,
         )
         if workflow_agent_policies
         else _hosted_skill_app.HostedSkillFunctionApp(
             catalog=catalog,
             harness=harness,
+            in_app_tools=in_app_tools,
             http_auth_level=func.AuthLevel.FUNCTION,
         )
     )

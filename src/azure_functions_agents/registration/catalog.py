@@ -36,6 +36,7 @@ def build_catalog(entries: dict[str, CatalogEntry]) -> AgentCatalog:
                 skills=capabilities.skills or None,
                 skill_catalog=capabilities.skill_catalog,
                 _harness=capabilities._harness,
+                _in_app_tools=capabilities._in_app_tools,
             ),
         )
     return MappingProxyType(frozen)

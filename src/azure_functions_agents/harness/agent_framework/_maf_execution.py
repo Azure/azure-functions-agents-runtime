@@ -373,7 +373,7 @@ def _build_delegated_agent(
     chat_client, inference_target = build_chat_client(resolved.model)
     resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=resolved.instructions,
-        tools=list(capabilities.filtered_user_tools or []),
+        tools=list(capabilities.execution_user_tools() or []),
         mcp_tools=list(capabilities.filtered_mcp_tools or []),
         sandbox_tools=None,
         web_request_tools=capabilities.web_request_tools,

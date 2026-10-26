@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import functools
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from typing import Any, TypeVar, cast, get_type_hints
 
 import azure.durable_functions as df
 import azure.functions as func
+from pydantic import BaseModel
 
 from ._agent_run_diagnostics import AgentExecutionSurface
+from ._in_app_tools import InAppToolRegistry, build_in_app_tool, unwrap_function_builder
 from ._logger import logger
+from ._tool_descriptor import ApprovalMode
 from .harness._harness_binding import AppHarness, UnsupportedCapabilityError
 from .hosted_skill_binding import HostedSkill
 from .registration.capabilities import validate_runtime_tool_name_collisions
@@ -118,14 +121,75 @@ def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
 class _HostedSkillAppMixin:
     _hosted_skill_catalog: AgentCatalog
     _hosted_skill_harness: AppHarness
+    _in_app_tools: InAppToolRegistry
 
     def _configure_hosted_skills(
         self,
         catalog: AgentCatalog,
         harness: AppHarness,
+        in_app_tools: InAppToolRegistry | None = None,
     ) -> None:
         self._hosted_skill_catalog = catalog
         self._hosted_skill_harness = harness
+        self._in_app_tools = in_app_tools if in_app_tools is not None else InAppToolRegistry()
+
+    def tool(
+        self,
+        fn: Any = None,
+        /,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        schema: type[BaseModel] | None = None,
+        agents: Sequence[str] | None = None,
+        approval_mode: ApprovalMode | str | None = None,
+    ) -> Any:
+        """Expose a function in this app as a tool for agents.
+
+        Works bare (``@app.tool``) or with options, standalone or stacked with a trigger
+        decorator. The handler runs in-process; trigger-backed handlers need ``schema=``
+        describing the payload they read. ``agents=None`` exposes the tool to every agent.
+        """
+        scoped = self._validate_tool_agents(agents)
+
+        def decorate(target: Any) -> Any:
+            handler, _ = unwrap_function_builder(target)
+            descriptor = build_in_app_tool(
+                handler,
+                name=name,
+                description=description,
+                schema=schema,
+                approval_mode=approval_mode,
+            )
+            self._check_tool_name_collisions(descriptor.name, scoped)
+            self._in_app_tools.add(descriptor, scoped)
+            return target
+
+        if fn is not None:
+            return decorate(fn)
+        return decorate
+
+    def _validate_tool_agents(self, agents: Sequence[str] | None) -> tuple[str, ...] | None:
+        if agents is None:
+            return None
+        if isinstance(agents, str):
+            raise TypeError("app.tool agents must be a list of agent slugs, not a string")
+        unknown = sorted(set(agents) - set(self._hosted_skill_catalog))
+        if unknown:
+            known = ", ".join(sorted(self._hosted_skill_catalog)) or "<none>"
+            raise ValueError(f"Unknown agent slug(s) in app.tool agents: {unknown}. Known: {known}.")
+        return tuple(agents)
+
+    def _check_tool_name_collisions(self, tool_name: str, scoped: tuple[str, ...] | None) -> None:
+        for slug, entry in self._hosted_skill_catalog.items():
+            if scoped is not None and slug not in scoped:
+                continue
+            discovered = {tool.name for tool in entry.capabilities.filtered_user_tools or ()}
+            if tool_name in discovered:
+                raise ValueError(
+                    f"app.tool name {tool_name!r} collides with a tools/ tool already "
+                    f"available to agent {slug!r}."
+                )
 
     def hosted_skill(
         self,
@@ -193,10 +257,11 @@ class HostedSkillFunctionApp(_HostedSkillAppMixin, func.FunctionApp):
         *,
         catalog: AgentCatalog,
         harness: AppHarness,
+        in_app_tools: InAppToolRegistry | None = None,
         http_auth_level: func.AuthLevel | str = func.AuthLevel.FUNCTION,
     ) -> None:
         super().__init__(http_auth_level=http_auth_level)
-        self._configure_hosted_skills(catalog, harness)
+        self._configure_hosted_skills(catalog, harness, in_app_tools)
 
 
 class HostedSkillDFApp(_HostedSkillAppMixin, df.DFApp):
@@ -207,7 +272,8 @@ class HostedSkillDFApp(_HostedSkillAppMixin, df.DFApp):
         *,
         catalog: AgentCatalog,
         harness: AppHarness,
+        in_app_tools: InAppToolRegistry | None = None,
         http_auth_level: func.AuthLevel | str = func.AuthLevel.FUNCTION,
     ) -> None:
         super().__init__(http_auth_level=http_auth_level)
-        self._configure_hosted_skills(catalog, harness)
+        self._configure_hosted_skills(catalog, harness, in_app_tools)
