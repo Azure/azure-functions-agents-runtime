@@ -7,7 +7,7 @@ import hmac
 import json
 import uuid
 from contextlib import AsyncExitStack, suppress
-from dataclasses import dataclass
+from dataclasses import InitVar, asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -28,7 +28,9 @@ from ..harness._checkpoint import (
     ContinuationRef,
     ContinuationRole,
     IntegrityMetadata,
+    SessionIdentityKey,
     StorageKind,
+    TurnIdentityKey,
     is_valid_owner_scope_digest,
     validate_reference_expiry,
 )
@@ -46,9 +48,13 @@ if TYPE_CHECKING:
 # Dedicated namespace for runtime-owned Durable data and its storage format version.
 _REFERENCE_ROOT = "durable/v1"
 
-# Separate paths prevent content and harness continuation references from being confused.
-_CONTENT_KIND = "content"
-_CONTINUATION_KIND = "continuation"
+
+class _ReferenceKind(StrEnum):
+    """Separates portable payloads from harness-native resume state."""
+
+    CONTENT = "content"
+    CONTINUATION = "continuation"
+
 
 class ReferenceStoreError(OSError):
     """A sanitized Durable reference-store failure."""
@@ -74,7 +80,10 @@ class ReferenceExpiredError(ReferenceStoreError):
     status_code = 410
 
 
-@dataclass(frozen=True, init=False)
+_REFERENCE_SCOPE_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True)
 class ReferenceScope:
     """Identifies the one Durable turn authorized to use a stored reference."""
 
@@ -86,6 +95,11 @@ class ReferenceScope:
     session_incarnation_id: str
     run_id: str
     turn_generation: int
+    _factory_token: InitVar[object]
+
+    def __post_init__(self, factory_token: object) -> None:
+        if factory_token is not _REFERENCE_SCOPE_FACTORY_TOKEN:
+            raise TypeError("ReferenceScope must be created with ReferenceScope.create().")
 
     @classmethod
     def create(
@@ -101,26 +115,11 @@ class ReferenceScope:
         turn_generation: int,
     ) -> ReferenceScope:
         """Create a validated authorization boundary for one Durable turn."""
-        values = {
-            "backend namespace": (backend_namespace, MAX_IDENTITY_VALUE_LENGTH),
-            "agent slug": (agent_slug, MAX_AGENT_SLUG_LENGTH),
-            "owner scope digest": (
-                owner_scope_digest,
-                MAX_OWNER_SCOPE_DIGEST_LENGTH,
-            ),
-            "entry ID": (entry_id, MAX_IDENTITY_VALUE_LENGTH),
-            "session ID": (session_id, MAX_IDENTITY_VALUE_LENGTH),
-            "session incarnation ID": (
-                session_incarnation_id,
-                MAX_IDENTITY_VALUE_LENGTH,
-            ),
-            "run ID": (run_id, MAX_IDENTITY_VALUE_LENGTH),
-        }
-        normalized = {
-            name: _bounded_value(value, maximum=maximum, name=name)
-            for name, (value, maximum) in values.items()
-        }
-        owner_digest = normalized["owner scope digest"]
+        owner_digest = _bounded_value(
+            owner_scope_digest,
+            maximum=MAX_OWNER_SCOPE_DIGEST_LENGTH,
+            name="owner scope digest",
+        )
         if not is_valid_owner_scope_digest(owner_digest):
             raise ValueError(
                 "Durable owner scope digest must be lower-case hexadecimal."
@@ -129,46 +128,64 @@ class ReferenceScope:
             raise ValueError("Durable turn generation must be an integer.")
         if turn_generation < 0:
             raise ValueError("Durable turn generation must not be negative.")
-        scope = object.__new__(cls)
-        object.__setattr__(scope, "backend_namespace", normalized["backend namespace"])
-        object.__setattr__(scope, "agent_slug", normalized["agent slug"])
-        object.__setattr__(scope, "owner_scope_digest", owner_digest)
-        object.__setattr__(scope, "entry_id", normalized["entry ID"])
-        object.__setattr__(scope, "session_id", normalized["session ID"])
-        object.__setattr__(
-            scope,
-            "session_incarnation_id",
-            normalized["session incarnation ID"],
+        return cls(
+            backend_namespace=_bounded_value(
+                backend_namespace,
+                maximum=MAX_IDENTITY_VALUE_LENGTH,
+                name="backend namespace",
+            ),
+            agent_slug=_bounded_value(
+                agent_slug,
+                maximum=MAX_AGENT_SLUG_LENGTH,
+                name="agent slug",
+            ),
+            owner_scope_digest=owner_digest,
+            entry_id=_bounded_value(
+                entry_id,
+                maximum=MAX_IDENTITY_VALUE_LENGTH,
+                name="entry ID",
+            ),
+            session_id=_bounded_value(
+                session_id,
+                maximum=MAX_IDENTITY_VALUE_LENGTH,
+                name="session ID",
+            ),
+            session_incarnation_id=_bounded_value(
+                session_incarnation_id,
+                maximum=MAX_IDENTITY_VALUE_LENGTH,
+                name="session incarnation ID",
+            ),
+            run_id=_bounded_value(
+                run_id,
+                maximum=MAX_IDENTITY_VALUE_LENGTH,
+                name="run ID",
+            ),
+            turn_generation=turn_generation,
+            _factory_token=_REFERENCE_SCOPE_FACTORY_TOKEN,
         )
-        object.__setattr__(scope, "run_id", normalized["run ID"])
-        object.__setattr__(scope, "turn_generation", turn_generation)
-        return scope
 
-    def turn_identity_key(self) -> tuple[str, str, str, str, str, str, int]:
+    def turn_identity_key(self) -> TurnIdentityKey:
         """Return the identity used to keep references within one active turn."""
-        return (
-            self.agent_slug,
-            self.owner_scope_digest,
-            self.entry_id,
-            self.session_id,
-            self.session_incarnation_id,
-            self.run_id,
-            self.turn_generation,
+        return TurnIdentityKey(
+            session=self.session_identity_key(),
+            run_id=self.run_id,
+            turn_generation=self.turn_generation,
+        )
+
+    def session_identity_key(self) -> SessionIdentityKey:
+        """Return the owner-scoped session identity for this storage scope."""
+        return SessionIdentityKey(
+            agent_slug=self.agent_slug,
+            owner_scope_digest=self.owner_scope_digest,
+            entry_id=self.entry_id,
+            session_id=self.session_id,
+            session_incarnation_id=self.session_incarnation_id,
         )
 
     def digest(self) -> str:
         """Create the opaque storage identity used instead of customer identifiers."""
         payload = json.dumps(
-            {
-                "backend_namespace": self.backend_namespace,
-                "agent_slug": self.agent_slug,
-                "owner_scope_digest": self.owner_scope_digest,
-                "entry_id": self.entry_id,
-                "session_id": self.session_id,
-                "session_incarnation_id": self.session_incarnation_id,
-                "run_id": self.run_id,
-                "turn_generation": self.turn_generation,
-            },
+            asdict(self),
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
@@ -243,8 +260,36 @@ class _StoredReference:
     integrity: IntegrityMetadata
 
 
+@dataclass(frozen=True)
+class _BlobMetadata:
+    """Names the metadata bound to one immutable stored reference."""
+
+    schema_version: str
+    reference_kind: str
+    scope_digest: str
+    sha256: str
+    content_length: str
+    created_at: str
+    expires_at: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "schema_version": self.schema_version,
+            "reference_kind": self.reference_kind,
+            "scope_digest": self.scope_digest,
+            "sha256": self.sha256,
+            "content_length": self.content_length,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+
 class BlobDurableReferenceStore:
-    """Stores immutable Durable content and continuation data in Azure Blob Storage."""
+    """Stores immutable Durable content and continuation data in Azure Blob Storage.
+
+    Callers own payload capacity and lifecycle cleanup. This layer verifies the
+    declared size before download and rejects expired or tampered references.
+    """
 
     def __init__(
         self,
@@ -270,12 +315,12 @@ class BlobDurableReferenceStore:
         if scope.backend_namespace != self._backend_namespace:
             raise ReferenceIntegrityError("Reference scope does not match this backend.")
 
-    def _prefix(self, scope: ReferenceScope, kind: str) -> str:
+    def _prefix(self, scope: ReferenceScope, kind: _ReferenceKind) -> str:
         """Build the opaque storage boundary for one turn and reference kind."""
         self._validate_scope(scope)
         return f"{_REFERENCE_ROOT}/{scope.digest()}/{kind}/"
 
-    def _mint_key(self, scope: ReferenceScope, kind: str) -> str:
+    def _mint_key(self, scope: ReferenceScope, kind: _ReferenceKind) -> str:
         """Create a unique immutable key inside the authorized storage boundary."""
         return self._prefix(scope, kind) + uuid.uuid4().hex
 
@@ -286,7 +331,12 @@ class BlobDurableReferenceStore:
             blob=key,
         )
 
-    def _require_key(self, scope: ReferenceScope, kind: str, key: str) -> None:
+    def _require_key(
+        self,
+        scope: ReferenceScope,
+        kind: _ReferenceKind,
+        key: str,
+    ) -> None:
         """Reject a key that falls outside the caller's authorized turn."""
         if not key.startswith(self._prefix(scope, kind)):
             raise ReferenceIntegrityError("Reference is outside the authorized scope.")
@@ -294,7 +344,7 @@ class BlobDurableReferenceStore:
     async def _write(
         self,
         scope: ReferenceScope,
-        kind: str,
+        kind: _ReferenceKind,
         payload: bytes,
         *,
         expires_at: datetime,
@@ -314,12 +364,13 @@ class BlobDurableReferenceStore:
             kind,
             integrity,
             created_at=created_at,
+            expires_at=expires_at,
         )
         try:
             await self._blob(key).upload_blob(
                 payload,
                 overwrite=False,
-                metadata=metadata,
+                metadata=metadata.as_dict(),
             )
         except ResourceExistsError:
             raise ReferenceStoreError("Durable reference key collision.") from None
@@ -335,9 +386,10 @@ class BlobDurableReferenceStore:
     async def _read(
         self,
         scope: ReferenceScope,
-        kind: str,
+        kind: _ReferenceKind,
         key: str,
         integrity: IntegrityMetadata,
+        created_at: datetime,
         expires_at: datetime,
     ) -> bytes:
         """Load bytes only after authorization, lifetime, and integrity checks."""
@@ -347,7 +399,14 @@ class BlobDurableReferenceStore:
         blob = self._blob(key)
         try:
             properties = await blob.get_blob_properties()
-            self._validate_properties(scope, kind, properties, integrity)
+            self._validate_properties(
+                scope,
+                kind,
+                properties,
+                integrity,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
             downloader = await blob.download_blob()
             payload = await downloader.readall()
         except ResourceNotFoundError:
@@ -364,15 +423,25 @@ class BlobDurableReferenceStore:
     @staticmethod
     def _validate_properties(
         scope: ReferenceScope,
-        kind: str,
+        kind: _ReferenceKind,
         properties: BlobProperties,
         integrity: IntegrityMetadata,
+        *,
+        created_at: datetime,
+        expires_at: datetime,
     ) -> None:
         """Verify Blob metadata still matches the trusted reference envelope."""
         metadata = properties.metadata or {}
-        expected = _blob_metadata(scope, kind, integrity)
-        if properties.size != integrity.content_length or any(
-            metadata.get(key) != value for key, value in expected.items()
+        expected = _blob_metadata(
+            scope,
+            kind,
+            integrity,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+        if (
+            properties.size != integrity.content_length
+            or metadata != expected.as_dict()
         ):
             raise ReferenceIntegrityError("Durable reference metadata verification failed.")
 
@@ -392,7 +461,7 @@ class BlobDurableReferenceStore:
         )
         stored = await self._write(
             scope,
-            _CONTENT_KIND,
+            _ReferenceKind.CONTENT,
             content,
             expires_at=expires_at,
         )
@@ -417,9 +486,10 @@ class BlobDurableReferenceStore:
             raise ReferenceIntegrityError("Content reference uses an unsupported store.")
         return await self._read(
             scope,
-            _CONTENT_KIND,
+            _ReferenceKind.CONTENT,
             reference.opaque_content_key,
             reference.integrity_metadata,
+            reference.created_at,
             reference.expires_at,
         )
 
@@ -464,7 +534,7 @@ class BlobDurableReferenceStore:
         self._validate_scope(scope)
         stored = await self._write(
             scope,
-            _CONTINUATION_KIND,
+            _ReferenceKind.CONTINUATION,
             state,
             expires_at=expires_at,
         )
@@ -500,9 +570,10 @@ class BlobDurableReferenceStore:
         _validate_continuation_scope(scope, reference)
         return await self._read(
             scope,
-            _CONTINUATION_KIND,
+            _ReferenceKind.CONTINUATION,
             reference.opaque_state_key,
             reference.integrity_metadata,
+            reference.created_at,
             reference.expires_at,
         )
 
@@ -514,11 +585,11 @@ class BlobDurableReferenceStore:
         """Remove referenced data when its Durable lifecycle no longer needs it."""
         if isinstance(reference, ContentRef):
             key = reference.opaque_content_key
-            kind = _CONTENT_KIND
+            kind = _ReferenceKind.CONTENT
         else:
             _validate_continuation_scope(scope, reference)
             key = reference.opaque_state_key
-            kind = _CONTINUATION_KIND
+            kind = _ReferenceKind.CONTINUATION
         self._require_key(scope, kind, key)
         try:
             await self._blob(key).delete_blob()
@@ -534,21 +605,21 @@ class BlobDurableReferenceStore:
 
 def _blob_metadata(
     scope: ReferenceScope,
-    kind: str,
+    kind: _ReferenceKind,
     integrity: IntegrityMetadata,
     *,
-    created_at: datetime | None = None,
-) -> dict[str, str]:
-    metadata = {
-        "schema_version": "1",
-        "reference_kind": kind,
-        "scope_digest": scope.digest(),
-        "sha256": integrity.digest,
-        "content_length": str(integrity.content_length),
-    }
-    if created_at is not None:
-        metadata["created_at"] = created_at.isoformat()
-    return metadata
+    created_at: datetime,
+    expires_at: datetime,
+) -> _BlobMetadata:
+    return _BlobMetadata(
+        schema_version="1",
+        reference_kind=kind.value,
+        scope_digest=scope.digest(),
+        sha256=integrity.digest,
+        content_length=str(integrity.content_length),
+        created_at=created_at.isoformat(),
+        expires_at=expires_at.isoformat(),
+    )
 
 
 def _bounded_value(value: str, *, maximum: int, name: str) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -61,19 +62,6 @@ type FrozenJsonValue = (
     | None
 )
 type FrozenJsonObject = Mapping[str, FrozenJsonValue]
-type _SessionIdentityKey = tuple[str, str, str, str, str]
-type _TurnIdentityKey = tuple[str, str, str, str, str, str, int]
-type _ConnectorIdentityKey = tuple[
-    HarnessKind,
-    str,
-    str,
-    str,
-    str,
-    str,
-    str,
-    str,
-    str,
-]
 type _IdentityValue = Annotated[
     str,
     Field(min_length=1, max_length=MAX_IDENTITY_VALUE_LENGTH),
@@ -82,6 +70,37 @@ type _VersionValue = Annotated[
     str,
     Field(min_length=1, max_length=MAX_VERSION_VALUE_LENGTH),
 ]
+
+
+@dataclass(frozen=True)
+class SessionIdentityKey:
+    """Names the fields that identify one owner-scoped agent session."""
+
+    agent_slug: str
+    owner_scope_digest: str
+    entry_id: str
+    session_id: str
+    session_incarnation_id: str
+
+
+@dataclass(frozen=True)
+class TurnIdentityKey:
+    """Names the session, run, and generation that identify one active turn."""
+
+    session: SessionIdentityKey
+    run_id: str
+    turn_generation: int
+
+
+@dataclass(frozen=True)
+class ConnectorIdentityKey:
+    """Names the connector and session authorized to resume persisted state."""
+
+    harness_kind: HarnessKind
+    connector_version: str
+    connector_profile_id: str
+    backend_namespace: str
+    session: SessionIdentityKey
 
 
 class CheckpointContractError(ValueError):
@@ -156,14 +175,14 @@ class _SessionIdentity(_CheckpointModel):
     session_id: _IdentityValue
     session_incarnation_id: _IdentityValue
 
-    def session_identity_key(self) -> _SessionIdentityKey:
+    def session_identity_key(self) -> SessionIdentityKey:
         """Return the stable business identity shared across one agent session."""
-        return (
-            self.agent_slug,
-            self.owner_scope_digest,
-            self.entry_id,
-            self.session_id,
-            self.session_incarnation_id,
+        return SessionIdentityKey(
+            agent_slug=self.agent_slug,
+            owner_scope_digest=self.owner_scope_digest,
+            entry_id=self.entry_id,
+            session_id=self.session_id,
+            session_incarnation_id=self.session_incarnation_id,
         )
 
 
@@ -173,9 +192,13 @@ class _TurnIdentity(_SessionIdentity):
     run_id: _IdentityValue
     turn_generation: int = Field(ge=0)
 
-    def turn_identity_key(self) -> _TurnIdentityKey:
+    def turn_identity_key(self) -> TurnIdentityKey:
         """Return the identity used to reject work from an older turn generation."""
-        return (*self.session_identity_key(), self.run_id, self.turn_generation)
+        return TurnIdentityKey(
+            session=self.session_identity_key(),
+            run_id=self.run_id,
+            turn_generation=self.turn_generation,
+        )
 
 
 class _ConnectorIdentity(_TurnIdentity):
@@ -186,14 +209,14 @@ class _ConnectorIdentity(_TurnIdentity):
     connector_profile_id: _IdentityValue
     backend_namespace: _IdentityValue
 
-    def connector_identity_key(self) -> _ConnectorIdentityKey:
+    def connector_identity_key(self) -> ConnectorIdentityKey:
         """Return the identity of the harness connector authorized to resume state."""
-        return (
-            self.harness_kind,
-            self.connector_version,
-            self.connector_profile_id,
-            self.backend_namespace,
-            *self.session_identity_key(),
+        return ConnectorIdentityKey(
+            harness_kind=self.harness_kind,
+            connector_version=self.connector_version,
+            connector_profile_id=self.connector_profile_id,
+            backend_namespace=self.backend_namespace,
+            session=self.session_identity_key(),
         )
 
 

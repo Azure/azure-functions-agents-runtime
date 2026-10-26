@@ -237,6 +237,29 @@ async def test_read_rejects_tampered_content_and_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_binds_reference_lifetime_to_blob_metadata() -> None:
+    store, service = _store()
+    scope = _scope()
+    reference = await store.write_content(
+        scope,
+        b"original",
+        content_type="text/plain",
+        expires_at=_expires(),
+    )
+
+    altered_reference = reference.model_copy(
+        update={"expires_at": reference.expires_at + timedelta(days=1)}
+    )
+    with pytest.raises(ReferenceIntegrityError, match="metadata verification"):
+        await store.read_content(scope, altered_reference)
+
+    record = service.blobs[reference.opaque_content_key]
+    record["metadata"]["expires_at"] = (reference.expires_at + timedelta(days=1)).isoformat()
+    with pytest.raises(ReferenceIntegrityError, match="metadata verification"):
+        await store.read_content(scope, reference)
+
+
+@pytest.mark.asyncio
 async def test_missing_expired_and_deleted_references_fail_explicitly() -> None:
     store, service = _store()
     scope = _scope()

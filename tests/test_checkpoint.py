@@ -11,6 +11,7 @@ from azure_functions_agents.harness._checkpoint import (
     CheckpointFailure,
     CheckpointRequest,
     CheckpointUsage,
+    ConnectorIdentityKey,
     ContentRef,
     ContinuationRef,
     ContinuationRole,
@@ -23,9 +24,11 @@ from azure_functions_agents.harness._checkpoint import (
     IntegrityMetadata,
     RetryGuidance,
     RetryRequested,
+    SessionIdentityKey,
     StorageKind,
     TurnCompleted,
     TurnFailed,
+    TurnIdentityKey,
     decode_checkpoint_outcome,
     decode_content_ref,
     decode_continuation_ref,
@@ -196,6 +199,34 @@ def test_content_and_external_work_round_trip() -> None:
     assert decode_continuation_ref(encode_continuation_ref(continuation)) == continuation
     assert decode_external_work_request(encode_external_work_request(request)) == request
     assert decode_external_work_result(encode_external_work_result(result)) == result
+
+
+def test_checkpoint_identity_keys_name_each_identity_boundary() -> None:
+    request = _external_request()
+
+    session = request.session_identity_key()
+    turn = request.turn_identity_key()
+    connector = _continuation(ContinuationRole.MID_TURN).connector_identity_key()
+
+    assert session == SessionIdentityKey(
+        agent_slug="agent",
+        owner_scope_digest=_OWNER_DIGEST,
+        entry_id="entry",
+        session_id="session",
+        session_incarnation_id="incarnation",
+    )
+    assert turn == TurnIdentityKey(
+        session=session,
+        run_id="run",
+        turn_generation=3,
+    )
+    assert connector == ConnectorIdentityKey(
+        harness_kind=HarnessKind.MAF,
+        connector_version="1",
+        connector_profile_id="maf-test",
+        backend_namespace="hub-a",
+        session=session,
+    )
 
 
 def test_checkpoint_json_fields_are_deeply_immutable() -> None:
