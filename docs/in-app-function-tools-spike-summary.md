@@ -1,5 +1,7 @@
 # In-app Functions as agent tools: experiment summary
 
+**For a quick walkthrough:** [visual overview, code, and invocation comparison](in-app-function-tools-visual.md).
+
 **Status:** Python proof of concept implemented. Local Functions-host validation
 passed; the project owner confirmed the live model experiment worked.
 This is a spike, not a production-ready feature.
