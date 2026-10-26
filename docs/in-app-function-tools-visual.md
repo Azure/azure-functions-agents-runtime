@@ -78,13 +78,13 @@ sequenceDiagram
     participant Functions as Existing handlers
     User->>Agent: Look up, ship, and confirm order 1002
     Agent->>Runtime: get_order(order_id="1002")
-    Runtime->>Functions: Build HTTP request; call get_order
+    Runtime->>Functions: Build HTTP request, call get_order
     Functions-->>Agent: Status: pending (via runtime)
     Agent->>Runtime: ship_order(order_id="1002", carrier="UPS")
-    Runtime->>Functions: Validate schema; build QueueMessage; call ship_order
-    Functions-->>Agent: completed (via runtime; handler returned None)
+    Runtime->>Functions: Validate schema, build QueueMessage, call ship_order
+    Functions-->>Agent: completed (via runtime, handler returned None)
     Agent->>Runtime: get_order(order_id="1002")
-    Runtime->>Functions: Build HTTP request; call get_order
+    Runtime->>Functions: Build HTTP request, call get_order
     Functions-->>Agent: Status: shipped via UPS (via runtime)
     Agent-->>User: Confirmed: shipped via UPS
 ```
