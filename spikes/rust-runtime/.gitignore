@@ -1,0 +1,5 @@
+/target/
+/.tools/
+/dotnet/**/local.settings.json
+/dotnet/**/bin/
+/dotnet/**/obj/

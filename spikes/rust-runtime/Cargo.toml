@@ -1,0 +1,37 @@
+[package]
+name = "fhs-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-language Azure Functions Hosted Skills runtime over stdio powered by github-copilot-sdk"
+license = "MIT"
+
+[lib]
+name = "fhs_runtime"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fhs-runtime"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+github-copilot-sdk = { version = "1.0.27-unstable.40031404408.gba6c003", default-features = false, features = ["runtime", "test-support"] }
+hmac = "0.12"
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yml = "0.0.12"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
