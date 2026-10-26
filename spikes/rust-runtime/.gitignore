@@ -3,3 +3,7 @@
 /dotnet/**/local.settings.json
 /dotnet/**/bin/
 /dotnet/**/obj/
+/.azure-functions-agents/
+/dotnet/**/.azure-functions-agents/
+**/__pycache__/
+*.log

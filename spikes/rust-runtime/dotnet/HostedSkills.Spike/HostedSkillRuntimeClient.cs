@@ -57,8 +57,7 @@ public sealed record SessionInspectResult(
     [property: JsonPropertyName("transcript")] string? Transcript);
 
 /// <summary>
-/// C# facade injected into Azure Functions via `[HostedSkillInput("agent_name")] HostedSkill skill`.
-/// Mirrors `src/azure_functions_agents/hosted_skill_binding.py`.
+/// Spike facade supplied through ordinary worker DI, not a custom Functions binding.
 /// </summary>
 public sealed class HostedSkill(string agentName, HostedSkillRuntimeClient client)
 {
@@ -75,6 +74,7 @@ public sealed class HostedSkill(string agentName, HostedSkillRuntimeClient clien
         string? sessionId = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var channel = Channel.CreateUnbounded<AgentStreamEvent>();
         var runTask = Task.Run(async () =>
         {
@@ -86,21 +86,27 @@ public sealed class HostedSkill(string agentName, HostedSkillRuntimeClient clien
                     sessionId,
                     stream: true,
                     onStreamEvent: ev => channel.Writer.TryWrite(ev),
-                    cancellationToken).ConfigureAwait(false);
+                    lifetime.Token).ConfigureAwait(false);
                 channel.Writer.TryComplete();
             }
             catch (Exception ex)
             {
                 channel.Writer.TryComplete(ex);
             }
-        }, cancellationToken);
+        });
 
-        await foreach (var ev in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        try
         {
-            yield return ev;
+            await foreach (var ev in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return ev;
+            }
         }
-
-        await runTask.ConfigureAwait(false);
+        finally
+        {
+            lifetime.Cancel();
+            await runTask.ConfigureAwait(false);
+        }
     }
 }
 
@@ -115,15 +121,28 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
     private readonly AgentToolRegistry _toolRegistry;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> _pending = new();
-    private readonly ConcurrentBag<Action<AgentStreamEvent>> _streamListeners = [];
+    private readonly ConcurrentDictionary<(string Agent, string Session), Action<AgentStreamEvent>> _streamListeners = new();
+    // Rust SessionFs does not provide transactional concurrent turns. Serialize runs
+    // in this worker, including streams, rather than implying multi-writer safety.
+    private readonly SemaphoreSlim _runLock = new(1, 1);
     private readonly Task _readerLoop;
+    private readonly Task _stderrLoop;
+    private readonly ConcurrentDictionary<long, Task> _callbacks = new();
+    private Exception? _terminalError;
+    private int _disposed;
     private long _nextId;
+    private long _nextCallbackId;
 
     private HostedSkillRuntimeClient(Process process, AgentToolRegistry toolRegistry)
     {
         _process = process;
         _toolRegistry = toolRegistry;
         _readerLoop = Task.Run(ReadStdoutLoopAsync);
+        _stderrLoop = Task.Run(async () =>
+        {
+            while (await process.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
+                Console.Error.WriteLine($"[fhs-runtime] {line}");
+        });
     }
 
     public static async Task<(HostedSkillRuntimeClient Client, InitializeResult Init)> StartAsync(
@@ -150,7 +169,9 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
             ?? throw new InvalidOperationException($"Failed to start fhs-runtime at {runtimeBinaryPath}");
 
         var client = new HostedSkillRuntimeClient(proc, toolRegistry);
-        var initResult = await client.SendRequestAsync<InitializeResult>(
+        try
+        {
+            var initResult = await client.SendRequestAsync<InitializeResult>(
             "initialize",
             new
             {
@@ -161,7 +182,13 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
             },
             cancellationToken).ConfigureAwait(false);
 
-        return (client, initResult);
+            return (client, initResult);
+        }
+        catch
+        {
+            await client.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     public HostedSkill GetHostedSkill(string agentName) => new(agentName, this);
@@ -174,12 +201,13 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         Action<AgentStreamEvent>? onStreamEvent,
         CancellationToken cancellationToken = default)
     {
-        if (onStreamEvent is not null)
+        await _runLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        sessionId ??= Guid.NewGuid().ToString("N");
+        var key = (agentName, sessionId);
+        try
         {
-            _streamListeners.Add(onStreamEvent);
-        }
-
-        return await SendRequestAsync<AgentRunResult>(
+            if (onStreamEvent is not null) _streamListeners[key] = onStreamEvent;
+            return await SendRequestAsync<AgentRunResult>(
             "agent.run",
             new
             {
@@ -188,7 +216,13 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
                 session_id = sessionId,
                 stream
             },
-            cancellationToken).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _streamListeners.TryRemove(key, out _);
+            _runLock.Release();
+        }
     }
 
     public Task<SessionInspectResult> InspectSessionAsync(
@@ -213,35 +247,36 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
 
-        using var reg = cancellationToken.Register(() =>
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(45));
+        try
         {
-            if (_pending.TryRemove(id, out var removed))
-            {
-                removed.TrySetCanceled(cancellationToken);
-            }
-        });
-
-        var frame = new
+            if (Volatile.Read(ref _terminalError) is { } error) throw error;
+            var frame = new
         {
             jsonrpc = "2.0",
             id,
             method,
             @params = parameters
         };
-        await WriteFrameAsync(frame).ConfigureAwait(false);
-
-        var resultElem = await tcs.Task.ConfigureAwait(false);
-        return JsonSerializer.Deserialize<TResult>(resultElem.GetRawText())!;
+            await WriteFrameAsync(frame, deadline.Token).ConfigureAwait(false);
+            var resultElem = await tcs.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
+            return JsonSerializer.Deserialize<TResult>(resultElem.GetRawText())!;
+        }
+        finally
+        {
+            _pending.TryRemove(id, out _);
+        }
     }
 
-    private async Task WriteFrameAsync(object frame)
+    private async Task WriteFrameAsync(object frame, CancellationToken cancellationToken = default)
     {
         var line = JsonSerializer.Serialize(frame);
-        await _writeLock.WaitAsync().ConfigureAwait(false);
+        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _process.StandardInput.WriteLineAsync(line).ConfigureAwait(false);
-            await _process.StandardInput.FlushAsync().ConfigureAwait(false);
+            await _process.StandardInput.WriteLineAsync(line.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await _process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -272,28 +307,34 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
                         var callParams = JsonSerializer.Deserialize<ToolCallParams>(
                             root.GetProperty("params").GetRawText())!;
 
-                        // Dispatch tool execution on a background task so the stdio reader loop stays unblocked.
-                        _ = Task.Run(async () =>
+                        var callbackId = Interlocked.Increment(ref _nextCallbackId);
+                        var callback = Task.Run(async () =>
                         {
-                            var toolResult = await _toolRegistry.ExecuteAsync(callParams).ConfigureAwait(false);
-                            var respFrame = new
+                            try
                             {
-                                jsonrpc = "2.0",
-                                id = callId,
-                                result = toolResult
-                            };
-                            await WriteFrameAsync(respFrame).ConfigureAwait(false);
+                                var toolResult = await _toolRegistry.ExecuteAsync(callParams).ConfigureAwait(false);
+                                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                                await WriteFrameAsync(new
+                                {
+                                    jsonrpc = "2.0", id = callId, result = toolResult
+                                }, deadline.Token).ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                FailPending(ex);
+                            }
                         });
+                        _callbacks[callbackId] = callback;
+                        _ = callback.ContinueWith(_ => { _callbacks.TryRemove(callbackId, out var ignored); },
+                            TaskScheduler.Default);
                     }
                     else if (method == "agent.stream" && root.TryGetProperty("params", out var streamParams))
                     {
                         var ev = JsonSerializer.Deserialize<AgentStreamEvent>(streamParams.GetRawText());
                         if (ev is not null)
                         {
-                            foreach (var listener in _streamListeners)
-                            {
+                            if (_streamListeners.TryGetValue((ev.AgentName, ev.SessionId), out var listener))
                                 listener(ev);
-                            }
                         }
                     }
                 }
@@ -317,21 +358,33 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            foreach (var kv in _pending)
-            {
-                kv.Value.TrySetException(ex);
-            }
+            FailPending(ex);
         }
+        finally
+        {
+            FailPending(new EndOfStreamException("fhs-runtime stdout closed; the child process is unavailable."));
+        }
+    }
+
+    private void FailPending(Exception error)
+    {
+        Interlocked.CompareExchange(ref _terminalError, error, null);
+        foreach (var (id, pending) in _pending)
+            if (_pending.TryRemove(id, out _)) pending.TrySetException(error);
     }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         try
         {
             if (!_process.HasExited)
             {
-                await SendRequestAsync<JsonElement>("shutdown", new { }, CancellationToken.None)
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                await SendRequestAsync<JsonElement>("shutdown", new { }, deadline.Token)
                     .ConfigureAwait(false);
+                _process.StandardInput.Close();
+                await _process.WaitForExitAsync(deadline.Token).ConfigureAwait(false);
             }
         }
         catch
@@ -344,9 +397,17 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
             {
                 _process.Kill(entireProcessTree: true);
             }
+            FailPending(new ObjectDisposedException(nameof(HostedSkillRuntimeClient)));
+            try
+            {
+                await Task.WhenAll(_readerLoop, _stderrLoop, Task.WhenAll(_callbacks.Values))
+                    .WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Shutdown is bounded even if a user tool fails to finish.
+            }
             _process.Dispose();
-            _writeLock.Dispose();
-            await _readerLoop.ConfigureAwait(false);
         }
     }
 }

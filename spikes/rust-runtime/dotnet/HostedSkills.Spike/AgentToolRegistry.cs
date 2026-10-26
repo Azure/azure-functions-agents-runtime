@@ -6,50 +6,14 @@ using System.Text.Json.Serialization;
 namespace HostedSkills.Spike;
 
 /// <summary>
-/// Attribute mimicking the Azure Functions Worker input binding `[HostedSkillInput("agent_name")]`.
-/// </summary>
-[AttributeUsage(AttributeTargets.Parameter)]
-public sealed class HostedSkillInputAttribute(string agentName) : Attribute
-{
-    public string AgentName { get; } = agentName;
-}
-
-/// <summary>
-/// Attribute mimicking `@app.tool()` in Python — can decorate either a plain C# method
-/// or an in-app Azure Function (`[Function("...")]`) whose trigger input is synthesized
-/// in-process when invoked over stdio by `fhs-runtime`.
+/// Spike-only tool registration marker, not an Azure Functions binding.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method)]
 public sealed class AgentToolAttribute(string name, string description) : Attribute
 {
     public string Name { get; } = name;
     public string Description { get; } = description;
-    public string BindingType { get; init; } = "plain";
-    public string? Route { get; init; }
-    public string? HttpMethod { get; init; }
 }
-
-/// <summary>
-/// Simulated `[HttpTrigger]` attribute demonstrating how an in-app HTTP-triggered function
-/// is synthesized in-process when called as an agent tool over stdio.
-/// </summary>
-[AttributeUsage(AttributeTargets.Parameter)]
-public sealed class HttpTriggerAttribute(string authLevel, params string[] methods) : Attribute
-{
-    public string AuthLevel { get; } = authLevel;
-    public string[] Methods { get; } = methods;
-    public string? Route { get; init; }
-}
-
-/// <summary>
-/// Simulated `HttpRequestData` synthesized in-process by the C# worker when `fhs-runtime`
-/// sends a `tool.call` for an in-app HTTP trigger function over stdio.
-/// </summary>
-public sealed record SynthesizedHttpRequestData(
-    string Method,
-    string Route,
-    JsonElement Body,
-    IReadOnlyDictionary<string, string> Headers);
 
 public sealed record TriggerToolMetadata(
     [property: JsonPropertyName("binding_type")] string BindingType,
@@ -75,8 +39,7 @@ public sealed record ToolCallResult(
     [property: JsonPropertyName("is_error")] bool IsError = false);
 
 /// <summary>
-/// Registry of in-app C# tools (`app.Tool(...)` and `[AgentTool]` methods, including
-/// synthesized in-process trigger functions) invoked over stdio by `fhs-runtime`.
+/// Registry of plain C# tools and explicit shared-handler adapters invoked over stdio.
 /// </summary>
 public sealed class AgentToolRegistry
 {
@@ -109,9 +72,8 @@ public sealed class AgentToolRegistry
     }
 
     /// <summary>
-    /// Discover and register all `[AgentTool]` methods on a target instance, automatically
-    /// detecting whether a method is a plain tool or an in-app `[HttpTrigger]` function
-    /// that needs a `SynthesizedHttpRequestData` constructed in-process.
+    /// Discover plain `[AgentTool]` methods. HTTP functions use explicit adapters to
+    /// shared application logic, never reflection over framework trigger parameters.
     /// </summary>
     public void RegisterFromObject(object target)
     {
@@ -125,95 +87,52 @@ public sealed class AgentToolRegistry
             }
 
             var parameters = method.GetParameters();
-            var httpParam = parameters.FirstOrDefault(p => p.GetCustomAttribute<HttpTriggerAttribute>() is not null);
-
-            if (httpParam is not null)
+            var props = new JsonObject();
+            var required = new JsonArray();
+            foreach (var p in parameters)
             {
-                var httpAttr = httpParam.GetCustomAttribute<HttpTriggerAttribute>()!;
-                var route = httpAttr.Route ?? toolAttr.Route ?? $"/api/{method.Name.ToLowerInvariant()}";
-                var verb = httpAttr.Methods.FirstOrDefault() ?? toolAttr.HttpMethod ?? "POST";
-                var schema = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["additionalProperties"] = true
-                };
-                var descriptor = new WorkerToolDescriptor(
-                    Name: toolAttr.Name,
-                    Description: toolAttr.Description,
-                    Parameters: schema,
-                    TriggerMetadata: new TriggerToolMetadata(
-                        BindingType: "httpTrigger",
-                        FunctionName: method.Name,
-                        HttpMethod: verb,
-                        Route: route));
-
-                RegisterTool(descriptor, async call =>
-                {
-                    // Synthesize the HTTP trigger input in-process (no loopback HTTP call!).
-                    var synthesizedReq = new SynthesizedHttpRequestData(
-                        Method: verb,
-                        Route: route,
-                        Body: call.Arguments,
-                        Headers: new Dictionary<string, string>
-                        {
-                            ["x-fhs-session-id"] = call.SessionId,
-                            ["x-fhs-call-id"] = call.CallId,
-                            ["x-fhs-in-process"] = "true"
-                        });
-
-                    var invokeTarget = method.IsStatic ? null : target;
-                    var rawResult = method.Invoke(invokeTarget, [synthesizedReq]);
-                    return await UnwrapResultAsync(rawResult).ConfigureAwait(false);
-                });
+                var pName = p.Name ?? "arg";
+                props[pName] = new JsonObject { ["type"] = MapJsonSchemaType(p.ParameterType) };
+                if (!p.HasDefaultValue) required.Add(pName);
             }
-            else
+            var schema = new JsonObject
             {
-                var props = new JsonObject();
-                var required = new JsonArray();
-                foreach (var p in parameters)
+                ["type"] = "object",
+                ["properties"] = props,
+                ["required"] = required
+            };
+            var descriptor = new WorkerToolDescriptor(
+                Name: toolAttr.Name,
+                Description: toolAttr.Description,
+                Parameters: schema,
+                TriggerMetadata: new TriggerToolMetadata(
+                    BindingType: "plain",
+                    FunctionName: method.Name));
+
+            RegisterTool(descriptor, async call =>
+            {
+                var args = new object?[parameters.Length];
+                for (var i = 0; i < parameters.Length; i++)
                 {
-                    var pName = p.Name ?? "arg";
-                    props[pName] = new JsonObject { ["type"] = MapJsonSchemaType(p.ParameterType) };
-                    if (!p.HasDefaultValue)
+                    var p = parameters[i];
+                    if (call.Arguments.ValueKind == JsonValueKind.Object &&
+                        call.Arguments.TryGetProperty(p.Name!, out var propVal))
                     {
-                        required.Add(pName);
+                        args[i] = JsonSerializer.Deserialize(propVal.GetRawText(), p.ParameterType);
+                    }
+                    else if (p.HasDefaultValue)
+                    {
+                        args[i] = p.DefaultValue;
+                    }
+                    else
+                    {
+                        throw new ArgumentException($"Missing required tool argument '{p.Name}'.");
                     }
                 }
-                var schema = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = props,
-                    ["required"] = required
-                };
-                var descriptor = new WorkerToolDescriptor(
-                    Name: toolAttr.Name,
-                    Description: toolAttr.Description,
-                    Parameters: schema,
-                    TriggerMetadata: new TriggerToolMetadata(
-                        BindingType: "plain",
-                        FunctionName: method.Name));
-
-                RegisterTool(descriptor, async call =>
-                {
-                    var args = new object?[parameters.Length];
-                    for (var i = 0; i < parameters.Length; i++)
-                    {
-                        var p = parameters[i];
-                        if (call.Arguments.ValueKind == JsonValueKind.Object &&
-                            call.Arguments.TryGetProperty(p.Name!, out var propVal))
-                        {
-                            args[i] = JsonSerializer.Deserialize(propVal.GetRawText(), p.ParameterType);
-                        }
-                        else if (p.HasDefaultValue)
-                        {
-                            args[i] = p.DefaultValue;
-                        }
-                    }
-                    var invokeTarget = method.IsStatic ? null : target;
-                    var rawResult = method.Invoke(invokeTarget, args);
-                    return await UnwrapResultAsync(rawResult).ConfigureAwait(false);
-                });
-            }
+                var invokeTarget = method.IsStatic ? null : target;
+                var rawResult = method.Invoke(invokeTarget, args);
+                return await UnwrapResultAsync(rawResult).ConfigureAwait(false);
+            });
         }
     }
 
