@@ -61,6 +61,8 @@ behavior while retaining their event-driven entry points.
 ## Boundaries and next steps
 
 Direct invocation is not a broker or Functions-host invocation. It does not
+call a remote Function: the handler executes locally in memory, in the same
+Python worker process as the agent runtime. It does not
 reproduce delivery retries, settlement, dead-letter handling, host-managed
 bindings, or HTTP ingress authentication. Applications must authorize access
 through the agent-facing surface. A message handler returning no value produces

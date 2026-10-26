@@ -2,6 +2,10 @@
 
 **Reuse the same business logic. Keep existing triggers. Let an agent choose the next action.**
 
+**Handlers execute locally in memory, inside the agent runtime's Python worker
+process, not remotely.** The model requests the tool call; the runtime invokes
+the handler without a network call to another Function.
+
 ## 1. One function, two ways in
 
 ```mermaid
