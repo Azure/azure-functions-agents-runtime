@@ -14,6 +14,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Hosted skills in ordinary Functions** — inject a markdown agent into your own trigger handler with `@app.hosted_skill`
+- **Source-aware handler recovery** — opt in with `@app.smart_retry()` using a bundled advisor, with no custom agent file required; choose retry or advice-only audit
 - **Evaluate authored behavior** *(preview)* — run native Vally evaluations against the same chat surface under Core Tools or in staging
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
@@ -186,6 +187,74 @@ facade is intentionally not callable and must be obtained through decorator
 injection rather than constructed directly. See the
 [`hybrid-hosted-skill`](samples/hybrid-hosted-skill/) sample and
 [`HostedSkill injection`](docs/front-matter-spec.md#hostedskill-injection).
+
+For replay-safe HTTP or Azure Storage Queue handlers, use the separate
+`@app.smart_retry()` decorator. Its keyword-only API is
+`app.smart_retry(*, agent_name: str | None = None, max_retries=1, timeout=60, request_arg=None, audit_only=False)`;
+it accepts plain options, has no `arg_name`, and injects no skill or other
+argument. It is available on enhanced normal and Durable apps, including apps
+returned by `create_function_app()`. Place it immediately above an `async def`
+handler, below all Azure Functions SDK trigger/binding decorators. Combining
+injection and recovery on one handler, or applying `smart_retry` twice, is rejected.
+
+Omitting `agent_name` (or passing `None`) selects the bundled Smart Retry Advisor;
+no advisor markdown file is needed. It inherits the app's global model and
+`agent_configuration`, then existing environment/provider defaults—not another
+discovered agent's settings. Provider configuration is preflighted when the
+decorator selects the advisor, but no model client is acquired before the
+original handler fails. An explicit slug such as
+`@app.smart_retry(agent_name="error_advisor")` uses that catalog agent's authored
+instructions, model and agent configuration instead of the bundled guidance,
+within the same runtime-owned recovery/audit policy and tool limits. Invalid or
+unknown names fail rather than falling back. The bundled advisor is private:
+it adds no catalog agent, trigger, endpoint or delegation target. Ordinary
+`hosted_skill` injection still requires an explicit `agent_name`.
+
+The input argument is selected from trigger metadata at indexing; `request_arg`
+is an optional override. Direct calls without indexing require that override.
+By default, after an uncaught exception, one isolated agent run gets read-only
+Python source tools and a tool to retry the entire original handler in the same invocation,
+without manual input contracts. Successful initial execution needs no agent.
+The actual successful handler result is returned unchanged, including a queue
+handler's `None`. Ordinary `HostedSkill` injection and explicit
+`skill.run()`/`skill.stream()` calls are unchanged.
+
+HTTP recovery supports bodyless GET/HEAD requests with route/query corrections;
+unresolved recovery returns HTTP 500 with remediation. Queue recovery supports
+`azure.functions.QueueMessage` bodies containing UTF-8 text up to 32 KiB. The
+retry tool requires a complete replacement `body`, preserving delivery metadata
+without updating or settling the real message. Unresolved queue recovery raises
+the public `HostedSkillRecoveryError` with bounded `remediation`, leaving host
+redelivery and poison-queue handling intact.
+
+Set `max_retries=3` to allow up to three sequential agent-driven correction
+attempts, stopping at first success under the same recovery deadline.
+
+For advice without replay, opt in with
+`@app.smart_retry(audit_only=True)`. The additive
+option defaults to `False` and requires an actual boolean. Audit mode overrides
+any valid positive `max_retries` with an effective zero budget; explicit
+`max_retries=0` is still invalid. The original handler runs first: success starts
+no agent and emits no advice log. Failure starts one advisor with separate audit
+system instructions and only `list_files`, `read_file`, and `search_source`.
+`retry_function` is absent, so the model cannot invoke a retry even if it ignores
+instructions; no replacement input is prepared and the handler is not replayed.
+Advice is bounded to 2,000 characters and logged once at WARNING level through
+the shared logger, using static fallback guidance if analysis fails, times out,
+or returns no usable advice. HTTP still fails with 500 (HEAD bodyless), and queue
+processing still raises `HostedSkillRecoveryError`; host redelivery may audit
+each delivery. Analysis and source tools share one deadline; external
+cancellation propagates without an advice log. Logged advice is untrusted text,
+not a confidentiality guarantee; the existing data-sharing limits still apply.
+
+HTTP bodies, output bindings, streaming and non-idempotent side effects are unsupported;
+external cancellation still propagates and cleanup is bounded and cooperative.
+Corrections are model-guided: handler acceptance does not prove preservation of
+the original meaning, and side effects are not rolled back. Use reviewed source
+and synthetic, non-sensitive inputs: queue message text is shared with the model
+and cannot be reliably field-redacted. Opt-in is not secret redaction.
+See [recovery limits](docs/front-matter-spec.md#opt-in-handler-recovery)
+and the [recovery sample](samples/hosted-skill-remediation/).
 
 ### Agent evaluations (preview)
 

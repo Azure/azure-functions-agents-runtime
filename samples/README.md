@@ -20,6 +20,22 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 [`hybrid-hosted-skill`](hybrid-hosted-skill/) is a local-first sample where an
 ordinary HTTP Function calls an inert markdown agent through `skill.run()`.
 
+[`hosted-skill-remediation`](hosted-skill-remediation/) demonstrates opt-in
+source-aware whole-handler recovery through the separate `@app.smart_retry`
+decorator, with no injected skill or required advisor file. Two Storage Queue
+handlers use the bundled advisor: `process_work_item` on `recovery-work-items`
+allows three correction attempts; `process_work_item2` on `bad-package` uses
+`audit_only=True` for a deliberate missing `verybadpackage` import. Both keep
+their SDK bindings, which select the input argument at indexing; the default
+recovery timeout remains 60 seconds. Normal mode can inspect source and retry
+with a replacement body in the same invocation. Audit has no retry tool and logs
+bounded advice once at WARNING level while retaining failure. An optional
+authored `error_advisor` demonstrates custom guidance/configuration selection.
+Unresolved queue recovery raises `HostedSkillRecoveryError`, preserving host
+redelivery and poison handling. Use replay-safe handlers and synthetic,
+non-sensitive inputs only; source and queue bodies are shared with the model.
+Handler acceptance does not guarantee preservation of the original meaning.
+
 [`per-agent-workflows`](per-agent-workflows/) is the Engineering Operations Hub:
 two non-main workflow-enabled agents share one Durable engine while retaining
 separate policies. Run it locally with Azurite and use either agent's browser

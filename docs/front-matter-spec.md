@@ -134,6 +134,7 @@ Roles come from invocation surfaces and references, not file placement:
 | --- | --- |
 | Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
 | HostedSkill target | Any discovered agent selected by its filename-derived identity slug through `@app.hosted_skill`. It may be inert with no registered surface. |
+| Smart-retry advisor | `@app.smart_retry()` selects a private bundled advisor without an agent file; an explicit `agent_name` selects a catalog agent's authored guidance and configuration. No skill is injected. |
 | Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
 | Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
 | Workflow-enabled agent | Sets `workflows.enabled: true`. |
@@ -198,7 +199,7 @@ module from indexing, including unrelated deterministic Functions, even if no
 request would invoke the skill. The app's selected execution mode owns any
 additional catalog validation.
 
-HostedSkill binding invocation reuses `instructions`, `model`, `timeout`,
+Explicit `skill.run()`/`skill.stream()` invocation reuses `instructions`, `model`, `timeout`,
 `agent_configuration`, `response_schema`, `response_example`, tools, skills,
 MCP servers, sandbox, and `web_request` settings. `trigger` and
 `builtin_endpoints` independently register front-matter-configured surfaces;
@@ -217,6 +218,207 @@ response-contract failure occurs after the harness turn completes: invalid
 assistant content may already be persisted, and streamed content may already
 have reached the caller. Retrying the same session ID continues that history;
 it does not roll back the failed turn or create a fresh conversation.
+
+#### Opt-in handler recovery
+
+Use the separate `@app.smart_retry` decorator to opt a replay-safe HTTP or
+Storage Queue handler into recovery. It is available on enhanced normal and
+Durable apps, including apps returned by `create_function_app()`. Place it
+immediately above a plain `async def` handler, below every Azure Functions SDK
+trigger/binding decorator. For example, a bodyless HTTP handler:
+
+```python
+from azurefunctions.extensions.http.fastapi import JSONResponse, Request
+from azure_functions_agents import HostedSkillFunctionApp
+
+app = HostedSkillFunctionApp()
+
+
+@app.route(route="value", methods=["GET"])
+@app.smart_retry()
+async def value(req: Request) -> JSONResponse:
+  return JSONResponse({"value": int(req.query_params["value"])})
+```
+
+The keyword-only API is
+`app.smart_retry(*, agent_name: str | None = None, max_retries=1, timeout=60, request_arg=None, audit_only=False)`.
+These are plain decorator options, not front-matter fields or a public
+configuration object. It preserves the handler's signature and annotations,
+injects no argument, and has no `arg_name` option. No `HostedSkill` parameter,
+explicit skill call, manual operation context, input contract or correction table
+is required. Ordinary injection and public `HostedSkill.run()`/`stream()` behavior
+are unchanged. This replaces `HostedSkillRecovery` and the `recovery` keyword
+on `hosted_skill`; neither old recovery entry point is retained as an alias.
+Combining `hosted_skill` injection and `smart_retry` on the same
+handler is unsupported and rejected, as is applying `smart_retry` twice.
+Synchronous handlers and SDK FunctionBuilder objects (from incorrect decorator
+order) are also rejected.
+
+**Default advisor:** omit `agent_name` or pass `None` to use the bundled Smart
+Retry Advisor; no customer advisor file is required or written at startup. Its
+packaged markdown preserves the former sample queue advisor's body, with a
+generic name and description for failed function handlers. Its model and
+`agent_configuration` inherit app global defaults through normal composition,
+then existing environment/provider defaults apply. No settings are inferred
+from another discovered agent. The decorator's `timeout=60` remains the recovery
+deadline, independent of global or agent execution timeouts.
+
+The private `_smart_retry_advisor` history identity stays outside the authored
+catalog, discovery, trigger/endpoint registration and delegation. It grants no
+discovered capabilities and does not make an app Durable. That exact slug is
+reserved; an authored agent with it is rejected. Each app captures its own
+immutable default configuration snapshot.
+
+**Custom advisor:** `@app.smart_retry(agent_name="error_advisor")` selects an
+authored catalog agent by filename-derived slug. Its resolved markdown
+instructions, model and agent configuration are forwarded to recovery; packaged
+guidance is not appended. Selected guidance supplements mandatory runtime-owned
+recovery or audit policy and cannot grant tools, increase budgets or change
+failure semantics. Empty strings, wrong types and unknown names are errors,
+not fallback requests. `hosted_skill` still requires an explicit `agent_name`.
+
+Options are validated when the decorator is defined: `max_retries` must be a
+positive integer and `timeout` a finite positive number; neither accepts booleans.
+`request_arg` must be `None` or a non-keyword Python identifier naming a concrete
+handler parameter. `audit_only` must be an actual boolean (`type(audit_only) is bool`),
+not an integer, string or `None`. Its default is `False`; existing defaults remain
+`max_retries=1`, `timeout=60`, and `request_arg=None`. With `audit_only=True`, any
+otherwise valid positive `max_retries` is ignored for execution and the effective
+retry budget is zero. Explicit `max_retries=0` is invalid even in audit mode.
+The selected advisor passes capability/provider qualification at decorator
+application, including provider preflight for the default only when selected.
+Qualification acquires no model client; a successful original handler needs none.
+
+By default, indexing selects the actual trigger argument from Azure Functions
+binding metadata and recovery has a 60-second deadline. Set `request_arg`
+explicitly to override selection. Automatic selection requires indexing, so
+direct unit-test calls must first call `app.get_functions()` or supply an
+explicit override such as `request_arg="req"`. Without either, the direct call
+raises `RuntimeError` at invocation time, before input qualification or the
+original handler executes. Selection is trigger-neutral, with reconstruction for
+bodyless HTTP requests and `azure.functions.QueueMessage` text bodies.
+Unsupported input types, invalid UTF-8 queue bodies and bodies over 32 KiB raise
+before the handler or agent executes, not as recovery responses. The original
+handler runs first after input qualification; success starts no agent and emits
+no advice log, including in audit mode.
+
+On an uncaught handler exception, the runtime starts **one agent run**, which may
+contain multiple model/tool roundtrips. The isolated turn uses the selected
+model, app harness, agent configuration and selected markdown guidance alongside
+mandatory runtime policy. Normal mode (`audit_only=False`)
+uses recovery system instructions and only runtime `list_files`,
+`read_file`, `search_source`, and `retry_function` tools.
+It does not inherit authored tools, MCP servers, skills, sandbox, web access or
+response schemas/examples, and does not mutate the agent catalog. Read-only
+source inspection is bounded to project Python files under the bound app root;
+traversal, linked/junction paths, hidden files and environment/build paths are
+excluded. There is no write or arbitrary-code-execution tool.
+
+**Audit-only opt-in:** use this decorator instead of a normal smart-retry
+decorator, keeping the SDK binding and handler unchanged:
+
+```python
+@app.smart_retry(max_retries=3, audit_only=True)
+```
+
+The valid positive `max_retries=3` is overridden with an effective zero budget.
+After the original handler fails, the advisor receives separate audit system
+instructions for concise, source-grounded analysis, forbidding replay and input
+mutation. Its only tools are `list_files`, `read_file`, and `search_source`;
+`retry_function` is absent. No replacement inputs are prepared and no handler
+replay occurs. The model cannot invoke a retry even if it ignores instructions;
+an effective-zero execution guard also enforces this boundary. Diagnostics
+include `audit_only=true` and effective `max_retries=0`. No authored capabilities
+are added, and normal recovery instructions and behavior remain unchanged.
+
+After analysis, the shared logger emits the advice **once at WARNING level**,
+bounded to **2,000 characters**. Missing/empty advice, provider errors or deadline
+expiry use static fallback guidance. The handler failure is not converted to
+success: audit returns the same HTTP 500 remediation (HEAD bodyless) or raises
+`HostedSkillRecoveryError` for queues, as described below. Host redelivery and
+poison-queue handling remain in force; each delivery may run another audit.
+External cancellation propagates without an advice log. Logged advice remains
+untrusted model text and adds no confidentiality guarantee.
+
+**Normal retry mode:** `max_retries` is a positive integer, defaulting to one,
+excluding the initial failed handler invocation. For example,
+`@app.smart_retry(max_retries=3)` lets the agent make
+up to three sequential correction attempts in one recovery run.
+Failed handler executions consume attempts; invalid tool arguments and rejected
+overlapping calls do not. The first successful return blocks further execution,
+even if budget remains. The agent may stop early when no safe correction is clear.
+
+`retry_function` executes the **entire original undecorated handler in the same
+host invocation**. Each attempt reconstructs the original input, not the previous
+attempt; the agent must repeat every correction still needed. Other arguments
+are preserved. The retry tool's schema depends on the selected input adapter:
+
+- **HTTP:** existing route keys accept finite JSON scalars (including numbers);
+  query corrections are string pairs merged by key without deleting unrelated
+  values. Starlette preserves duplicate query values; Azure Functions query
+  patches require unique keys. The tool cannot change headers, method, path,
+  identity or bindings, and corrections do not recompute authorization or bindings.
+- **Storage Queue:** `retry_function` requires one `body` string containing the
+  complete replacement text, not HTTP route/query arguments. Both original and
+  replacement must be strict UTF-8, at most 32 KiB encoded bytes, without silent
+  truncation. The runtime imposes no JSON parser or business schema; validation
+  stays in the handler. The SDK-compatible replacement message preserves `id`,
+  `pop_receipt`, `dequeue_count`, `insertion_time`, `expiration_time` and
+  `time_next_visible`, and leaves the original message unchanged. Recovery does
+  not update, delete or settle the stored message.
+
+The tool neither resends HTTP nor requests a new queue delivery. The wrapper
+returns the **actual handler result unchanged**, not a model-made replacement;
+a normal return counts as success, including any HTTP status or a queue handler's
+`None`. The model sees only a safe tool status, not the handler result. A retained
+result survives later provider failure or recovery timeout. If no retry succeeds:
+
+- **HTTP:** return HTTP 500 JSON with `error: "FUNCTION_RECOVERY_FAILED"`,
+  `requires_user_action: true`, and `remediation`. HEAD failures have no body.
+- **Storage Queue:** raise `HostedSkillRecoveryError`, publicly importable from
+  `azure_functions_agents`, with a `remediation` attribute bounded to 2,000
+  characters. Original exception text and queue body are not automatically
+  included; `raise ... from None` suppresses the original exception context in
+  formatted output. The invocation remains failed, preserving host redelivery
+  and eventual poison-queue handling rather than returning advice as success.
+
+Infrastructure failures or missing advice use static guidance; generated advice
+is untrusted model text. In both modes, the shared recovery deadline includes
+analysis, source tools and any retry executions; it does not reset between attempts.
+External cancellation still propagates as `CancelledError`, never remediation,
+even after retained success, and emits no audit advice log. Tools expire on exit;
+bounded cleanup remains cooperative and cannot forcibly stop code that suppresses
+cancellation. Corrections and preservation of supplied meaning are model-guided,
+not guaranteed: handler acceptance does not prove semantic equivalence to the
+original input.
+
+**Safety boundary:** HTTP recovery supports only bodyless GET/HEAD Azure Functions
+and Starlette requests. Starlette preparation accepts headerless requests after
+a bounded receive verifies an empty terminal ASGI event; `Content-Length: 0` is
+not required. Queue recovery supports only textual `azure.functions.QueueMessage`
+inputs, not Service Bus or Event Hubs. HTTP bodies, output bindings, streaming,
+Durable orchestrators and non-idempotent side effects are unsupported. Opt-in
+asserts replay safety: the decorator cannot inspect outer output bindings or roll
+back effects.
+
+Use **reviewed source and synthetic, non-sensitive inputs**. Recovery shares
+error type, project-relative stack locations and handler identity with the model.
+HTTP diagnostics share filtered route/query inputs, not headers or HTTP bodies;
+credential-like input keys are filtered and cannot be patched. Queue diagnostics
+share the bounded textual body, not delivery metadata or pop receipts. Malformed
+message text cannot be reliably field-redacted. Environment values, raw exception
+messages and absolute paths are not automatically included, but input values,
+queue text and Python source may still contain secrets.
+Opt-in is a **data-sharing decision, not automatic secret redaction**; generated
+remediation, including audit advice written to logs, is not a confidentiality
+guarantee. See the [whole-function recovery sample](../samples/hosted-skill-remediation/) and
+[FRD 0014](frds/0014-smart-retry-decorator.md) for the standalone API;
+[FRD 0015](frds/0015-smart-retry-audit-only.md) adds audit-only mode;
+[FRD 0016](frds/0016-default-smart-retry-advisor.md) adds the bundled default and
+custom advisor guidance. Historical
+[FRD 0012](frds/0012-hosted-skill-recovery.md) and
+[FRD 0013](frds/0013-hosted-skill-queue-recovery.md) describe the engine and input
+contracts; FRD 0014 supersedes their recovery authoring API.
 
 ---
 

@@ -41,6 +41,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "HostedSkillEvent",
         "HostedSkillEventKind",
         "HostedSkillFunctionApp",
+        "HostedSkillRecoveryError",
         "HostedSkillResponseError",
         "WorkflowRetryBackoff",
         "WorkflowRetryPolicy",
@@ -61,6 +62,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "validate_session_id",
         "workflow_tool",
     ]
+    assert not hasattr(azure_functions_agents, "HostedSkillRecovery")
     assert not hasattr(azure_functions_agents, "run_copilot_agent")
     assert not hasattr(azure_functions_agents, "run_copilot_agent_stream")
 

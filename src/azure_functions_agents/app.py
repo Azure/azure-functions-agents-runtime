@@ -14,6 +14,7 @@ from . import _hosted_skill_app
 from ._agent_identity import agent_id
 from ._logger import logger
 from ._observability import configure_observability
+from ._smart_retry_advisor import DEFAULT_ADVISOR_SLUG, build_default_advisor
 from ._source_marker import source_marker
 from ._tool_descriptor import ToolDescriptor
 from .config.loader import load_agent_specs, load_global_config
@@ -122,6 +123,11 @@ def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
         sources_by_slug.setdefault(resolved.slug, []).append(source_marker(resolved.source_file))
 
     for slug, sources in sorted(sources_by_slug.items()):
+        if slug == DEFAULT_ADVISOR_SLUG:
+            raise ValueError(
+                f"Agent slug {slug!r} is reserved for the runtime smart-retry advisor. "
+                "Rename the authored agent."
+            )
         if len(sources) > 1:
             listed = ", ".join(sorted(sources))
             raise ValueError(
@@ -266,16 +272,19 @@ def _compose_function_app(
         catalog,
         workflow_handler_catalog,
     )
+    default_advisor = build_default_advisor(global_config)
     app: HostedSkillApp = (
         _hosted_skill_app.HostedSkillDFApp(
             catalog=catalog,
             harness=harness,
+            default_advisor=default_advisor,
             http_auth_level=func.AuthLevel.FUNCTION,
         )
         if workflow_agent_policies
         else _hosted_skill_app.HostedSkillFunctionApp(
             catalog=catalog,
             harness=harness,
+            default_advisor=default_advisor,
             http_auth_level=func.AuthLevel.FUNCTION,
         )
     )

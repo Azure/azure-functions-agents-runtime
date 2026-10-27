@@ -12,8 +12,10 @@ from ._agent_run_diagnostics import (
     start_agent_run_span,
 )
 from ._agent_validation import validate_prompt, validate_session_id
+from ._hosted_recovery_input import recovery_instructions
 from ._logger import logger
 from ._observability import FaultDomain, current_span
+from ._tool_descriptor import ToolDescriptor
 from .harness._harness_binding import AppHarness
 from .registration.catalog import CatalogEntry
 from .response_contract import (
@@ -41,6 +43,32 @@ class HostedSkill:
 
     _entry: CatalogEntry
     _harness: AppHarness
+
+    async def _run_recovery(
+        self, prompt: str, *, tools: list[ToolDescriptor], timeout: float,
+        audit_only: bool = False,
+    ) -> AgentResult:
+        """Execute invocation-local recovery without authored execution capabilities."""
+        resolved = self._entry.resolved
+        session_id, is_new_session = _resolve_session_id(None)
+        return await run_agent(
+            validate_prompt(prompt),
+            instructions=recovery_instructions(resolved.instructions, audit_only=audit_only),
+            timeout=timeout,
+            tools=list(tools),
+            mcp_tools=[],
+            skill_paths=[],
+            skills=[],
+            skill_catalog=[],
+            model=resolved.model,
+            session_id=session_id,
+            sandbox_tools=[],
+            web_request_tools=[],
+            agent_configuration=resolved.agent_configuration,
+            agent_name=resolved.slug,
+            _harness=self._harness,
+            _session_is_new=is_new_session,
+        )
 
     async def run(
         self,

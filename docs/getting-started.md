@@ -144,6 +144,43 @@ supported API. The handler must be a plain `async def`, and agent calls must not
 run inside a replayed Durable orchestrator.
 See the [hybrid HostedSkill sample](../samples/hybrid-hosted-skill/).
 
+## Recover a replay-safe Function
+
+Use the separate `@app.smart_retry()` decorator immediately above an async
+bodyless GET/HEAD or Storage Queue handler, below its SDK trigger decorators.
+No `HostedSkill` parameter, explicit agent call or custom advisor file is needed:
+
+```python
+@app.route(route="value", methods=["GET"])
+@app.smart_retry()
+async def value(req: Request) -> Response:
+  return Response(str(int(req.query_params["value"])), media_type="text/plain")
+```
+
+Omitted `agent_name` (or `None`) uses the bundled Smart Retry Advisor. It inherits
+global model and `agent_configuration`, then existing environment/provider
+defaults, not another authored agent's settings. Provider settings are
+preflighted when selected by the decorator, without acquiring a model client;
+initial success starts no agent. After failure, one isolated agent run can
+inspect project Python source and retry the whole handler once by default,
+under a 60-second recovery deadline. Successful replay returns the actual
+handler result, not a model-generated replacement.
+
+Choose `@app.smart_retry(agent_name="error_advisor")` to use your own catalog
+agent's authored instructions, model and configuration within the same runtime
+policy and tool limits. Unknown or invalid names fail without fallback.
+`hosted_skill` injection still requires an explicit name. The bundled advisor
+adds no discovered agent, trigger, endpoint or delegation target.
+
+Use `@app.smart_retry(audit_only=True)` for advice without replay: source tools
+only, no retry tool, one bounded WARNING advice log after failure, and the
+invocation still fails. `max_retries` must remain positive even in audit mode.
+Host queue redelivery/poison behavior is unchanged. Use reviewed source and
+synthetic, non-sensitive inputs; model-guided corrections do not guarantee
+semantic preservation or roll back side effects. See the
+[recovery limits](front-matter-spec.md#opt-in-handler-recovery) and
+[two-queue retry/audit sample](../samples/hosted-skill-remediation/).
+
 ## Where to go next
 
 - [Front matter spec](front-matter-spec.md) — full `.agent.md` field reference, triggers, built-in endpoints, subagents, and environment variable substitution, with narrative examples

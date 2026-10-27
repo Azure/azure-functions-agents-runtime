@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
+from unittest.mock import Mock
 
 import pytest
 
 import azure_functions_agents.hosted_skill_binding as hosted_skill_module
+from azure_functions_agents import _hosted_recovery_input as recovery_input
+from azure_functions_agents._hosted_recovery_input import AUDIT_INSTRUCTIONS, RECOVERY_INSTRUCTIONS
 from azure_functions_agents._observability import FaultDomain
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     BuiltinEndpointsConfig,
@@ -405,6 +410,266 @@ def test_hosted_skill_is_not_callable(tmp_path: Path) -> None:
     skill, _ = _make_skill(tmp_path)
 
     assert not callable(skill)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness_kind", list(HarnessKind))
+@pytest.mark.parametrize("audit_only", [False, True])
+async def test_run_recovery_forwards_selected_custom_guidance_to_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, harness_kind: HarnessKind, audit_only: bool,
+) -> None:
+    skill, _ = _make_skill(tmp_path, harness_kind=harness_kind)
+    guidance = "CUSTOM ADVISOR: inspect the invoice fields before suggesting a correction."
+    skill._entry.resolved.instructions = guidance
+    captured: dict[str, Any] = {}
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        captured.update(kwargs, prompt=prompt)
+        return AgentResult(kwargs["session_id"], "Review the invoice.")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    await skill._run_recovery("Analyze this failure", tools=[], timeout=1, audit_only=audit_only)
+
+    policy = AUDIT_INSTRUCTIONS if audit_only else RECOVERY_INSTRUCTIONS
+    assert captured["instructions"].startswith(guidance + "\n\nRuntime")
+    assert captured["instructions"].endswith("\n" + policy)
+    assert captured["instructions"].count(guidance) == 1
+    assert captured["prompt"] == "Analyze this failure"
+    for key in (
+        "tools", "mcp_tools", "skill_paths", "skills", "skill_catalog", "sandbox_tools",
+        "web_request_tools",
+    ):
+        assert captured[key] == []
+    assert skill._entry.resolved.instructions == guidance
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness_kind", list(HarnessKind))
+@pytest.mark.parametrize("audit_only", [False, True])
+async def test_run_recovery_isolates_tools_and_response_contract_from_normal_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, harness_kind: HarnessKind, audit_only: bool,
+) -> None:
+    skill, capabilities = _make_skill(
+        tmp_path, harness_kind=harness_kind,
+        response_schema={
+            "type": "object", "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+    )
+    tool_names = ["list_files", "read_file", "search_source"] if audit_only else ["retry_function"]
+    tools = [ToolDescriptor.create(
+        name=name, description="Invocation-local tool.", func=lambda: "complete",
+    ) for name in tool_names]
+    sandbox = Mock(return_value=["sandbox"])
+    monkeypatch.setattr(hosted_skill_module, "build_sandbox_tools_for_session", sandbox)
+    captured = []
+    results = []
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        captured.append((prompt, kwargs))
+        content = '{"ok": true}' if len(captured) in (1, 3) else "not JSON"
+        result = AgentResult(kwargs["session_id"], content)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    assert await skill.run("Normal before") is results[0]
+    sandbox.assert_called_once()
+    recovery_result = await skill._run_recovery(
+        "Recover this invocation", tools=tools, timeout=3, audit_only=audit_only,
+    )
+    assert recovery_result is results[1]
+    assert recovery_result.content == "not JSON"
+    sandbox.assert_called_once()
+    recovery_prompt, recovery = captured[1]
+    assert recovery_prompt == "Recover this invocation"
+    assert recovery["tools"] == tools
+    assert recovery["tools"] is not tools
+    assert recovery["tools"][0] is tools[0]
+    assert [tool.name for tool in recovery["tools"]] == tool_names
+    assert await recovery["tools"][0].invoke(arguments={}) == "complete"
+    for key in ("mcp_tools", "skill_paths", "skills", "skill_catalog", "sandbox_tools", "web_request_tools"):
+        assert recovery[key] == []
+    assert recovery["instructions"] != skill._entry.resolved.instructions
+    assert recovery["instructions"] == recovery_input.recovery_instructions(
+        skill._entry.resolved.instructions, audit_only=audit_only,
+    )
+    assert AUDIT_INSTRUCTIONS != RECOVERY_INSTRUCTIONS
+    if not audit_only:
+        assert "drop unfamiliar" in recovery["instructions"]
+        assert "exact input text" in recovery["instructions"]
+    assert recovery["timeout"] == 3
+    assert recovery["model"] == "model-one"
+    assert recovery["agent_name"] == "internal"
+    assert recovery["agent_configuration"] is skill._entry.resolved.agent_configuration
+    assert recovery["_harness"] is skill._harness
+    assert recovery["_session_is_new"] is True
+    recovery["tools"].clear()
+    assert len(tools) == len(tool_names)
+
+    assert await skill.run("Normal after") is results[2]
+    assert sandbox.call_count == 2
+    for index, prompt in ((0, "Normal before"), (2, "Normal after")):
+        normal_prompt, normal = captured[index]
+        assert normal_prompt.endswith(prompt)
+        assert normal_prompt != prompt
+        assert normal["instructions"] == "Follow policy."
+        assert normal["timeout"] == 12
+        assert normal["tools"] == capabilities.filtered_user_tools == ["tool"]
+        assert normal["mcp_tools"] == capabilities.filtered_mcp_tools == ["mcp"]
+        assert normal["skill_paths"] == capabilities.enabled_skill_paths
+        assert normal["skills"] == list(capabilities.skills)
+        assert normal["skill_catalog"] == list(capabilities.skill_catalog)
+        assert normal["web_request_tools"] == capabilities.web_request_tools == ["web"]
+        assert normal["sandbox_tools"] == ["sandbox"]
+    assert len({kwargs["session_id"] for _, kwargs in captured}) == 3
+    assert skill._entry.resolved.instructions == "Follow policy."
+    with pytest.raises(InvalidResponseJsonError):
+        await skill.run("Still validate normal responses")
+
+
+def test_run_recovery_has_additive_keyword_only_audit_option() -> None:
+    parameters = inspect.signature(HostedSkill._run_recovery).parameters
+
+    assert list(parameters) == ["self", "prompt", "tools", "timeout", "audit_only"]
+    for name in ("tools", "timeout", "audit_only"):
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["tools"].default is inspect.Parameter.empty
+    assert parameters["timeout"].default is inspect.Parameter.empty
+    assert parameters["audit_only"].default is False
+    assert get_type_hints(HostedSkill._run_recovery)["audit_only"] is bool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness_kind", list(HarnessKind))
+async def test_concurrent_audit_and_retry_calls_do_not_mutate_shared_catalog_or_normal_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, harness_kind: HarnessKind,
+) -> None:
+    skill, capabilities = _make_skill(tmp_path, harness_kind=harness_kind)
+    audit_tools = [ToolDescriptor.create(
+        name=name, description="Inspect source only.", func=lambda: "source",
+    ) for name in ("list_files", "read_file", "search_source")]
+    retry_tools = [ToolDescriptor.create(
+        name="retry_function", description="Retry this invocation only.", func=lambda: "retried",
+    )]
+    captured = {}
+    both_running = asyncio.Event()
+    sandbox = Mock(return_value=["sandbox"])
+    monkeypatch.setattr(hosted_skill_module, "build_sandbox_tools_for_session", sandbox)
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        captured[prompt] = kwargs
+        if len(captured) == 2:
+            both_running.set()
+        if prompt in {"Audit this failure", "Retry this failure"}:
+            await both_running.wait()
+        return AgentResult(kwargs["session_id"], prompt)
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+    audit_result, retry_result = await asyncio.wait_for(asyncio.gather(
+        skill._run_recovery("Audit this failure", tools=audit_tools, timeout=2, audit_only=True),
+        skill._run_recovery("Retry this failure", tools=retry_tools, timeout=3),
+    ), timeout=2)
+
+    assert audit_result.content == "Audit this failure"
+    assert retry_result.content == "Retry this failure"
+    assert set(captured) == {"Audit this failure", "Retry this failure"}
+    audit = captured["Audit this failure"]
+    retry = captured["Retry this failure"]
+    assert audit["instructions"] == recovery_input.recovery_instructions(
+        skill._entry.resolved.instructions, audit_only=True,
+    )
+    assert retry["instructions"] == recovery_input.recovery_instructions(
+        skill._entry.resolved.instructions,
+    )
+    assert audit["timeout"] == 2
+    assert retry["timeout"] == 3
+    assert audit["session_id"] == audit_result.session_id
+    assert retry["session_id"] == retry_result.session_id
+    assert audit["session_id"] != retry["session_id"]
+    assert audit["tools"] == audit_tools
+    assert retry["tools"] == retry_tools
+    assert audit["tools"] is not audit_tools
+    assert retry["tools"] is not retry_tools
+    assert audit["tools"] is not retry["tools"]
+    for call in (audit, retry):
+        assert call["_harness"] is skill._harness
+        assert call["agent_configuration"] is skill._entry.resolved.agent_configuration
+        assert call["_session_is_new"] is True
+    for key in ("mcp_tools", "skill_paths", "skills", "skill_catalog", "sandbox_tools", "web_request_tools"):
+        assert audit[key] == retry[key] == []
+        assert audit[key] is not retry[key]
+        audit[key].append("audit-local mutation")
+        assert retry[key] == []
+    audit["tools"].clear()
+    assert len(audit_tools) == 3
+    assert retry["tools"] == retry_tools
+    sandbox.assert_not_called()
+
+    normal_result = await skill.run("Normal after both modes")
+    normal = captured[normal_result.content]
+    sandbox.assert_called_once()
+    assert normal["instructions"] == "Follow policy."
+    assert normal["timeout"] == 12
+    assert normal["tools"] == capabilities.filtered_user_tools == ["tool"]
+    assert normal["mcp_tools"] == capabilities.filtered_mcp_tools == ["mcp"]
+    assert normal["skill_paths"] == capabilities.enabled_skill_paths
+    assert normal["skills"] == list(capabilities.skills)
+    assert normal["skill_catalog"] == list(capabilities.skill_catalog)
+    assert normal["web_request_tools"] == capabilities.web_request_tools == ["web"]
+    assert normal["sandbox_tools"] == ["sandbox"]
+    assert len({call["session_id"] for call in (audit, retry, normal)}) == 3
+    assert skill._entry.resolved.instructions == "Follow policy."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_only", [False, True])
+async def test_run_recovery_keeps_selected_advisor_guidance_separate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, audit_only: bool,
+) -> None:
+    custom, _ = _make_skill(tmp_path)
+    default, _ = _make_skill(tmp_path)
+    custom_guidance = "CUSTOM GUIDANCE: inspect invoice fields."
+    default_guidance = "DEFAULT GUIDANCE: inspect generic handler inputs."
+    custom._entry.resolved.instructions = custom_guidance
+    default._entry.resolved.instructions = default_guidance
+    captured: dict[str, str] = {}
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        captured[prompt] = kwargs["instructions"]
+        return AgentResult(kwargs["session_id"], "Review inputs.")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+    for prompt, skill in (("default", default), ("custom", custom), ("default again", default)):
+        await skill._run_recovery(prompt, tools=[], timeout=1, audit_only=audit_only)
+
+    assert captured["custom"] == recovery_input.recovery_instructions(
+        custom_guidance, audit_only=audit_only,
+    )
+    assert captured["default"] == captured["default again"] == recovery_input.recovery_instructions(
+        default_guidance, audit_only=audit_only,
+    )
+    assert default_guidance not in captured["custom"]
+    assert custom_guidance not in captured["default"]
+    assert custom._entry.resolved.instructions == custom_guidance
+    assert default._entry.resolved.instructions == default_guidance
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_only", [False, True])
+async def test_run_recovery_validates_prompt_before_runner_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, audit_only: bool,
+) -> None:
+    skill, _ = _make_skill(tmp_path)
+    runner = Mock()
+    monkeypatch.setattr(hosted_skill_module, "run_agent", runner)
+
+    with pytest.raises(ValueError, match="nonblank"):
+        await skill._run_recovery(" ", tools=[], timeout=1, audit_only=audit_only)
+
+    runner.assert_not_called()
 
 
 @pytest.mark.asyncio

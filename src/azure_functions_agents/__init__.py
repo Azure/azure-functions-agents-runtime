@@ -16,6 +16,7 @@ __version__ = "0.1.0b17"
 
 from ._agent_validation import validate_session_id
 from ._function_tool import tool, workflow_tool
+from ._hosted_recovery_input import HostedSkillRecoveryError
 from ._hosted_skill_app import HostedSkillDFApp
 from ._tool_descriptor import ApprovalMode
 from .app import (
@@ -72,6 +73,7 @@ __all__ = [
     "HostedSkillEvent",
     "HostedSkillEventKind",
     "HostedSkillFunctionApp",
+    "HostedSkillRecoveryError",
     "HostedSkillResponseError",
     "WorkflowRetryBackoff",
     "WorkflowRetryPolicy",
