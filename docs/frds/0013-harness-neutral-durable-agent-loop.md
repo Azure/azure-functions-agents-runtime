@@ -821,6 +821,8 @@ Cancellation is acknowledged intent, not rollback.
 - The absolute deadline starts when start acknowledgement is committed, not
   during admission. Replay, retries, connector resumes and `ContinueAsNew`
   preserve it unchanged.
+- The Entity rejects every terminal commit until start acknowledgement has
+  atomically bound the turn start and absolute deadline.
 - A generation-tagged Entity timeout signal independently enforces the deadline
   if the turn orchestration is lost. Duplicate acknowledgement and human input
   never extend it.
@@ -1025,6 +1027,7 @@ The feature contract is satisfied when:
 | 33 | Architecture approval | Continue architecture review / finalize the feature contract | Finalize the harness-neutral Durable Agent Loop contract for implementation | Human | 2026-10-20 |
 | 34 | Explicit persisted meaning | Positional/convention-only batches and parallel fields / named identities, ordered batches and discriminated variants | Persist sequence explicitly, validate batch uniqueness/order, name command identity, split continuation read roles and close stable evidence/failure vocabularies | Human; review recommendation | 2026-10-26 |
 | 35 | Retry, resume and wire-version safety | Connector convention / independent continuation and results / one validated resume request with explicit versions and retry eligibility | Require explicit wire versions, bind continuation plus pending operations plus ordered results in one resume request, permit retry only for proven retryable transport failures, represent confirmed cancellation explicitly and fail closed on public Blob containers | Human; review recommendation | 2026-10-26 |
+| 36 | Terminal lifecycle sequencing | Permit terminal commit after admission / require start acknowledgement | Reject terminal commit until the Entity has bound the turn start and absolute deadline | Human | 2026-10-27 |
 
 ## 6. Test plan
 

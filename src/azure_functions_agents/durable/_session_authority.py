@@ -432,6 +432,7 @@ class TerminalCommitRejected(_AuthorityModel):
         "no_active_turn",
         "stale_generation",
         "identity_mismatch",
+        "not_started",
         "terminal_conflict",
     ]
 
@@ -703,6 +704,11 @@ def complete_turn(
     )
     if fence is not GenerationFenceStatus.ACTIVE:
         return state, TerminalCommitRejected(reason=_start_rejection_reason(fence))
+
+    active = state.active_turn
+    assert active is not None
+    if active.started_at is None:
+        return state, TerminalCommitRejected(reason="not_started")
 
     terminal = TerminalTurn(
         request_id=command.request_id,

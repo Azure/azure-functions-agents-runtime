@@ -101,6 +101,22 @@ def _accepted_turn() -> tuple[SessionAuthorityState, AdmissionAccepted]:
     return state, outcome
 
 
+def _started_turn() -> tuple[SessionAuthorityState, AdmissionAccepted]:
+    state, accepted = _accepted_turn()
+    started, outcome = acknowledge_turn_start(
+        state,
+        StartTurnCommand(
+            request_id=accepted.receipt.request_id,
+            run_id=accepted.receipt.run_id,
+            turn_generation=accepted.receipt.turn_generation,
+            started_at=NOW + timedelta(seconds=1),
+            deadline=NOW + timedelta(minutes=5),
+        ),
+    )
+    assert isinstance(outcome, StartAcknowledged)
+    return started, accepted
+
+
 def test_session_authority_round_trips_strict_bounded_state() -> None:
     state = _state()
 
@@ -322,7 +338,7 @@ def test_terminal_commit_releases_slot_for_next_admission(
     result_ref: ContentRef | None,
     error_code: str | None,
 ) -> None:
-    state, accepted = _accepted_turn()
+    state, accepted = _started_turn()
     command = CompleteTurnCommand(
         request_id=accepted.receipt.request_id,
         run_id=accepted.receipt.run_id,
@@ -352,8 +368,28 @@ def test_terminal_commit_releases_slot_for_next_admission(
     assert next_state.active_turn is not None
 
 
-def test_terminal_commit_rejects_changed_replay() -> None:
+def test_terminal_commit_rejects_turn_without_start_acknowledgement() -> None:
     state, accepted = _accepted_turn()
+
+    unchanged, outcome = complete_turn(
+        state,
+        CompleteTurnCommand(
+            request_id=accepted.receipt.request_id,
+            run_id=accepted.receipt.run_id,
+            turn_generation=accepted.receipt.turn_generation,
+            status=TurnTerminalStatus.FAILED,
+            terminal_at=NOW + timedelta(minutes=5),
+            error_code="provider_failure",
+        ),
+    )
+
+    assert isinstance(outcome, TerminalCommitRejected)
+    assert outcome.reason == "not_started"
+    assert unchanged is state
+
+
+def test_terminal_commit_rejects_changed_replay() -> None:
+    state, accepted = _started_turn()
     command = CompleteTurnCommand(
         request_id=accepted.receipt.request_id,
         run_id=accepted.receipt.run_id,
@@ -375,7 +411,7 @@ def test_terminal_commit_rejects_changed_replay() -> None:
 
 
 def test_state_rejects_obsolete_active_generation() -> None:
-    first_state, first = _accepted_turn()
+    first_state, first = _started_turn()
     terminal_state, _ = complete_turn(
         first_state,
         CompleteTurnCommand(
@@ -481,7 +517,7 @@ def test_deletion_is_stable_and_immediately_revokes_admission() -> None:
 
 
 def test_deletion_fences_a_later_active_generation() -> None:
-    first_state, first = _accepted_turn()
+    first_state, first = _started_turn()
     terminal_state, _ = complete_turn(
         first_state,
         CompleteTurnCommand(
