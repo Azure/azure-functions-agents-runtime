@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import azure.durable_functions as df
+import pytest
 
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config.loader import load_agent_specs
@@ -77,6 +79,17 @@ def test_sample_is_runnable_and_indexes_subagent_activity() -> None:
     ] == ["durableClient", "queueTrigger"]
 
 
+def test_coordinator_example_passes_each_review_to_writer() -> None:
+    main = next(spec for spec in load_agent_specs(SAMPLE_SRC) if spec.is_main)
+    example = json.loads(main.instructions.split("```json\n", 1)[1].split("```", 1)[0])
+
+    assert example["agent"] == "actionable_report_writer"
+    assert example["type"] == "sub_agent"
+    for task_id in example["depends_on"]:
+        assert f"${{{task_id}.result.text}}" in example["task"]
+    assert "pull_request_urls" in main.instructions
+
+
 def test_sample_runtime_files_and_customer_readme_are_complete() -> None:
     for name in (
         ".funcignore",
@@ -144,6 +157,62 @@ def test_fake_pr_tools_are_deterministic() -> None:
     ](url)
 
 
+@pytest.mark.parametrize(
+    "html",
+    [
+        "I am missing the pull-request summaries.",
+        "<p>Please provide the summaries.</p>",
+        "<html><body>Incomplete",
+        "```html\n<html><body>Report</body></html>\n```",
+        "<html><body>Report without links</body></html>",
+        "<html>Report without body</html>",
+        "<html><body>https://github.com/Azure/azure-functions-host/pull/123 "
+        "https://github.com/Azure/azure-functions-python-worker/pull/456</body></html>",
+        '<html><body><a href="https://github.com/Azure/azure-functions-host/pull/123">PR</a></body></html>',
+    ],
+)
+def test_report_publisher_rejects_invalid_report_before_storage(
+    monkeypatch: Any, html: str,
+) -> None:
+    publish = _workflow_tools()["publish_pr_status_report"]
+    connect = Mock()
+    monkeypatch.setattr(
+        "azure.storage.blob.BlobServiceClient.from_connection_string", connect,
+    )
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+
+    with pytest.raises(ValueError, match=r"HTML|pull-request"):
+        publish({
+            "html": html,
+            "blob_name": "reports/pr-status.html",
+            "pull_request_urls": [
+                "https://github.com/Azure/azure-functions-host/pull/123",
+                "https://github.com/Azure/azure-functions-python-worker/pull/456",
+            ],
+        })
+
+    connect.assert_not_called()
+
+
+@pytest.mark.parametrize("urls", [None, [], "", [""]])
+def test_report_publisher_requires_requested_urls(monkeypatch: Any, urls: Any) -> None:
+    publish = _workflow_tools()["publish_pr_status_report"]
+    connect = Mock()
+    monkeypatch.setattr(
+        "azure.storage.blob.BlobServiceClient.from_connection_string", connect,
+    )
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+
+    with pytest.raises(ValueError, match="pull_request_urls"):
+        publish({
+            "html": "<html><body>Report</body></html>",
+            "blob_name": "reports/pr-status.html",
+            "pull_request_urls": urls,
+        })
+
+    connect.assert_not_called()
+
+
 def test_report_publisher_repeatedly_overwrites_same_blob(monkeypatch: Any) -> None:
     publish = _workflow_tools()["publish_pr_status_report"]
     uploads: list[tuple[str, bytes, bool, str]] = []
@@ -183,9 +252,12 @@ def test_report_publisher_repeatedly_overwrites_same_blob(monkeypatch: Any) -> N
         lambda value: FakeService(),
     )
 
+    url = "https://github.com/Azure/azure-functions-host/pull/123"
+    html = f'<!doctype html><html><body><a href="{url}">PR</a></body></html>'
     args = {
-        "html": "<html><body>Portfolio</body></html>",
+        "html": html,
         "blob_name": "reports/pr-status.html",
+        "pull_request_urls": [url],
     }
     first = publish(args)
     second = publish(args)
@@ -194,13 +266,13 @@ def test_report_publisher_repeatedly_overwrites_same_blob(monkeypatch: Any) -> N
     assert uploads == [
         (
             "reports/pr-status.html",
-            b"<html><body>Portfolio</body></html>",
+            html.encode("utf-8"),
             True,
             "text/html; charset=utf-8",
         ),
         (
             "reports/pr-status.html",
-            b"<html><body>Portfolio</body></html>",
+            html.encode("utf-8"),
             True,
             "text/html; charset=utf-8",
         ),
