@@ -11,6 +11,7 @@ from azure_functions_agents.durable._session_authority import (
     AdmissionConflict,
     AdmissionDeleted,
     AdmissionGenerationMismatch,
+    AdmissionReceipt,
     CompleteTurnCommand,
     DeleteSessionCommand,
     GenerationFenceStatus,
@@ -22,6 +23,7 @@ from azure_functions_agents.durable._session_authority import (
     StartTurnCommand,
     TerminalCommitAccepted,
     TerminalCommitRejected,
+    TerminalTurn,
     TurnTerminalStatus,
     acknowledge_turn_start,
     admit_turn,
@@ -29,6 +31,8 @@ from azure_functions_agents.durable._session_authority import (
     create_session_authority,
     decode_session_authority_state,
     derive_request_fingerprint,
+    derive_request_id,
+    derive_run_id,
     encode_session_authority_state,
     generation_fence_status,
     mark_session_deleted,
@@ -120,6 +124,54 @@ def test_session_authority_decode_rejects_unknown_and_duplicate_fields() -> None
 def test_session_authority_decode_rejects_oversized_state_before_parsing() -> None:
     with pytest.raises(SessionAuthorityContractError, match="size limit"):
         decode_session_authority_state(b" " * (MAX_ENTITY_STATE_BYTES + 1))
+
+
+def test_state_capacity_uses_durable_wire_json_size() -> None:
+    state = _state()
+    receipts = []
+    for generation in range(1, 652):
+        idempotency_key = f"request-{generation}"
+        request_id = derive_request_id(
+            state.session_incarnation_id,
+            idempotency_key,
+        )
+        receipts.append(
+            AdmissionReceipt(
+                idempotency_key=idempotency_key,
+                request_fingerprint=derive_request_fingerprint(
+                    "builtin-chat",
+                    f'{{"generation":{generation}}}'.encode(),
+                ),
+                request_id=request_id,
+                run_id=derive_run_id(request_id),
+                turn_generation=generation,
+                request_ref=_content_ref(),
+                admitted_at=NOW,
+            )
+        )
+    last_receipt = receipts[-1]
+    oversized_on_wire = SessionAuthorityState.model_validate(
+        state.model_dump(mode="python")
+        | {
+            "next_turn_generation": 652,
+            "admission_receipts": tuple(receipts),
+            "last_terminal_turn": TerminalTurn(
+                request_id=last_receipt.request_id,
+                run_id=last_receipt.run_id,
+                turn_generation=last_receipt.turn_generation,
+                status=TurnTerminalStatus.COMPLETED,
+                terminal_at=NOW + timedelta(minutes=5),
+                result_ref=_content_ref("b"),
+            ),
+        },
+        strict=True,
+    )
+
+    assert len(oversized_on_wire.model_dump_json().encode("utf-8")) < (
+        MAX_ENTITY_STATE_BYTES
+    )
+    with pytest.raises(SessionAuthorityContractError, match="size limit"):
+        encode_session_authority_state(oversized_on_wire)
 
 
 def test_session_incarnation_changes_when_any_identity_component_changes() -> None:

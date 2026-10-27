@@ -491,6 +491,27 @@ def derive_session_incarnation_id(
     )
 
 
+def derive_session_entity_key(
+    *,
+    backend_name: str,
+    task_hub_name: str,
+    agent_slug: str,
+    owner_scope_digest: str,
+    entry_id: str,
+    session_id: str,
+) -> str:
+    """Derive the stable Entity key that owns all incarnations of one session."""
+    return _derive_digest(
+        "entity-v1",
+        backend_name,
+        task_hub_name,
+        agent_slug,
+        owner_scope_digest,
+        entry_id,
+        session_id,
+    )
+
+
 def derive_request_id(session_incarnation_id: str, idempotency_key: str) -> str:
     """Derive the stable request identity used to reconcile retries."""
     return _derive_digest("request-v1", session_incarnation_id, idempotency_key)
@@ -752,11 +773,15 @@ def encode_session_authority_state(state: SessionAuthorityState) -> bytes:
             strict=True,
         )
         payload = validated.model_dump_json().encode("utf-8")
+        wire_payload = json.dumps(
+            validated.model_dump(mode="json"),
+            allow_nan=False,
+        ).encode("utf-8")
     except (ValidationError, ValueError, TypeError):
         raise SessionAuthorityContractError(
             "Durable session authority state is invalid."
         ) from None
-    if len(payload) > MAX_ENTITY_STATE_BYTES:
+    if len(wire_payload) > MAX_ENTITY_STATE_BYTES:
         raise SessionAuthorityContractError(
             "Durable session authority state exceeds its serialized size limit."
         )
@@ -771,7 +796,11 @@ def decode_session_authority_state(payload: bytes) -> SessionAuthorityState:
         )
     try:
         json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
-        return _STATE_ADAPTER.validate_json(payload, strict=True)
+        state = _STATE_ADAPTER.validate_json(payload, strict=True)
+        encode_session_authority_state(state)
+        return state
+    except SessionAuthorityContractError:
+        raise
     except (ValidationError, ValueError, UnicodeDecodeError):
         raise SessionAuthorityContractError(
             "Durable session authority state is invalid."
