@@ -228,17 +228,12 @@ def test_entity_dispatches_admission_and_terminal_transitions() -> None:
         ).model_dump(mode="json"),
         state=started._state,
     )
-    snapshot = _invoke(
-        entity,
-        operation=SessionAuthorityOperation.GET,
-        state=completed._state,
-    )
 
     assert admitted.result["kind"] == "accepted"
     assert started.result["kind"] == "acknowledged"
     assert completed.result["kind"] == "committed"
-    assert snapshot.result["active_turn"] is None
-    assert snapshot.result["last_terminal_turn"]["turn_generation"] == 1
+    assert completed._state["active_turn"] is None
+    assert completed._state["last_terminal_turn"]["turn_generation"] == 1
 
 
 def test_entity_rejects_wrong_key_unknown_operation_and_missing_state() -> None:
@@ -254,7 +249,7 @@ def test_entity_rejects_wrong_key_unknown_operation_and_missing_state() -> None:
     with pytest.raises(SessionAuthorityEntityError, match="Unsupported"):
         _invoke(entity, operation="unknown")
     with pytest.raises(SessionAuthorityEntityError, match="not been created"):
-        _invoke(entity, operation=SessionAuthorityOperation.GET)
+        _invoke(entity, operation=SessionAuthorityOperation.ADMIT)
 
 
 def test_entity_dispatches_stable_deletion() -> None:
@@ -306,6 +301,6 @@ def test_entity_rejects_corrupted_persisted_state() -> None:
     with pytest.raises(SessionAuthorityEntityError, match="Persisted"):
         _invoke(
             entity,
-            operation=SessionAuthorityOperation.GET,
+            operation=SessionAuthorityOperation.ADMIT,
             state={"schema_version": 1},
         )

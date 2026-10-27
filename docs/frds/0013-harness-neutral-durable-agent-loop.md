@@ -683,6 +683,10 @@ The Entity also owns the dispatch-claim transition. A replayed or duplicate
 activity cannot claim an operation already claimed by another generation or
 already terminal.
 
+The Entity does not expose its persisted state through a generic read operation.
+Future runtime callers use purpose-specific, typed query results so storage
+schema changes do not become caller-facing contracts.
+
 Continuation cleanup follows authoritative state:
 
 - During an active turn, the prior terminal session seed and every checkpoint
@@ -1032,6 +1036,7 @@ The feature contract is satisfied when:
 | 35 | Retry, resume and wire-version safety | Connector convention / independent continuation and results / one validated resume request with explicit versions and retry eligibility | Require explicit wire versions, bind continuation plus pending operations plus ordered results in one resume request, permit retry only for proven retryable transport failures, represent confirmed cancellation explicitly and fail closed on public Blob containers | Human; review recommendation | 2026-10-26 |
 | 36 | Terminal lifecycle sequencing | Permit terminal commit after admission / require start acknowledgement | Reject terminal commit until the Entity has bound the turn start and absolute deadline | Human | 2026-10-27 |
 | 37 | Deletion idempotency | Conflict on a different deletion key / converge on the first tombstone | Keep the first tombstone authoritative and return its stable receipt for every later authorized deletion request regardless of key | Human | 2026-10-27 |
+| 38 | Entity state queries | Generic full-state read / purpose-specific typed queries | Do not expose the persistence model; add typed query results only when a runtime caller requires them | Human | 2026-10-27 |
 
 ## 6. Test plan
 

@@ -41,7 +41,6 @@ class SessionAuthorityOperation(StrEnum):
     """Names the supported private Durable Entity operations."""
 
     CREATE = "create"
-    GET = "get"
     ADMIT = "admit"
     ACKNOWLEDGE_START = "acknowledge_start"
     COMPLETE = "complete"
@@ -100,10 +99,6 @@ def _dispatch_session_authority_operation(
     state = _load_required_state(context)
     _validate_entity_key(context.entity_key, state)
 
-    if operation is SessionAuthorityOperation.GET:
-        _require_empty_input(context.get_input())
-        _set_result(context, state, maximum=MAX_ENTITY_STATE_BYTES)
-        return
     if operation is SessionAuthorityOperation.ADMIT:
         admission_command = _parse_operation_input(
             AdmissionCommand,
@@ -304,13 +299,6 @@ def _validate_creation_identity(
     ):
         raise SessionAuthorityEntityError(
             "Durable session authority creation identity conflicts with persisted state."
-        )
-
-
-def _require_empty_input(raw_input: Any) -> None:
-    if raw_input is not None:
-        raise SessionAuthorityEntityError(
-            "Durable session authority get operation does not accept input."
         )
 
 
