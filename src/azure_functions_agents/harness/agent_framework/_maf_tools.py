@@ -30,15 +30,15 @@ def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
     return synchronous
 
 
-def build_maf_tools(descriptors: Sequence[ToolDescriptor]) -> list[FunctionTool]:
-    """Adapt neutral runtime tool descriptors into MAF FunctionTool instances."""
-    tools: list[FunctionTool] = []
-    for descriptor in descriptors:
-        tools.append(FunctionTool(
-            name=descriptor.name,
-            description=descriptor.description,
-            func=_maf_callable(descriptor),
-            input_model=descriptor.input_model or descriptor.parameters(),
-            approval_mode=descriptor.policy.approval_mode,
-        ))
-    return tools
+def build_maf_tools(candidates: Sequence[ToolDescriptor]) -> list[FunctionTool]:
+    """Adapt normalized runtime declarations into MAF tools."""
+    return [
+        FunctionTool(
+            name=candidate.name,
+            description=candidate.description,
+            func=_maf_callable(candidate),
+            input_model=candidate.input_model or candidate.parameters(),
+            approval_mode=candidate.policy.approval_mode.value,
+        )
+        for candidate in candidates
+    ]

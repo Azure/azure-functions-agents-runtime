@@ -14,6 +14,7 @@ from . import _hosted_skill_app
 from ._agent_identity import agent_id
 from ._logger import logger
 from ._observability import configure_observability
+from ._smart_retry_advisor import DEFAULT_ADVISOR_SLUG, build_default_advisor
 from ._source_marker import source_marker
 from ._tool_descriptor import ToolDescriptor
 from .config.loader import load_agent_specs, load_global_config
@@ -31,12 +32,14 @@ from .discovery.tools import discover_project_tools
 from .harness._harness_binding import get_harness, validate_agent
 from .registration.capabilities import (
     build_capabilities,
+    validate_runtime_tool_name_collisions,
     validate_subagent_tool_names,
     with_runtime_skill_paths,
 )
 from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
+from .system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 from .workflows.integration import (
     DATA_DRIVEN_WORKFLOWS_SKILL_NAME,
     build_workflow_agent_integration,
@@ -120,6 +123,11 @@ def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
         sources_by_slug.setdefault(resolved.slug, []).append(source_marker(resolved.source_file))
 
     for slug, sources in sorted(sources_by_slug.items()):
+        if slug == DEFAULT_ADVISOR_SLUG:
+            raise ValueError(
+                f"Agent slug {slug!r} is reserved for the runtime smart-retry advisor. "
+                "Rename the authored agent."
+            )
         if len(sources) > 1:
             listed = ", ".join(sorted(sources))
             raise ValueError(
@@ -243,6 +251,16 @@ def _compose_function_app(
             discovered_skills=skills,
             discovered_skill_descriptors=skill_result.descriptors,
         )
+        if resolved.trigger is not None or _builtin_endpoints_enabled(resolved.builtin_endpoints):
+            validate_runtime_tool_name_collisions(
+                resolved,
+                authored_tools=capabilities.filtered_user_tools or (),
+                workflow_enabled=bool(resolved.workflows is not None and resolved.workflows.enabled),
+                sandbox_enabled=sandbox_runtime_tool_enabled(
+                    resolved.sandbox_config,
+                    tools_disabled=resolved.tools_disabled,
+                ),
+            )
         validate_subagent_tool_names(resolved, capabilities)
         validate_agent(harness, resolved, capabilities)
         capabilities = replace(capabilities, _harness=harness)
@@ -254,16 +272,19 @@ def _compose_function_app(
         catalog,
         workflow_handler_catalog,
     )
+    default_advisor = build_default_advisor(global_config)
     app: HostedSkillApp = (
         _hosted_skill_app.HostedSkillDFApp(
             catalog=catalog,
             harness=harness,
+            default_advisor=default_advisor,
             http_auth_level=func.AuthLevel.FUNCTION,
         )
         if workflow_agent_policies
         else _hosted_skill_app.HostedSkillFunctionApp(
             catalog=catalog,
             harness=harness,
+            default_advisor=default_advisor,
             http_auth_level=func.AuthLevel.FUNCTION,
         )
     )

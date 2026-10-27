@@ -22,14 +22,16 @@ ordinary HTTP Function calls an inert markdown agent through `skill.run()`.
 
 [`hosted-skill-remediation`](hosted-skill-remediation/) demonstrates opt-in
 source-aware whole-handler recovery through the separate `@app.smart_retry`
-decorator, with no injected skill. HTTP uses `agent_name="error_advisor"` with
-the default one retry; the Storage Queue handler uses `agent_name="queue_advisor"`
-and `max_retries=3`. Both keep their existing SDK bindings, which select the input
-argument at indexing; the default recovery timeout remains 60 seconds.
-The agent inspects project Python source and retries the original handler in the
-same invocation with corrected route/query inputs or a replacement queue body.
-Unresolved HTTP recovery returns remediation;
-unresolved queue recovery raises `HostedSkillRecoveryError`, preserving host
+decorator, with no injected skill or required advisor file. Two Storage Queue
+handlers use the bundled advisor: `process_work_item` on `recovery-work-items`
+allows three correction attempts; `process_work_item2` on `bad-package` uses
+`audit_only=True` for a deliberate missing `verybadpackage` import. Both keep
+their SDK bindings, which select the input argument at indexing; the default
+recovery timeout remains 60 seconds. Normal mode can inspect source and retry
+with a replacement body in the same invocation. Audit has no retry tool and logs
+bounded advice once at WARNING level while retaining failure. An optional
+authored `error_advisor` demonstrates custom guidance/configuration selection.
+Unresolved queue recovery raises `HostedSkillRecoveryError`, preserving host
 redelivery and poison handling. Use replay-safe handlers and synthetic,
 non-sensitive inputs only; source and queue bodies are shared with the model.
 Handler acceptance does not guarantee preservation of the original meaning.
@@ -45,7 +47,7 @@ Development tooling samples:
 	evaluation against its local or staging chat endpoint, with deterministic tool/output graders,
 	repeated trials, and JUnit output.
 
-For the separate **local-only, default-off Copilot harness experiment**, use
+For the separate **default-off Copilot harness preview walkthrough**, use
 [`copilot-preview`](copilot-preview/README.md). Its pinned setup and two-turn
 receipt verifier exercise a real Functions-host restart; it is not an `azd up`
 deployment sample and does not require Azurite.

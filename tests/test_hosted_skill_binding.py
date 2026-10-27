@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 import azure_functions_agents.hosted_skill_binding as hosted_skill_module
+from azure_functions_agents import _hosted_recovery_input as recovery_input
 from azure_functions_agents._hosted_recovery_input import AUDIT_INSTRUCTIONS, RECOVERY_INSTRUCTIONS
 from azure_functions_agents._observability import FaultDomain
 from azure_functions_agents._tool_descriptor import ToolDescriptor
@@ -383,6 +384,38 @@ def test_hosted_skill_is_not_callable(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harness_kind", list(HarnessKind))
 @pytest.mark.parametrize("audit_only", [False, True])
+async def test_run_recovery_forwards_selected_custom_guidance_to_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, harness_kind: HarnessKind, audit_only: bool,
+) -> None:
+    skill, _ = _make_skill(tmp_path, harness_kind=harness_kind)
+    guidance = "CUSTOM ADVISOR: inspect the invoice fields before suggesting a correction."
+    skill._entry.resolved.instructions = guidance
+    captured: dict[str, Any] = {}
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        captured.update(kwargs, prompt=prompt)
+        return AgentResult(kwargs["session_id"], "Review the invoice.")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    await skill._run_recovery("Analyze this failure", tools=[], timeout=1, audit_only=audit_only)
+
+    policy = AUDIT_INSTRUCTIONS if audit_only else RECOVERY_INSTRUCTIONS
+    assert captured["instructions"].startswith(guidance + "\n\nRuntime")
+    assert captured["instructions"].endswith("\n" + policy)
+    assert captured["instructions"].count(guidance) == 1
+    assert captured["prompt"] == "Analyze this failure"
+    for key in (
+        "tools", "mcp_tools", "skill_paths", "skills", "skill_catalog", "sandbox_tools",
+        "web_request_tools",
+    ):
+        assert captured[key] == []
+    assert skill._entry.resolved.instructions == guidance
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness_kind", list(HarnessKind))
+@pytest.mark.parametrize("audit_only", [False, True])
 async def test_run_recovery_isolates_tools_and_response_contract_from_normal_runs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, harness_kind: HarnessKind, audit_only: bool,
 ) -> None:
@@ -429,7 +462,9 @@ async def test_run_recovery_isolates_tools_and_response_contract_from_normal_run
     for key in ("mcp_tools", "skill_paths", "skills", "skill_catalog", "sandbox_tools", "web_request_tools"):
         assert recovery[key] == []
     assert recovery["instructions"] != skill._entry.resolved.instructions
-    assert recovery["instructions"] == (AUDIT_INSTRUCTIONS if audit_only else RECOVERY_INSTRUCTIONS)
+    assert recovery["instructions"] == recovery_input.recovery_instructions(
+        skill._entry.resolved.instructions, audit_only=audit_only,
+    )
     assert AUDIT_INSTRUCTIONS != RECOVERY_INSTRUCTIONS
     if not audit_only:
         assert "drop unfamiliar" in recovery["instructions"]
@@ -459,6 +494,7 @@ async def test_run_recovery_isolates_tools_and_response_contract_from_normal_run
         assert normal["web_request_tools"] == capabilities.web_request_tools == ["web"]
         assert normal["sandbox_tools"] == ["sandbox"]
     assert len({kwargs["session_id"] for _, kwargs in captured}) == 3
+    assert skill._entry.resolved.instructions == "Follow policy."
     with pytest.raises(InvalidResponseJsonError):
         await skill.run("Still validate normal responses")
 
@@ -511,8 +547,12 @@ async def test_concurrent_audit_and_retry_calls_do_not_mutate_shared_catalog_or_
     assert set(captured) == {"Audit this failure", "Retry this failure"}
     audit = captured["Audit this failure"]
     retry = captured["Retry this failure"]
-    assert audit["instructions"] == AUDIT_INSTRUCTIONS
-    assert retry["instructions"] == RECOVERY_INSTRUCTIONS
+    assert audit["instructions"] == recovery_input.recovery_instructions(
+        skill._entry.resolved.instructions, audit_only=True,
+    )
+    assert retry["instructions"] == recovery_input.recovery_instructions(
+        skill._entry.resolved.instructions,
+    )
     assert audit["timeout"] == 2
     assert retry["timeout"] == 3
     assert audit["session_id"] == audit_result.session_id
@@ -550,6 +590,40 @@ async def test_concurrent_audit_and_retry_calls_do_not_mutate_shared_catalog_or_
     assert normal["web_request_tools"] == capabilities.web_request_tools == ["web"]
     assert normal["sandbox_tools"] == ["sandbox"]
     assert len({call["session_id"] for call in (audit, retry, normal)}) == 3
+    assert skill._entry.resolved.instructions == "Follow policy."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_only", [False, True])
+async def test_run_recovery_keeps_selected_advisor_guidance_separate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, audit_only: bool,
+) -> None:
+    custom, _ = _make_skill(tmp_path)
+    default, _ = _make_skill(tmp_path)
+    custom_guidance = "CUSTOM GUIDANCE: inspect invoice fields."
+    default_guidance = "DEFAULT GUIDANCE: inspect generic handler inputs."
+    custom._entry.resolved.instructions = custom_guidance
+    default._entry.resolved.instructions = default_guidance
+    captured: dict[str, str] = {}
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        captured[prompt] = kwargs["instructions"]
+        return AgentResult(kwargs["session_id"], "Review inputs.")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+    for prompt, skill in (("default", default), ("custom", custom), ("default again", default)):
+        await skill._run_recovery(prompt, tools=[], timeout=1, audit_only=audit_only)
+
+    assert captured["custom"] == recovery_input.recovery_instructions(
+        custom_guidance, audit_only=audit_only,
+    )
+    assert captured["default"] == captured["default again"] == recovery_input.recovery_instructions(
+        default_guidance, audit_only=audit_only,
+    )
+    assert default_guidance not in captured["custom"]
+    assert custom_guidance not in captured["default"]
+    assert custom._entry.resolved.instructions == custom_guidance
+    assert default._entry.resolved.instructions == default_guidance
 
 
 @pytest.mark.asyncio

@@ -13,10 +13,11 @@ from .._function_tool import (
     WorkflowTool,
     get_workflow_tool_handler,
     get_workflow_tool_metadata,
+    normalize_tool,
     tool,
 )
 from .._logger import logger
-from .._tool_descriptor import ToolDescriptor, is_harness_object, warn_unsupported_tool
+from .._tool_descriptor import ToolDescriptor, tool_description, tool_name
 
 type _CachedProjectTools = tuple[tuple[ToolDescriptor, ...], tuple[WorkflowTool, ...]]
 
@@ -81,10 +82,6 @@ def _is_workflow_marked(obj: object) -> bool:
 
 
 def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> WorkflowTool | None:
-    if is_harness_object(obj):
-        warn_unsupported_tool()
-        return None
-
     handler: Callable[..., Any] | None = None
     default_tool_name = name
     default_description = ""
@@ -96,10 +93,13 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
         handler = obj.func
         if metadata is None and handler is not None:
             metadata = get_workflow_tool_metadata(handler)
-    elif inspect.isfunction(obj) and obj.__module__ == module_name:
+    elif callable(obj) and not inspect.isclass(obj):
+        if inspect.isfunction(obj) and obj.__module__ != module_name:
+            return None
         metadata = get_workflow_tool_metadata(obj)
         handler = obj
-        default_description = (obj.__doc__ or "").strip()
+        default_tool_name = tool_name(obj) or name
+        default_description = tool_description(obj)
     else:
         return None
 
@@ -109,10 +109,10 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
     if handler is not None:
         handler = get_workflow_tool_handler(handler)
 
-    tool_name = metadata.name or default_tool_name
+    activity_name = metadata.name or default_tool_name
     description = metadata.description or default_description
     return WorkflowTool(
-        name=tool_name,
+        name=activity_name,
         description=description,
         handler=handler,
         public=metadata.public,
@@ -122,7 +122,7 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
 
 
 def discover_project_tools(app_root: Path) -> ProjectTools:
-    """Discover neutral tools and workflow declarations, preferring decorated tools."""
+    """Discover declared tools and workflow targets without invoking authored code."""
     resolved_root = Path(app_root).resolve()
     cached_tools = _DISCOVERED_TOOLS_CACHE.get(resolved_root)
     if cached_tools is not None:
@@ -165,14 +165,13 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
-            members = []
-            for name, obj in inspect.getmembers(module):
-                if name.startswith("_"):
-                    continue
-                if is_harness_object(obj):
-                    warn_unsupported_tool()
-                    continue
-                members.append((name, obj))
+            members = [
+                (name, obj)
+                for name, obj in inspect.getmembers(module)
+                if not name.startswith("_")
+                and not inspect.isclass(obj)
+                and not inspect.ismodule(obj)
+            ]
 
             picked: ToolDescriptor | None = None
             for name, obj in members:
@@ -186,7 +185,19 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
                     logger.debug("Loaded tool %s", obj.name)
                     break
 
-            # Fallback: first plain function defined in the module.
+            if picked is None:
+                for _name, obj in members:
+                    if (
+                        callable(obj)
+                        and not inspect.isclass(obj)
+                        and isinstance(getattr(obj, "name", None), str)
+                        and isinstance(getattr(obj, "description", None), str)
+                        and not _is_workflow_marked(obj)
+                    ):
+                        picked = normalize_tool(obj)
+                        logger.debug("Loaded authored tool %s", tool_name(obj))
+                        break
+
             if picked is None:
                 local_functions = [
                     (name, obj)
@@ -224,7 +235,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
 
 
 def discover_user_tools(app_root: Path) -> ToolDiscoveryResult:
-    """Return normal Python tool descriptors from ``tools/``."""
+    """Return authored tools from ``tools/``."""
     project_tools = discover_project_tools(app_root)
     return ToolDiscoveryResult(
         tools=project_tools.user_tools,

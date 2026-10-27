@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from .._agent_run_diagnostics import AgentExecutionSurface
-from .._tool_descriptor import ToolDescriptor
+from .._tool_descriptor import ToolInput
 from ..config import ResolvedAgent, SubagentRef
 from ..config.schema import AgentConfiguration
 from ..discovery.mcp import MCPServerDescriptor
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ..runner import AgentResult
     from ..workflows.schema import WorkflowPlanPolicy
 
-type AgentFunctionTool = ToolDescriptor
+type AgentFunctionTool = ToolInput
 
 
 class AgentRunner(Protocol):
@@ -47,7 +47,6 @@ class AgentRunner(Protocol):
 
     @property
     def validate_hosted_skill(self) -> Callable[[ResolvedAgent], None] | None: ...
-
     async def run_agent(
         self,
         prompt: str,
@@ -60,13 +59,13 @@ class AgentRunner(Protocol):
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: Sequence[ToolDescriptor] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
-        web_request_tools: Sequence[ToolDescriptor] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
@@ -89,14 +88,14 @@ class AgentRunner(Protocol):
         skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: Sequence[ToolDescriptor] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
         display_name: str | None = None,
-        web_request_tools: Sequence[ToolDescriptor] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
@@ -119,6 +118,7 @@ class AgentRunner(Protocol):
         timeout: float,
         execution_role: Literal["delegate", "workflow_subagent"],
     ) -> str: ...
+
 
 def get_agent_runner(harness: AppHarness) -> AgentRunner:
     """Construct one resource-free runner per immutable app binding."""

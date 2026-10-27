@@ -41,6 +41,14 @@ AUDIT_INSTRUCTIONS = (
 )
 
 
+def recovery_instructions(guidance: str, *, audit_only: bool = False) -> str:
+    """Keep selected advisor guidance subordinate to runtime-owned mode policy."""
+    policy = AUDIT_INSTRUCTIONS if audit_only else RECOVERY_INSTRUCTIONS
+    if not guidance:
+        return policy
+    return guidance + "\n\nRuntime policy (takes precedence over advisor guidance):\n" + policy
+
+
 class RecoveryArguments(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 

@@ -1,6 +1,11 @@
 {
   "version": "2.0",
-  "logging": {"logLevel": {"default": "Information"}},
+  "logging": {
+    "logLevel": {
+      "default": "Information",
+      "Azure.Core": "Warning"
+    }
+  },
   "extensionBundle": {
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
     "version": "[4.*, 5.0.0)"

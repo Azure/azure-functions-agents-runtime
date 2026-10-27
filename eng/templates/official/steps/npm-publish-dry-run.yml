@@ -22,7 +22,7 @@ steps:
       npm publish "${packages[0]}" \
         --tag "${NPM_PUBLISH_TAG}" \
         --registry https://registry.npmjs.org \
-        --@azure-functions:registry=https://registry.npmjs.org \
+        --@azure:registry=https://registry.npmjs.org \
         --dry-run \
         --ignore-scripts
     displayName: 'Validate npm release'

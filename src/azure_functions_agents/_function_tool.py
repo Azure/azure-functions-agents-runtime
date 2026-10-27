@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from functools import wraps
 from typing import Any, cast, overload
@@ -10,15 +10,15 @@ from pydantic import BaseModel
 
 import azure_functions_agents as _package
 
-from ._logger import logger
 from ._tool_descriptor import (
     ApprovalMode,
     ToolDescriptor,
+    ToolInput,
     ToolPolicy,
     WorkflowTool,
     WorkflowToolMetadata,
-    is_harness_object,
-    warn_unsupported_tool,
+    tool_description,
+    tool_name,
 )
 
 __all__ = [
@@ -32,12 +32,15 @@ __all__ = [
 
 _WORKFLOW_TOOL_METADATA_ATTR = "__azure_functions_agents_workflow_tool__"
 _WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
-_SUPPORTED_TOOL_KWARGS = ("name", "description", "schema", "approval_mode")
+
+
+def _normalize_approval_mode(value: ApprovalMode | str | None) -> ApprovalMode:
+    if value is None:
+        return ApprovalMode.NEVER_REQUIRE
+    return ApprovalMode(value)
 
 
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
-    if is_harness_object(target):
-        return None
     if isinstance(target, ToolDescriptor):
         return target.workflow_metadata
     metadata = getattr(target, _WORKFLOW_TOOL_METADATA_ATTR, None)
@@ -80,18 +83,6 @@ def _wrap_with_schema[SchemaT: BaseModel](
     return wrapper
 
 
-def _warn_ignored_tool_kwargs(kwargs: dict[str, Any]) -> None:
-    if not kwargs:
-        return
-    names = ", ".join(sorted(kwargs))
-    logger.warning(
-        "Ignoring unsupported @tool keyword argument(s): %s. Supported @tool keyword "
-        "arguments are: %s. Extra keyword arguments are ignored in every harness.",
-        names,
-        ", ".join(_SUPPORTED_TOOL_KWARGS),
-    )
-
-
 @overload
 def tool(
     func: Callable[..., Any],
@@ -99,8 +90,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     schema: None = None,
-    approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> ToolDescriptor: ...
 
 
@@ -111,8 +101,7 @@ def tool[SchemaT: BaseModel](
     name: str | None = None,
     description: str | None = None,
     schema: type[SchemaT],
-    approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> ToolDescriptor: ...
 
 
@@ -122,8 +111,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     schema: None = None,
-    approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> Callable[[Callable[..., Any]], ToolDescriptor]: ...
 
 
@@ -133,42 +121,33 @@ def tool[SchemaT: BaseModel](
     name: str | None = None,
     description: str | None = None,
     schema: type[SchemaT],
-    approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
+    approval_mode: ApprovalMode | str | None = None,
 ) -> Callable[[Callable[[SchemaT], Any]], ToolDescriptor]: ...
 
 
 def tool(
-    func: object | None = None,
+    func: Callable[..., Any] | None = None,
     *,
     name: str | None = None,
     description: str | None = None,
     schema: type[BaseModel] | None = None,
-    approval_mode: ApprovalMode | None = None,
-    **kwargs: Any,
-) -> object:
+    approval_mode: ApprovalMode | str | None = None,
+) -> ToolDescriptor | Callable[[Callable[..., Any]], ToolDescriptor]:
     """Record a Python tool without constructing a harness SDK wrapper."""
-    _warn_ignored_tool_kwargs(kwargs)
 
-    def decorator(inner: object) -> object:
-        if is_harness_object(inner):
-            warn_unsupported_tool()
-            return inner
-        if not callable(inner):
-            warn_unsupported_tool()
-            return inner
+    def decorator(inner: Callable[..., Any]) -> ToolDescriptor:
         wrapped: Callable[..., Any] = inner
         input_model: type[BaseModel] | None = None
         if schema is not None:
             wrapped = _wrap_with_schema(inner, schema)
             input_model = schema
         descriptor = ToolDescriptor.create(
-            name=name or wrapped.__name__,
-            description=(description or inner.__doc__ or "").strip(),
+            name=name or tool_name(inner),
+            description=(description or tool_description(inner)).strip(),
             func=wrapped,
             input_model=input_model,
             policy=ToolPolicy(
-                approval_mode=approval_mode or "never_require",
+                approval_mode=_normalize_approval_mode(approval_mode),
             ),
             workflow_metadata=get_workflow_tool_metadata(inner),
         )
@@ -177,6 +156,22 @@ def tool(
     if func is not None:
         return decorator(func)
     return decorator
+
+
+def normalize_tool(candidate: ToolInput) -> ToolDescriptor:
+    """Normalize an authored callable into the shared runtime contract."""
+    if isinstance(candidate, ToolDescriptor):
+        return candidate
+    if not callable(candidate):
+        raise TypeError(f"Tool '{tool_name(candidate)}' must be callable.")
+    return tool(candidate)
+
+
+def normalize_optional_tools(
+    candidates: Sequence[ToolInput] | None,
+) -> tuple[ToolDescriptor, ...] | None:
+    """Preserve discovery's None sentinel while normalizing explicit inputs."""
+    return None if candidates is None else tuple(map(normalize_tool, candidates))
 
 
 @overload
@@ -230,13 +225,10 @@ def workflow_tool[DecoratedT](
     )
 
     def decorator(inner: DecoratedT) -> DecoratedT:
-        if is_harness_object(inner):
-            warn_unsupported_tool()
-            return inner
         if isinstance(inner, ToolDescriptor):
             return cast("DecoratedT", replace(inner, workflow_metadata=metadata))
         if not callable(inner):
-            raise TypeError("@workflow_tool can only decorate a callable or runtime @tool")
+            raise TypeError("workflow_tool requires a callable")
         setattr(inner, _WORKFLOW_TOOL_METADATA_ATTR, metadata)
         return inner
 

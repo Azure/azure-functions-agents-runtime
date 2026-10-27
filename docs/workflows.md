@@ -2,14 +2,14 @@
 
 The app-level Copilot opt-in supports the same five management tools,
 per-agent policy authorization, Workflow Sub Agent Activities, configured MCP
-servers, and approved authored skills in the single-worker local preview. Each
+servers, and approved authored skills in this preview. Each
 leaf gets a fresh native session that is deleted after use. Workflow-enabled
 direct roles receive the packaged `data-driven-workflows` skill through the
 same native skill-directory path as approved authored skills; the host keeps a
 separate concise workflow addendum and does not read `SKILL.md` into the
 prompt. Delegated leaves and Workflow Sub Agent leaves do not inherit that
-runtime-only skill. This does not qualify Azure hosting or multi-worker native
-persistence.
+runtime-only skill. Hosted startup, auth, storage, restart, and overlap
+behavior still require live qualification.
 
 > [!NOTE]
 > **Status: public experimental v1.** The API is intentionally small and
@@ -96,8 +96,8 @@ Three concrete wins versus chaining tool calls in conversation:
 
 - **Survives worker restarts and long sleeps.** Workflows that take hours
   or days are first-class — no client connection has to stay open.
-- **Operable from outside the agent loop.** `list_workflows`,
-  `get_workflow_status`, `cancel_workflow`, and the optional Durable Task
+- **Operable from outside the agent loop.** `fhs_list_workflows`,
+  `fhs_get_workflow_status`, `fhs_cancel_workflow`, and the optional Durable Task
   Scheduler portal give operators a way to see and steer in-flight work
   without going through the chat session.
 
@@ -108,16 +108,16 @@ Three concrete wins versus chaining tool calls in conversation:
 1. You enable workflows on an agent with a one-line frontmatter flag.
 2. The agent is given five built-in tools (see [Tools](#tools)).
 3. When the agent decides the work is workflow-shaped, it calls
-   `start_workflow` with a DAG of tasks. The DAG is validated and scheduled
+   `fhs_start_workflow` with a DAG of tasks. The DAG is validated and scheduled
    as a Durable orchestration; the tool returns immediately with a
    `workflow_id`.
 4. The orchestration runs each task as a Durable activity (tool calls) or
    a Durable timer (waits), using `task_all` to fan out parallel tasks and
    `depends_on` edges for sequencing.
-5. **`start_workflow` is fire-and-forget from the agent's perspective.**
+5. **`fhs_start_workflow` is fire-and-forget from the agent's perspective.**
    After receiving the `workflow_id`, the agent reports or records it as its
    invocation channel allows and ends its turn. The agent does not poll
-   `get_workflow_status` to wait for completion.
+   `fhs_get_workflow_status` to wait for completion.
 6. The chat client (the built-in chat UI, or any external poller) polls
    `GET /agents/{slug}/workflows` on a short interval while the session is
    visible, renders a live per-task progress card alongside the chat
@@ -128,22 +128,22 @@ Three concrete wins versus chaining tool calls in conversation:
    detects the transition and **injects a synthetic user message
    containing one or more `<workflow-notification>` envelopes into
    the conversation**, prompting the agent to call
-   `get_workflow_status` once per listed `<workflow-id>` and produce
+   `fhs_get_workflow_status` once per listed `<workflow-id>` and produce
    a short natural-language summary. The user gets a final
    conversational turn that closes the loop without having to type
    anything. See [Auto-notification](#auto-notification) below.
 8. If the user later asks the agent about a previously-started
    workflow ("what did the incident workflow find?"), the agent calls
-   `get_workflow_status` on demand and reports back. The on-demand
+   `fhs_get_workflow_status` on demand and reports back. The on-demand
    call and the auto-notification turn are the two paths by which
    workflow output enters the agent's context window.
 
 > [!NOTE]
 > **Intermediate task results never enter the agent's context window.**
-> The agent receives only the `workflow_id` from `start_workflow`. Per-task
+> The agent receives only the `workflow_id` from `fhs_start_workflow`. Per-task
 > results stay in the workflow store; the chat client renders them next
 > to the conversation. The only output the agent ever ingests is the
-> single final-result envelope it fetches via `get_workflow_status` —
+> single final-result envelope it fetches via `fhs_get_workflow_status` —
 > either when the chat client posts a synthetic
 > `<workflow-notification>` user message (see
 > [Auto-notification](#auto-notification)) or when the user
@@ -183,7 +183,7 @@ workflows:
 When `workflows.enabled: true`, the framework auto-injects the five
 workflow tools into the agent's schema **and** appends a short
 behavioral addendum to the agent's system prompt explaining when to
-prefer `start_workflow` over direct tool calls. The agent author does
+prefer `fhs_start_workflow` over direct tool calls. The agent author does
 not need to document the tools or the heuristics in their markdown — the
 agent markdown stays focused on the domain.
 
@@ -215,7 +215,7 @@ An app with no workflow-enabled agents remains a plain `FunctionApp`.
 
 Each workflow-enabled agent instead gets an immutable policy containing only its allowed
 workflow tools (after `workflows.exclude`) and its deny-by-default
-`workflows.subagents` grants. Prompt guidance, `start_workflow` validation, and
+`workflows.subagents` grants. Prompt guidance, `fhs_start_workflow` validation, and
 Activity dispatch all use that agent's policy. One agent's exclusion never
 removes a handler another agent is allowed to use.
 
@@ -288,16 +288,21 @@ normal tool nor a workflow tool.
 
 Five tools are added to the agent's schema when `workflows.enabled: true`:
 
+The runtime-owned tools use `fhs_` names in both harnesses. Authored tools keep
+their own names; no unprefixed internal aliases are injected. See the
+[name migration guidance](front-matter-spec.md#workflows) when updating existing
+agent instructions or tool selectors.
+
 | Tool | Purpose |
 | --- | --- |
-| `start_workflow(plan)` | Validate a DAG, start an orchestration, return `{workflow_id}` immediately. |
-| `get_workflow_status(workflow_id)` | Return the current status envelope (see below). |
-| `list_workflows()` | List workflows owned by the current session. |
-| `cancel_workflow(workflow_id, reason?)` | Cooperative cancel — raises an external event the orchestrator handles; the completion activity still runs. |
-| `terminate_workflow(workflow_id, reason?)` | Hard terminate — stops the instance abruptly; final status is observable but no completion envelope is guaranteed. |
+| `fhs_start_workflow(plan)` | Validate a DAG, start an orchestration, return `{workflow_id}` immediately. |
+| `fhs_get_workflow_status(workflow_id)` | Return the current status envelope (see below). |
+| `fhs_list_workflows()` | List workflows owned by the current session. |
+| `fhs_cancel_workflow(workflow_id, reason?)` | Cooperative cancel — raises an external event the orchestrator handles; the completion activity still runs. |
+| `fhs_terminate_workflow(workflow_id, reason?)` | Hard terminate — stops the instance abruptly; final status is observable but no completion envelope is guaranteed. |
 
 Workflow-management tools are never reachable as workflow-node targets —
-a plan that tries to call `start_workflow` from inside a workflow fails
+a plan that tries to call `fhs_start_workflow` from inside a workflow fails
 validation.
 
 ## DAG schema (v1)
@@ -789,7 +794,7 @@ behavior and are tracked separately by issue #1278.
 
 ## Status envelope
 
-Returned by `get_workflow_status` and (per-workflow, in an array) by
+Returned by `fhs_get_workflow_status` and (per-workflow, in an array) by
 `GET /agents/{slug}/workflows`. The same shape is used everywhere a status is
 read so external clients (operator dashboards, MCP Tasks bridges) can
 consume a single contract:
@@ -872,13 +877,13 @@ channel from the orchestrator into the agent's chat thread.
   progress card next to the chat thread, and updates the card when the
   workflow reaches a terminal state.
 - The agent itself never receives the completion envelope as a tool
-  result. After `start_workflow` returns the `workflow_id`, the agent's
+  result. After `fhs_start_workflow` returns the `workflow_id`, the agent's
   job is done; it should report the ID and end the turn. When the chat
   client detects a terminal-state transition it posts a synthetic user
   message containing one or more `<workflow-notification>` envelopes
   (see [Auto-notification](#auto-notification) below); that message —
   and any user-driven follow-up — are the only paths by which workflow
-  output enters the agent's context window via `get_workflow_status`.
+  output enters the agent's context window via `fhs_get_workflow_status`.
 - The `GET /agents/{slug}/workflows` endpoint is scoped to the calling session
   via the `x-ms-session-id` request header and the per-workflow
   isolation scheme described in
@@ -903,14 +908,14 @@ single short reminder, of the form:
   <summary>Workflow abc-123 finished with status Completed.</summary>
 </workflow-notification>
 
-Call `get_workflow_status` to retrieve the final result.
+Call `fhs_get_workflow_status` to retrieve the final result.
 ```
 
 The injected message is deliberately data-only — modeled on the
 `<task-notification>` shape used by Claude Code-style harnesses — and
 carries **no prescriptive instructions** about how the agent should
 respond. The agent's system prompt addendum already owns the contract
-(call `get_workflow_status` once per `<workflow-id>`, summarize, no
+(call `fhs_get_workflow_status` once per `<workflow-id>`, summarize, no
 follow-on workflows, race-handling, empty-output handling), so per
 turn the model only needs the data plus a single reminder of the
 relevant tool. This keeps notification turns lean and lets a future
@@ -922,7 +927,7 @@ runtime contract enforced by the framework. External clients (e.g.
 an MCP-Tasks-aware client) are free to adopt the same convention or
 to drive completion handling some other way (e.g. a dedicated `task
 completed` UI event with no synthetic prompt). The server-side
-mechanics — `GET /agents/{slug}/workflows`, `get_workflow_status`, isolation
+mechanics — `GET /agents/{slug}/workflows`, `fhs_get_workflow_status`, isolation
 scoping — are the actual contract; the synthetic-prompt format is a
 client-side detail.
 
@@ -966,8 +971,8 @@ invocation `session_id`. Internally, Durable payloads call this pair
 `(workflow_agent_slug, session_id)`; `workflow_agent_slug` is not a frontmatter field. The instance
 ID begins with a 32-hex-character (128-bit) truncated SHA-256 digest over an
 unambiguous length-delimited encoding of that pair; neither raw value appears in
-the ID. `get_workflow_status`,
-`list_workflows`, `cancel_workflow`, and `terminate_workflow` filter
+the ID. `fhs_get_workflow_status`,
+`fhs_list_workflows`, `fhs_cancel_workflow`, and `fhs_terminate_workflow` filter
 on that prefix. A workflow whose agent **or** session does not match is treated
 as nonexistent (404/empty, never 403), so two agents remain isolated even when
 callers deliberately reuse the same session ID.

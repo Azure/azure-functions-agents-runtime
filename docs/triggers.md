@@ -42,6 +42,11 @@ to declare a trigger or built-in endpoint no longer causes the previous startup
 validation error; verify that every agent intended for direct invocation has an
 explicit surface.
 
+`@app.smart_retry()` needs no authored agent: it selects a private bundled
+advisor outside the catalog, with no trigger, endpoint or delegation target.
+An explicit `agent_name` instead selects an authored advisor's instructions,
+model and agent configuration within runtime-owned recovery/audit limits.
+
 ### Starting Dynamic Workflows
 
 When an agent sets `workflows.enabled: true`, each supported declared
@@ -185,7 +190,7 @@ delivery, see
 Use `response_example` or `response_schema` at the top level, not under `trigger`.
 
 For a replay-safe, application-owned bodyless GET/HEAD handler, use
-`@app.smart_retry(agent_name="error_advisor")` immediately above the `async def`
+`@app.smart_retry()` immediately above the `async def`
 handler, below all SDK trigger/binding decorators. It injects no parameter and
 accepts plain keyword options: `max_retries=1`, `timeout=60`, and
 `request_arg=None` by default. Indexing selects the trigger argument unless
@@ -194,6 +199,13 @@ corrects route/query values within the same invocation and returns the actual
 successful handler result; unresolved recovery returns native HTTP 500 with
 remediation (no body for HEAD). This is separate from runtime-authored
 `http_trigger` agents and does not automatically add recovery to them.
+
+The optional `agent_name: str | None = None` selects the bundled advisor without
+a custom file. It inherits global model/agent configuration, then existing
+environment/provider defaults, not another agent's settings. Explicit slugs use
+authored guidance and configuration; invalid names do not fall back. Selected
+provider settings are preflighted at decoration without creating a model client;
+the original handler must fail before model acquisition.
 
 `smart_retry` is available on enhanced normal and Durable apps, including those
 returned by `create_function_app()`, but not for replayed Durable orchestrator
@@ -251,7 +263,7 @@ trigger:
 
 For an ordinary application-owned `@app.queue_trigger` handler receiving
 `azure.functions.QueueMessage`, opt in with
-`@app.smart_retry(agent_name="queue_advisor", max_retries=3)` immediately above
+`@app.smart_retry(max_retries=3)` immediately above
 the handler and below the SDK binding decorators. The handler keeps only its
 real Function arguments; no skill is injected. Three retries are this sample's
 choice, not a changed default: `max_retries=1`, `timeout=60`, and
@@ -271,6 +283,15 @@ must be replay-safe: no HTTP bodies, output bindings, streaming or non-idempoten
 side effects, and no side-effect rollback. Cancellation propagates; cleanup is
 bounded and cooperative. See [recovery limits](front-matter-spec.md#opt-in-handler-recovery)
 and the [runnable sample](../samples/hosted-skill-remediation/).
+
+For source-grounded advice without replay, use `@app.smart_retry(audit_only=True)`.
+Audit exposes only source inspection tools, never `retry_function`; it logs
+bounded advice once at WARNING level and retains `HostedSkillRecoveryError`
+and host redelivery/poison behavior. Any supplied `max_retries` must still be
+positive, even though audit's effective budget is zero. The sample's
+`process_work_item2` listens to `bad-package` and deliberately imports missing
+`verybadpackage` inside the handler to demonstrate this path; `process_work_item`
+on `recovery-work-items` remains normal retry mode with `max_retries=3`.
 
 Ref: [Azure Functions queue trigger](https://learn.microsoft.com/azure/azure-functions/functions-bindings-storage-queue-trigger)
 

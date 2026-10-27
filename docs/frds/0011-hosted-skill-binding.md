@@ -281,9 +281,12 @@ resolved instructions, model, timeout, `agent_configuration`, filtered user
 tools, MCP tools, approved skill descriptors, full skill ownership catalog, and
 `web_request` tools. It creates ACA Dynamic Sessions tools after resolving the
 run's session ID so `execute_python` uses that same public identity. An omitted
-session ID is generated and marked new; an explicit ID is treated as a resume
-without probing history. It passes shallow copies of mutable capability lists so
-neither the runner nor an SDK can mutate the catalog. HostedSkill uses the same
+session ID is generated and marked new; a caller-supplied ID uses the runtime's
+open-or-create continuity contract: absent persisted state starts under that
+identity, while existing state continues, with storage/native errors propagated
+without fallback creation or reset. It passes shallow copies of mutable
+capability lists so neither the runner nor an SDK can mutate the catalog.
+HostedSkill uses the same
 process-wide ACA credential and HTTP connection pools as existing agent surfaces;
 the sandbox module continues to own those shared resources while each method call
 owns only its bound tool closure and stream lifecycle. The outer HostedSkill span

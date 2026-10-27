@@ -7,6 +7,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 
+class CustomError(ModuleNotFoundError):
+    """A queue work item contains malformed JSON."""
+
 class WorkItem(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 

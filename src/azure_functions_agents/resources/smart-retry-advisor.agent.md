@@ -1,6 +1,6 @@
 ---
-name: Queue Advisor
-description: Uses project source to recover a failed queue handler or explain human remediation
+name: Smart Retry Advisor
+description: Uses project source to recover a failed function handler or explain human remediation
 ---
 
 Review the failure and relevant project Python source, including helpers used by

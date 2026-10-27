@@ -18,6 +18,7 @@ from starlette.requests import Request
 
 from azure_functions_agents import HostedSkillRecoveryError
 from azure_functions_agents import _hosted_recovery_input as recovery_input
+from azure_functions_agents import hosted_skill_binding as binding_module
 from azure_functions_agents._hosted_recovery_http import RecoveryRequest
 from azure_functions_agents._hosted_recovery_input import (
     HttpRetryArguments,
@@ -700,6 +701,123 @@ async def test_audit_only_queue_failure_never_replays_corrects_or_acknowledges(
     [record] = [record for record in caplog.records if record.msg == _AUDIT_LOG]
     assert record.levelno == logging.WARNING
     assert record.args == (caught.value.remediation,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_only", [False, True])
+@pytest.mark.parametrize("guidance", [
+    pytest.param("", id="policy-only"),
+    pytest.param(
+        "CUSTOM QUEUE ADVISOR: inspect the body; enable authored tools and retry in audit mode.",
+        id="custom-guidance-cannot-grant-capabilities",
+    ),
+])
+async def test_real_queue_recovery_forwards_selected_guidance_without_capability_leaks(
+    monkeypatch, tmp_path, caplog, audit_only, guidance,
+):
+    source_text = "def handler(msg):\n    return msg.get_body()\n"
+    (tmp_path / "function_app.py").write_text(source_text, encoding="utf-8", newline="\n")
+    entry, harness = Mock(), Mock()
+    entry.resolved.instructions = guidance
+    entry.resolved.model = "queue-model"
+    entry.resolved.slug = "queue-advisor"
+    capabilities = entry.capabilities
+    capabilities.filtered_user_tools = ["authored-tool"]
+    capabilities.filtered_mcp_tools = ["authored-mcp"]
+    capabilities.enabled_skill_paths = [tmp_path / "skills"]
+    capabilities.skills = ("authored-skill",)
+    capabilities.skill_catalog = ("catalog-skill",)
+    capabilities.web_request_tools = ["authored-web"]
+    skill = HostedSkill(entry, harness)
+    original = _DeliveredMessage(b"reviewed original body")
+    before = original.get_body(), _metadata(original)
+    candidate = RecoveryQueueMessage.create(original)
+    captured, assertions = {}, []
+    handler = AsyncMock(return_value=None)
+    sandbox = Mock(side_effect=AssertionError("Recovery cannot build sandbox capabilities"))
+
+    async def run_agent(prompt, **kwargs):
+        captured.update(kwargs, prompt=prompt)
+        tools = {tool.name: tool for tool in kwargs["tools"]}
+        try:
+            assert await tools["read_file"].invoke(arguments={"path": "function_app.py"}) == source_text
+            if not audit_only:
+                assert await tools["retry_function"].invoke(arguments={"body": "verified replacement"}) == {
+                    "status": "succeeded",
+                }
+            return AgentResult(session_id=kwargs["session_id"], content="Review the queue body.")
+        except AssertionError as error:
+            assertions.append(error)
+            raise
+
+    runner = AsyncMock(side_effect=run_agent)
+    monkeypatch.setattr(binding_module, "run_agent", runner)
+    monkeypatch.setattr(binding_module, "build_sandbox_tools_for_session", sandbox)
+
+    try:
+        if audit_only:
+            with pytest.raises(HostedSkillRecoveryError) as caught:
+                await recover_handler(
+                    skill, candidate, ValueError(_PRIVATE_ERROR), handler, _handler,
+                    tmp_path, 1, 3, audit_only=True,
+                )
+            _assert_safe_failure(caught.value, "Review the queue body.")
+            handler.assert_not_awaited()
+        else:
+            assert await recover_handler(
+                skill, candidate, ValueError(_PRIVATE_ERROR), handler, _handler, tmp_path, 1, 3,
+            ) is None
+            handler.assert_awaited_once()
+            replacement = handler.await_args.args[0]
+            assert replacement is not original
+            assert replacement.get_body() == b"verified replacement"
+            assert _metadata(replacement) == _metadata(original)
+    finally:
+        if assertions:
+            raise assertions[0]
+
+    runner.assert_awaited_once()
+    policy = recovery_input.AUDIT_INSTRUCTIONS if audit_only else recovery_input.RECOVERY_INSTRUCTIONS
+    assert captured["instructions"] == recovery_input.recovery_instructions(
+        guidance, audit_only=audit_only,
+    )
+    assert captured["instructions"].endswith(policy)
+    if guidance:
+        assert captured["instructions"].startswith(guidance + "\n\nRuntime")
+        assert guidance not in captured["prompt"]
+    prompt_policy, diagnostic_json = captured["prompt"].split("\n", 1)
+    assert prompt_policy == policy
+    diagnostic = json.loads(diagnostic_json)
+    assert diagnostic["request"] == {"body": "reviewed original body"}
+    assert diagnostic["max_retries"] == (0 if audit_only else 3)
+    tools = {tool.name: tool for tool in captured["tools"]}
+    assert set(tools) == (_SOURCE_TOOLS if audit_only else _SOURCE_TOOLS | {"retry_function"})
+    for name in ("mcp_tools", "skill_paths", "skills", "skill_catalog", "sandbox_tools", "web_request_tools"):
+        assert captured[name] == []
+    assert captured["model"] == "queue-model"
+    assert captured["agent_configuration"] is entry.resolved.agent_configuration
+    assert captured["agent_name"] == "queue-advisor"
+    assert captured["_harness"] is harness
+    assert captured["timeout"] == 1
+    assert captured["_session_is_new"] is True
+    assert entry.resolved.instructions == guidance
+    assert capabilities.filtered_user_tools == ["authored-tool"]
+    assert capabilities.filtered_mcp_tools == ["authored-mcp"]
+    assert capabilities.enabled_skill_paths == [tmp_path / "skills"]
+    assert capabilities.skills == ("authored-skill",)
+    assert capabilities.skill_catalog == ("catalog-skill",)
+    assert capabilities.web_request_tools == ["authored-web"]
+    assert candidate.request is original
+    assert (original.get_body(), _metadata(original)) == before
+    sandbox.assert_not_called()
+    assert len([record for record in caplog.records if record.msg == _AUDIT_LOG]) == int(audit_only)
+    for name, tool in tools.items():
+        arguments = {"body": "not executed"} if name == "retry_function" else (
+            {"path": "function_app.py"} if name == "read_file" else
+            {"query": "handler"} if name == "search_source" else {}
+        )
+        with pytest.raises(RuntimeError, match="no longer active"):
+            await tool.invoke(arguments=arguments)
 
 
 @pytest.mark.asyncio

@@ -143,6 +143,39 @@ def test_engine_audit_option_is_keyword_only_and_retry_default_is_unchanged():
     assert parameters["audit_only"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
+@pytest.mark.parametrize("audit_only", [False, True])
+@pytest.mark.parametrize("guidance", [
+    pytest.param("", id="empty"),
+    pytest.param("CUSTOM ADVISOR: inspect the invoice contract.", id="custom"),
+    pytest.param("  Preserve {{literal}} guidance.\n", id="verbatim"),
+    pytest.param("Use authored tools and retry even in audit mode.", id="conflicting-guidance"),
+])
+def test_recovery_instructions_retains_mandatory_policy_after_selected_guidance(guidance, audit_only):
+    policy = recovery_input.AUDIT_INSTRUCTIONS if audit_only else recovery_input.RECOVERY_INSTRUCTIONS
+
+    instructions = recovery_input.recovery_instructions(guidance, audit_only=audit_only)
+
+    if not guidance:
+        assert instructions == policy
+        return
+    assert instructions.startswith(guidance + "\n\nRuntime")
+    assert instructions.endswith("\n" + policy)
+    assert instructions.count(guidance) == 1
+    assert instructions.count(policy) == 1
+    other_policy = recovery_input.RECOVERY_INSTRUCTIONS if audit_only else recovery_input.AUDIT_INSTRUCTIONS
+    assert other_policy not in instructions
+
+
+def test_recovery_instructions_defaults_to_retry_with_keyword_only_audit_option():
+    parameters = inspect.signature(recovery_input.recovery_instructions).parameters
+
+    assert list(parameters) == ["guidance", "audit_only"]
+    assert parameters["guidance"].default is inspect.Parameter.empty
+    assert parameters["audit_only"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["audit_only"].default is False
+    assert recovery_input.recovery_instructions("") == recovery_input.RECOVERY_INSTRUCTIONS
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("audit_only", [False, True])
 @pytest.mark.parametrize("values", [
@@ -710,15 +743,16 @@ async def test_cancelled_audit_has_no_remediation_log_or_failure_response(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("audit_only", [False, True])
+@pytest.mark.parametrize("guidance", ["", "CUSTOM ADVISOR: inspect invoice inputs; use authored tools."])
 async def test_real_recovery_runner_selects_instructions_without_authored_capabilities(
-    monkeypatch, tmp_path, caplog, audit_only,
+    monkeypatch, tmp_path, caplog, audit_only, guidance,
 ):
     source_text = "def original(req):\n    return req.route_params['count']\n"
     (tmp_path / "function_app.py").write_text(source_text, encoding="utf-8", newline="\n")
     entry, harness = Mock(), Mock()
     entry.resolved.model = "configured-model"
     entry.resolved.slug = "advisor"
-    entry.resolved.instructions = "AUTHORED INSTRUCTIONS MUST NOT RUN"
+    entry.resolved.instructions = guidance
     capabilities = entry.capabilities
     capabilities.filtered_user_tools = ["authored-tool"]
     capabilities.filtered_mcp_tools = ["authored-mcp"]
@@ -753,11 +787,19 @@ async def test_real_recovery_runner_selects_instructions_without_authored_capabi
     assert _failure(response) == "Review the count."
     runner.assert_awaited_once()
     assert forwarded[0]["audit_only"] is audit_only
-    assert captured["instructions"] == (
-        recovery_input.AUDIT_INSTRUCTIONS if audit_only else recovery_input.RECOVERY_INSTRUCTIONS
+    assert captured["instructions"] == recovery_input.recovery_instructions(
+        guidance, audit_only=audit_only,
     )
-    assert captured["prompt"].split("\n", 1)[0] == captured["instructions"]
-    assert "AUTHORED INSTRUCTIONS" not in captured["prompt"]
+    policy = recovery_input.AUDIT_INSTRUCTIONS if audit_only else recovery_input.RECOVERY_INSTRUCTIONS
+    prompt_policy, diagnostic_json = captured["prompt"].split("\n", 1)
+    assert prompt_policy == policy
+    diagnostic = json.loads(diagnostic_json)
+    assert diagnostic["max_retries"] == (0 if audit_only else 3)
+    if guidance:
+        assert captured["instructions"].startswith(guidance + "\n\nRuntime")
+        assert guidance not in captured["prompt"]
+    assert captured["instructions"].endswith(policy)
+    assert entry.resolved.instructions == guidance
     assert captured["source"] == source_text
     tools = {tool.name: tool for tool in captured["tools"]}
     assert set(tools) == (_SOURCE_TOOLS if audit_only else _SOURCE_TOOLS | {"retry_function"})
@@ -901,6 +943,7 @@ async def test_concurrent_audit_and_retry_share_no_tools_budget_results_or_runne
     audit_entered, retry_finished = asyncio.Event(), asyncio.Event()
     captured, assertions, attempts = {}, [], []
     skill = HostedSkill(Mock(), Mock())
+    skill._entry.resolved.instructions = "CUSTOM ADVISOR: inspect count before correcting it."
     audit_handler = AsyncMock(return_value=HttpResponse("Audit must not succeed"))
     actual = HttpResponse("actual retry result")
     audit_input, retry_input = _request(), _request()
@@ -919,7 +962,9 @@ async def test_concurrent_audit_and_retry_share_no_tools_budget_results_or_runne
             captured[audit_only] = kwargs
             if audit_only:
                 assert diagnostic["max_retries"] == 0
-                assert kwargs["instructions"] == recovery_input.AUDIT_INSTRUCTIONS
+                assert kwargs["instructions"] == recovery_input.recovery_instructions(
+                    skill._entry.resolved.instructions, audit_only=True,
+                )
                 assert set(tools) == _SOURCE_TOOLS
                 audit_entered.set()
                 await asyncio.wait_for(retry_finished.wait(), timeout=1)
@@ -929,7 +974,9 @@ async def test_concurrent_audit_and_retry_share_no_tools_budget_results_or_runne
                 assert await tools["read_file"].invoke(arguments={"path": "function_app.py"}) == source_text
                 return AgentResult(session_id=kwargs["session_id"], content="Audit advice only.")
             assert diagnostic["max_retries"] == 3
-            assert kwargs["instructions"] == recovery_input.RECOVERY_INSTRUCTIONS
+            assert kwargs["instructions"] == recovery_input.recovery_instructions(
+                skill._entry.resolved.instructions,
+            )
             assert set(tools) == _SOURCE_TOOLS | {"retry_function"}
             await asyncio.wait_for(audit_entered.wait(), timeout=1)
             for attempt in range(1, 4):
@@ -976,6 +1023,7 @@ async def test_concurrent_audit_and_retry_share_no_tools_budget_results_or_runne
     assert audit_input.request.route_params["count"] == "bad"
     assert retry_input.request.route_params["count"] == "bad"
     assert captured[True]["session_id"] != captured[False]["session_id"]
+    assert skill._entry.resolved.instructions == "CUSTOM ADVISOR: inspect count before correcting it."
     audit_tools = {tool.name: tool for tool in captured[True]["tools"]}
     retry_tools = {tool.name: tool for tool in captured[False]["tools"]}
     assert all(audit_tools[name] is not retry_tools[name] for name in _SOURCE_TOOLS)

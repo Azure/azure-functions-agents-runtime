@@ -12,6 +12,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Run agents on durable workflows** *(experimental, see [Dynamic workflows](workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Hosted skills in ordinary Functions** — inject a markdown agent into your own trigger handler with `@app.hosted_skill`
+- **Source-aware handler recovery** — use `@app.smart_retry()` with a bundled advisor and no custom agent file; opt into advice-only audit or select your own advisor
 - **Evaluate authored behavior** *(preview)* — run native Vally evaluations against the same chat surface under Core Tools or in staging
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
@@ -34,11 +35,12 @@ azurefunctions-agents-runtime
 ## Where to go next
 
 - [Getting started](getting-started.md) — create your first agent and run it locally
+- [Handler recovery](front-matter-spec.md#opt-in-handler-recovery) — default advisor, optional authored guidance, retry and audit limits
 - [Architecture](architecture.md) — module map and data flow pipeline
 - [Front matter spec](front-matter-spec.md) — the `.agent.md` and `agents.config.yaml` field reference
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Observability](observability.md) — tracing and telemetry
-- [Copilot preview operations](copilot-preview-operations.md) — default-off, local-only preview with SDK-owned session files; MAF remains the default
+- [Copilot preview operations](copilot-preview-operations.md) — default-off preview with SDK-owned session files; MAF remains the default
 - [Agent evaluations](evaluation.md) — preview Vally executor for local and staging targets
 - [Dynamic workflows](workflows.md) — experimental durable DAG execution
 

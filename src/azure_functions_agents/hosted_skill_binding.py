@@ -12,7 +12,7 @@ from ._agent_run_diagnostics import (
     start_agent_run_span,
 )
 from ._agent_validation import validate_prompt, validate_session_id
-from ._hosted_recovery_input import AUDIT_INSTRUCTIONS, RECOVERY_INSTRUCTIONS
+from ._hosted_recovery_input import recovery_instructions
 from ._logger import logger
 from ._observability import FaultDomain, current_span
 from ._tool_descriptor import ToolDescriptor
@@ -53,7 +53,7 @@ class HostedSkill:
         session_id, is_new_session = _resolve_session_id(None)
         return await run_agent(
             validate_prompt(prompt),
-            instructions=AUDIT_INSTRUCTIONS if audit_only else RECOVERY_INSTRUCTIONS,
+            instructions=recovery_instructions(resolved.instructions, audit_only=audit_only),
             timeout=timeout,
             tools=list(tools),
             mcp_tools=[],

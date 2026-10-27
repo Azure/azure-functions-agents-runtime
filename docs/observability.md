@@ -211,7 +211,7 @@ These expectations apply to runtime-captured turn telemetry:
 
 ### Span `dynamic_session.execute`
 
-One per `execute_python` call, as a child of the runtime-owned invocation span.
+One per `fhs_execute_python` call, as a child of the runtime-owned invocation span.
 
 | Attribute | Meaning |
 | --- | --- |
@@ -292,7 +292,7 @@ Namespace `azure_functions_agents.*`:
 
 | Metric | Meaning |
 | --- | --- |
-| `azure_functions_agents.dynamic_session.executions` | Count of `execute_python` calls. |
+| `azure_functions_agents.dynamic_session.executions` | Count of `fhs_execute_python` calls. |
 | `azure_functions_agents.dynamic_session.errors` | Count that failed or produced stderr. |
 | `azure_functions_agents.web_request.requests` | Count of `web_request` tool calls. |
 | `azure_functions_agents.web_request.errors` | Count that were blocked by the SSRF validator, timed out, or otherwise failed. |
@@ -322,6 +322,13 @@ Sensitive-data capture is controlled by the single `ENABLE_SENSITIVE_DATA` envir
   `ENABLE_SENSITIVE_DATA` is off. This does **not** widen prompt/request/response/tool-argument
   capture, but arbitrary exception text can still contain sensitive data if application code
   includes it.
+  Unexpected Copilot SDK startup, session-create/resume, and turn failures retain
+  their original Python exception, traceback, and cause, matching MAF. Runtime
+  exception logs include the operation name, without separately dumping requests
+  or SDK payloads. Standard HTTP/SSE/MCP error handling also uses the original
+  exception text, so SDK exceptions containing sensitive data can expose it in
+  responses as well as logs and telemetry. `ENABLE_SENSITIVE_DATA` does not
+  suppress exception diagnostics. Native SDK logging/export remains disabled.
 
 Best-effort diagnostics and telemetry cleanup are intentionally non-throwing:
 they must not change request results, cancellations, or SSE termination.

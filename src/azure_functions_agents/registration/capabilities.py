@@ -8,22 +8,20 @@ from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._function_tool import WorkflowTool
+from .._function_tool import WorkflowTool, normalize_optional_tools
 from .._logger import logger
+from .._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME, RUNTIME_WORKFLOW_TOOL_NAMES
 from .._slug import delegate_tool_name
-from .._tool_descriptor import ToolDescriptor, describe_tools
+from .._tool_descriptor import ToolDescriptor, ToolInput, tool_name
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor, describe_skill_catalog, describe_skill_paths
+from ..system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 
 if TYPE_CHECKING:
     from ..harness._harness_binding import AppHarness
 
-# Hardcoded (not imported from system_tools.sandbox) to avoid pulling in
-# that module's heavy optional deps (aiohttp, azure.identity) — matches the
-# lazy-import convention used by `_build_web_request_tools` below. The
-# sandbox tool's name is fixed as "execute_python" by its `@tool` decorator.
-SANDBOX_TOOL_NAME = "execute_python"
+SANDBOX_TOOL_NAME = FHS_EXECUTE_PYTHON_TOOL_NAME
 
 
 @dataclass(frozen=True)
@@ -43,7 +41,7 @@ class AgentCapabilities:
     def create(
         cls,
         *,
-        filtered_user_tools: Sequence[ToolDescriptor] | None = None,
+        filtered_user_tools: Sequence[ToolInput] | None = None,
         filtered_workflow_tools: Sequence[WorkflowTool] = (),
         filtered_mcp_tools: Sequence[MCPServerDescriptor] | None = None,
         enabled_skill_paths: Sequence[Path] = (),
@@ -57,9 +55,7 @@ class AgentCapabilities:
         )
         catalog = _merge_skill_descriptors(skill_catalog, approved)
         return cls(
-            filtered_user_tools=(
-                None if filtered_user_tools is None else describe_tools(filtered_user_tools)
-            ),
+            filtered_user_tools=normalize_optional_tools(filtered_user_tools),
             filtered_workflow_tools=tuple(filtered_workflow_tools),
             filtered_mcp_tools=(
                 None if filtered_mcp_tools is None else tuple(filtered_mcp_tools)
@@ -104,9 +100,9 @@ def with_runtime_skill_paths(
 
 
 def _filter_tools_by_name(
-    tools: Sequence[ToolDescriptor], exclude_names: set[str]
-) -> tuple[ToolDescriptor, ...]:
-    return tuple(tool for tool in describe_tools(tools) if tool.name not in exclude_names)
+    tools: Sequence[ToolInput], exclude_names: set[str]
+) -> tuple[ToolInput, ...]:
+    return tuple(tool for tool in tools if tool_name(tool) not in exclude_names)
 
 
 def _workflows_enabled(resolved: ResolvedAgent) -> bool:
@@ -131,7 +127,7 @@ def _build_web_request_tools(resolved: ResolvedAgent) -> tuple[ToolDescriptor, .
 def build_capabilities(
     resolved: ResolvedAgent,
     *,
-    discovered_user_tools: Sequence[ToolDescriptor],
+    discovered_user_tools: Sequence[ToolInput],
     discovered_workflow_tools: Sequence[WorkflowTool] | None = None,
     discovered_mcp_tools: Mapping[str, MCPServerDescriptor],
     discovered_skills: Mapping[str, Path],
@@ -141,7 +137,7 @@ def build_capabilities(
     exclude_names = set(resolved.tool_filter.exclude or [])
 
     if resolved.tools_disabled:
-        filtered_user_tools: tuple[ToolDescriptor, ...] = ()
+        filtered_user_tools: tuple[ToolInput, ...] = ()
     else:
         filtered_user_tools = _filter_tools_by_name(discovered_user_tools, exclude_names)
 
@@ -212,10 +208,47 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     names.update(tool.name for tool in capabilities.filtered_mcp_tools or ())
     names.update(tool.name for tool in capabilities.filtered_workflow_tools)
     names.update(tool.name for tool in capabilities.web_request_tools or ())
-    if resolved.sandbox_config is not None and not resolved.tools_disabled:
+    if sandbox_runtime_tool_enabled(
+        resolved.sandbox_config,
+        tools_disabled=resolved.tools_disabled,
+    ):
         names.add(SANDBOX_TOOL_NAME)
     names.discard("")
     return names
+
+
+def validate_runtime_tool_name_collisions(
+    resolved: ResolvedAgent | None = None,
+    *,
+    source_file: str | None = None,
+    authored_tools: Sequence[ToolInput],
+    workflow_enabled: bool,
+    sandbox_enabled: bool,
+) -> None:
+    """Reject exact authored/runtime tool-name collisions active for this role."""
+    runtime_names = set(RUNTIME_WORKFLOW_TOOL_NAMES) if workflow_enabled else set()
+    if sandbox_enabled:
+        runtime_names.add(SANDBOX_TOOL_NAME)
+    if not runtime_names:
+        return
+
+    authored_names = {tool_name(tool) for tool in authored_tools if tool_name(tool)}
+    collisions = sorted(authored_names.intersection(runtime_names))
+    if not collisions:
+        return
+
+    source_path = Path(source_file or (resolved.source_file if resolved else None) or "<unknown>")
+    if len(collisions) == 1:
+        raise ValueError(
+            f"{source_path}: authored tool name {collisions[0]!r} collides with an enabled "
+            "runtime-owned tool name for this role. Rename the authored tool or disable the "
+            "matching runtime capability."
+        )
+    raise ValueError(
+        f"{source_path}: authored tool names {collisions!r} collide with enabled runtime-owned "
+        "tool names for this role. Rename the authored tools or disable the matching runtime "
+        "capabilities."
+    )
 
 
 def validate_subagent_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> None:

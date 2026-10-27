@@ -14,6 +14,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Hosted skills in ordinary Functions** — inject a markdown agent into your own trigger handler with `@app.hosted_skill`
+- **Source-aware handler recovery** — opt in with `@app.smart_retry()` using a bundled advisor, with no custom agent file required; choose retry or advice-only audit
 - **Evaluate authored behavior** *(preview)* — run native Vally evaluations against the same chat surface under Core Tools or in staging
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
@@ -188,13 +189,26 @@ injection rather than constructed directly. See the
 [`HostedSkill injection`](docs/front-matter-spec.md#hostedskill-injection).
 
 For replay-safe HTTP or Azure Storage Queue handlers, use the separate
-`@app.smart_retry(agent_name="error_advisor")` decorator. Its keyword-only API is
-`app.smart_retry(*, agent_name, max_retries=1, timeout=60, request_arg=None, audit_only=False)`;
+`@app.smart_retry()` decorator. Its keyword-only API is
+`app.smart_retry(*, agent_name: str | None = None, max_retries=1, timeout=60, request_arg=None, audit_only=False)`;
 it accepts plain options, has no `arg_name`, and injects no skill or other
 argument. It is available on enhanced normal and Durable apps, including apps
 returned by `create_function_app()`. Place it immediately above an `async def`
 handler, below all Azure Functions SDK trigger/binding decorators. Combining
 injection and recovery on one handler, or applying `smart_retry` twice, is rejected.
+
+Omitting `agent_name` (or passing `None`) selects the bundled Smart Retry Advisor;
+no advisor markdown file is needed. It inherits the app's global model and
+`agent_configuration`, then existing environment/provider defaults—not another
+discovered agent's settings. Provider configuration is preflighted when the
+decorator selects the advisor, but no model client is acquired before the
+original handler fails. An explicit slug such as
+`@app.smart_retry(agent_name="error_advisor")` uses that catalog agent's authored
+instructions, model and agent configuration instead of the bundled guidance,
+within the same runtime-owned recovery/audit policy and tool limits. Invalid or
+unknown names fail rather than falling back. The bundled advisor is private:
+it adds no catalog agent, trigger, endpoint or delegation target. Ordinary
+`hosted_skill` injection still requires an explicit `agent_name`.
 
 The input argument is selected from trigger metadata at indexing; `request_arg`
 is an optional override. Direct calls without indexing require that override.
@@ -217,7 +231,7 @@ Set `max_retries=3` to allow up to three sequential agent-driven correction
 attempts, stopping at first success under the same recovery deadline.
 
 For advice without replay, opt in with
-`@app.smart_retry(agent_name="error_advisor", audit_only=True)`. The additive
+`@app.smart_retry(audit_only=True)`. The additive
 option defaults to `False` and requires an actual boolean. Audit mode overrides
 any valid positive `max_retries` with an effective zero budget; explicit
 `max_retries=0` is still invalid. The original handler runs first: success starts
@@ -265,7 +279,9 @@ agent_configuration:
 Agents recursively inherit global `agent_configuration` values. Per-agent values override individual
 leaves, while explicit `null` clears inherited values. Legacy
 `agent_framework.compaction.max_context_window_tokens` configuration emits a warning and is ignored;
-remove it to use the selected harness's native compaction default. See
+remove it to use the selected harness's native compaction default. On the Copilot
+preview path, `max_output_tokens` is passed through as the SDK provider's
+request-local native output cap. See
 [`docs/front-matter-spec.md#agent_configuration`](docs/front-matter-spec.md#agent_configuration).
 
 #### Securing endpoints
@@ -526,12 +542,25 @@ The runtime's ordinary `@tool` produces an SDK-free descriptor. Functions can be
 sync or async; signature types and Pydantic schemas supply input validation, and
 the selected harness adapts the descriptor to its SDK. Tools return ordinary
 Python values. Discovery selects one tool per module: a runtime descriptor
-first, then the first local public function. Imported functions and unrelated
-globals are not automatically exposed.
+first, then named callable objects with public `name`/`description`, then the
+first local public function. Imported functions, classes, unrelated globals,
+and workflow-only declarations are not automatically exposed.
 
 The convenience `@tool` accepts only `name`, `description`, `schema`, and
-`approval_mode`; extra keywords are warned and ignored. Runtime capability
-filters, authentication, and schemas still apply.
+`approval_mode`; unexpected keyword arguments raise the normal Python
+`TypeError`. `approval_mode` still accepts the existing
+`"never_require"`/`"always_require"` strings, and you can also use
+`ApprovalMode.NEVER_REQUIRE` or `ApprovalMode.ALWAYS_REQUIRE` directly:
+
+```python
+from azure_functions_agents import ApprovalMode, tool
+
+@tool(approval_mode=ApprovalMode.NEVER_REQUIRE)
+def reverse_string(text: str) -> str:
+    return text[::-1]
+```
+
+Runtime capability filters, authentication, and schemas still apply.
 
 Dynamic Workflow tools live in the same `tools/` directory but must opt in
 explicitly with `@workflow_tool` so they can run safely as Durable
@@ -720,8 +749,10 @@ transcript remains independent.
 
 > **Single-process scope:** Turns for the same agent/session pair are serialized
 > within one Python process, with bounded waiting. Independent sessions remain
-> concurrent. Cross-worker overlap is unsupported and caller-owned; Blob
-> storage does not provide distributed turn coordination.
+> concurrent. Across workers or instances there is no distributed lock.
+> Sequential resume depends on a shared accessible backend namespace, and
+> overlapping same-session requests can observe stale state and commit in
+> nondeterministic order.
 
 ## Samples
 
@@ -767,8 +798,8 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` | Per-call timeout in seconds (default `900`) |
 | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
-| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
-| `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (`low`, `medium`, `high`, `xhigh`, `max`). Invalid values are warned and ignored so the SDK/provider default applies. |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (`none`, `concise`, `detailed`). Invalid values are warned and ignored so the SDK/provider default applies. |
 
 ## Development
 

@@ -18,20 +18,24 @@ import azure_functions_agents._hosted_skill_app as hosted_app_module
 import azure_functions_agents._hosted_skill_recovery as recovery_module
 import azure_functions_agents.hosted_skill_binding as hosted_skill_module
 from azure_functions_agents import HostedSkill
+from azure_functions_agents._function_tool import tool
 from azure_functions_agents._hosted_recovery_http import RecoveryRequest
 from azure_functions_agents._hosted_recovery_input import (
     AUDIT_INSTRUCTIONS,
     RECOVERY_INSTRUCTIONS,
     HostedSkillRecoveryError,
+    recovery_instructions,
 )
 from azure_functions_agents._hosted_recovery_queue import RecoveryQueueMessage
 from azure_functions_agents._hosted_skill_app import (
     HostedSkillDFApp,
     HostedSkillFunctionApp,
 )
+from azure_functions_agents._runtime_tool_names import FHS_EXECUTE_PYTHON_TOOL_NAME
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     BuiltinEndpointsConfig,
+    DynamicSessionsCodeInterpreterConfig,
     ResolvedAgent,
     SubagentRef,
     ToolsFilter,
@@ -92,7 +96,9 @@ def _app(
     harness = AppHarness(
         harness_kind,
         tmp_path,
-        _create_runner=lambda _harness: SimpleNamespace(validate_hosted_skill=validator),
+        _create_runner=lambda _harness: SimpleNamespace(
+            validate_hosted_skill=validator, validate_agent=None,
+        ),
     )
     app_type = HostedSkillDFApp if durable else HostedSkillFunctionApp
     return app_type(catalog=catalog, harness=harness), validated_models
@@ -236,6 +242,30 @@ def test_decorator_rejects_unknown_agent(
         app.hosted_skill(arg_name="skill", agent_name="missing")
 
 
+def test_decorator_allows_authored_canonical_sandbox_name_when_endpoint_is_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    resolved = _entry(tmp_path).resolved.model_copy(
+        update={
+            "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+                endpoint="https://$UNSET_DYNAMIC_SESSIONS/api"
+            )
+        }
+    )
+    capabilities = AgentCapabilities(
+        filtered_user_tools=[tool(name=FHS_EXECUTE_PYTHON_TOOL_NAME)(lambda code: code)]
+    )
+    entry = CatalogEntry(resolved, capabilities)
+    app, _ = _app(monkeypatch, tmp_path, entry=entry)
+
+    @app.hosted_skill(arg_name="skill", agent_name="internal")
+    async def handler(skill: HostedSkill) -> None:
+        pass
+
+    assert handler.__name__ == "handler"
+
+
 @pytest.mark.parametrize(
     ("entry_kwargs", "message"),
     [
@@ -278,7 +308,7 @@ def test_enhanced_apps_preserve_sdk_base_types(
         HarnessKind.MAF,
         tmp_path,
         _create_runner=lambda _harness: SimpleNamespace(
-            validate_hosted_skill=lambda _resolved: None
+            validate_hosted_skill=lambda _resolved: None, validate_agent=None,
         ),
     )
 
@@ -298,14 +328,14 @@ def test_smart_retry_has_exact_keyword_only_options_and_defaults(
 
     assert list(parameters) == ["agent_name", "max_retries", "timeout", "request_arg", "audit_only"]
     assert all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in parameters.values())
-    assert parameters["agent_name"].default is inspect.Parameter.empty
+    assert parameters["agent_name"].default is None
     assert parameters["max_retries"].default == 1
     assert type(parameters["max_retries"].default) is int
     assert parameters["timeout"].default == 60
     assert parameters["request_arg"].default is None
     assert parameters["audit_only"].default is False
     hints = get_type_hints(app.smart_retry)
-    assert hints["agent_name"] is str
+    assert hints["agent_name"] == str | None
     assert hints["max_retries"] is int
     assert hints["timeout"] is float
     assert hints["request_arg"] == str | None
@@ -407,20 +437,22 @@ def test_smart_retry_rejects_sync_handlers_and_sdk_builder_order(
         app.smart_retry(agent_name="internal")(builder)
 
 
-@pytest.mark.parametrize("agent_name", ["", None, 1])
+@pytest.mark.parametrize("agent_name", ["", 1, False, [], {}])
+@pytest.mark.parametrize("durable", [False, True])
 def test_smart_retry_rejects_invalid_agent_names(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_name: Any,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_name: Any, durable: bool,
 ) -> None:
-    app, _ = _app(monkeypatch, tmp_path)
+    app, _ = _app(monkeypatch, tmp_path, durable=durable)
 
     with pytest.raises(ValueError, match="agent_name must be a non-empty string"):
         app.smart_retry(agent_name=agent_name)
 
 
+@pytest.mark.parametrize("durable", [False, True])
 def test_smart_retry_rejects_unknown_agent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, durable: bool,
 ) -> None:
-    app, _ = _app(monkeypatch, tmp_path)
+    app, _ = _app(monkeypatch, tmp_path, durable=durable)
 
     with pytest.raises(ValueError, match="Unknown HostedSkill agent 'missing'"):
         app.smart_retry(agent_name="missing")
@@ -461,7 +493,7 @@ def test_smart_retry_propagates_provider_qualification_errors(
     validator = Mock(side_effect=ValueError("Provider configuration missing"))
     monkeypatch.setattr(
         "azure_functions_agents.harness._agent_runner.get_agent_runner",
-        lambda _harness: SimpleNamespace(validate_hosted_skill=validator),
+        lambda _harness: SimpleNamespace(validate_hosted_skill=validator, validate_agent=None),
     )
 
     with pytest.raises(ValueError, match="Provider configuration missing"):
@@ -1252,7 +1284,7 @@ async def test_audit_only_failure_inspects_source_without_replay_or_input_replac
     assert diagnostic["max_retries"] == 0
     assert diagnostic["error_type"] == "ValueError"
     assert diagnostic["handler"] == function.get_user_function().__wrapped__.__qualname__
-    assert runner["instructions"] == AUDIT_INSTRUCTIONS
+    assert runner["instructions"] == recovery_instructions("Follow policy.", audit_only=True)
     assert runner["instructions"] != RECOVERY_INSTRUCTIONS
     assert prompt.startswith(AUDIT_INSTRUCTIONS + "\n")
     assert runner["timeout"] == 2
@@ -1289,9 +1321,9 @@ async def test_audit_only_failure_inspects_source_without_replay_or_input_replac
         "list_files": {}, "read_file": {"path": "recovery_fixture.py"},
         "search_source": {"query": "parse_count"},
     }
-    for tool in runner["tools"]:
+    for recovery_tool in runner["tools"]:
         with pytest.raises(RuntimeError, match="no longer active"):
-            await tool.invoke(arguments=arguments[tool.name])
+            await recovery_tool.invoke(arguments=arguments[recovery_tool.name])
 
 
 @pytest.mark.asyncio
@@ -1481,8 +1513,8 @@ async def test_concurrent_audit_and_retry_wrappers_share_catalog_but_not_executi
     assert audit_diagnostic["audit_only"] is True
     assert audit_diagnostic["max_retries"] == 0
     assert retry_diagnostic["max_retries"] == 3
-    assert audit_runner["instructions"] == AUDIT_INSTRUCTIONS
-    assert retry_runner["instructions"] == RECOVERY_INSTRUCTIONS
+    assert audit_runner["instructions"] == recovery_instructions("Follow policy.", audit_only=True)
+    assert retry_runner["instructions"] == recovery_instructions("Follow policy.")
     assert {tool.name for tool in audit_runner["tools"]} == {"list_files", "read_file", "search_source"}
     assert {tool.name for tool in retry_runner["tools"]} == {
         "list_files", "read_file", "search_source", "retry_function",
@@ -1494,3 +1526,176 @@ async def test_concurrent_audit_and_retry_wrappers_share_catalog_but_not_executi
     assert entry.resolved.instructions == "Follow policy."
     [record] = _audit_records(caplog)
     assert record.args == ("audit advice",)
+
+
+def _empty_app(tmp_path: Path, *, durable: bool):
+    validator = Mock()
+    create_runner = Mock(return_value=SimpleNamespace(
+        validate_hosted_skill=validator, validate_agent=None,
+    ))
+    harness = AppHarness(HarnessKind.MAF, tmp_path, _create_runner=create_runner)
+    app_type = HostedSkillDFApp if durable else HostedSkillFunctionApp
+    app = app_type(catalog=build_catalog({}), harness=harness)
+    return app, validator, create_runner
+
+
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_default_advisor_is_qualified_only_when_selected(
+    tmp_path: Path, durable: bool, explicit_none: bool,
+) -> None:
+    app, validator, create_runner = _empty_app(tmp_path, durable=durable)
+    create_runner.assert_not_called()
+    validator.assert_not_called()
+    assert not app._hosted_skill_catalog
+
+    options = {"agent_name": None} if explicit_none else {}
+    assert callable(app.smart_retry(**options))
+
+    validator.assert_called_once()
+    resolved = validator.call_args.args[0]
+    assert resolved.slug == "_smart_retry_advisor"
+    assert resolved.name == "Smart Retry Advisor"
+    assert not app._hosted_skill_catalog
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_default_advisor_does_not_make_hosted_skill_agent_name_optional(
+    tmp_path: Path, durable: bool,
+) -> None:
+    app, validator, create_runner = _empty_app(tmp_path, durable=durable)
+
+    with pytest.raises(TypeError, match="agent_name"):
+        app.hosted_skill(arg_name="skill")
+    with pytest.raises(ValueError, match="non-empty string"):
+        app.hosted_skill(arg_name="skill", agent_name=None)
+    with pytest.raises(ValueError, match="Unknown HostedSkill agent"):
+        app.hosted_skill(arg_name="skill", agent_name="_smart_retry_advisor")
+    with pytest.raises(ValueError, match="Unknown HostedSkill agent"):
+        app.smart_retry(agent_name="missing")
+
+    validator.assert_not_called()
+    create_runner.assert_not_called()
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_default_advisor_provider_qualification_errors_are_not_swallowed(
+    tmp_path: Path, durable: bool,
+) -> None:
+    app, validator, _ = _empty_app(tmp_path, durable=durable)
+    validator.side_effect = ValueError("Provider configuration missing")
+
+    with pytest.raises(ValueError, match="Provider configuration missing"):
+        app.smart_retry()
+
+    validator.assert_called_once()
+    assert validator.call_args.args[0].slug == "_smart_retry_advisor"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("audit_only", [False, True])
+async def test_default_advisor_success_never_executes_a_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, durable: bool, audit_only: bool,
+) -> None:
+    app, validator, _ = _empty_app(tmp_path, durable=durable)
+    runner = AsyncMock()
+    monkeypatch.setattr(hosted_skill_module, "run_agent", runner)
+    calls = []
+
+    @app.queue_trigger(arg_name="incoming", queue_name="items", connection="Storage")
+    @app.smart_retry(audit_only=audit_only)
+    async def handler(incoming: func.QueueMessage) -> None:
+        calls.append(incoming)
+
+    function = next(item for item in app.get_functions() if item.get_function_name() == "handler")
+    incoming = func.QueueMessage(body=b"unchanged")
+    assert await function.get_user_function()(incoming) is None
+    assert calls == [incoming]
+    validator.assert_called_once()
+    runner.assert_not_called()
+    assert not app._hosted_skill_catalog
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("audit_only", [False, True])
+@pytest.mark.parametrize("max_retries", [1, 3])
+async def test_default_advisor_uses_packaged_guidance_and_invocation_local_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    durable: bool, audit_only: bool, max_retries: int,
+) -> None:
+    app, validator, _ = _empty_app(tmp_path, durable=durable)
+    calls = []
+    runners = []
+    retry_results = []
+
+    @app.smart_retry(audit_only=audit_only, max_retries=max_retries, request_arg="incoming")
+    async def handler(incoming: func.QueueMessage) -> None:
+        calls.append(incoming)
+        if incoming.get_body() != b"corrected":
+            raise ValueError("Needs correction")
+
+    default_resolved = validator.call_args.args[0]
+    original_configuration = default_resolved.model_dump()
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        runners.append((prompt, kwargs))
+        if not audit_only:
+            retry = next(tool for tool in kwargs["tools"] if tool.name == "retry_function")
+            for attempt in range(max_retries):
+                retry_results.append(await retry.invoke(arguments={
+                    "body": "corrected" if attempt == max_retries - 1 else "still wrong",
+                }))
+            retry_results.append(await retry.invoke(arguments={"body": "corrected"}))
+        return AgentResult(kwargs["session_id"], "Inspect the input contract.")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+    originals = [func.QueueMessage(body=b"original", id=str(index)) for index in range(2)]
+    with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
+        for incoming in originals:
+            if audit_only:
+                with pytest.raises(HostedSkillRecoveryError, match="Inspect the input contract"):
+                    await handler(incoming)
+            else:
+                assert await handler(incoming) is None
+
+    assert len(runners) == 2
+    assert len(calls) == (2 if audit_only else 2 * (max_retries + 1))
+    assert [incoming.get_body() for incoming in originals] == [b"original", b"original"]
+    assert runners[0][1]["session_id"] != runners[1][1]["session_id"]
+    assert runners[0][1]["tools"] is not runners[1][1]["tools"]
+    for prompt, kwargs in runners:
+        diagnostic = json.loads(prompt.rsplit("\n", 1)[1])
+        assert diagnostic["max_retries"] == (0 if audit_only else max_retries)
+        assert kwargs["instructions"] == recovery_instructions(
+            default_resolved.instructions, audit_only=audit_only,
+        )
+        assert default_resolved.instructions in kwargs["instructions"]
+        assert kwargs["agent_name"] == "_smart_retry_advisor"
+        assert kwargs["timeout"] == 60
+        assert kwargs["_harness"] is app._hosted_skill_harness
+        expected_tools = {"list_files", "read_file", "search_source"}
+        if not audit_only:
+            expected_tools.add("retry_function")
+        assert {tool.name for tool in kwargs["tools"]} == expected_tools
+        for key in (
+            "mcp_tools", "skill_paths", "skills", "skill_catalog", "sandbox_tools", "web_request_tools",
+        ):
+            assert kwargs[key] == []
+        source_tool = next(tool for tool in kwargs["tools"] if tool.name == "list_files")
+        with pytest.raises(RuntimeError, match="no longer active"):
+            await source_tool.invoke(arguments={})
+    if audit_only:
+        assert not retry_results
+        assert [record.args for record in _audit_records(caplog)] == [
+            ("Inspect the input contract.",), ("Inspect the input contract.",),
+        ]
+    else:
+        assert retry_results == (
+            [{"status": "failed", "error_type": "ValueError"}] * (max_retries - 1)
+            + [{"status": "succeeded"}, {"status": "failed", "error_type": "RuntimeError"}]
+        ) * 2
+        assert not _audit_records(caplog)
+    assert default_resolved.model_dump() == original_configuration
+    assert not app._hosted_skill_catalog

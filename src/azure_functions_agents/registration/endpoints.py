@@ -387,6 +387,19 @@ def _register_http_chat(
             try:
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
+            except ValueError as exc:
+                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
+                span.set_error(str(exc), fault_domain=FaultDomain.APP)
+                return _json_error(
+                    str(exc),
+                    status_code=400,
+                    headers=_session_id_response_headers(
+                        resolved_session_id,
+                        caller_supplied=supplied_session_id is not None,
+                        state=session_state,
+                    ),
+                )
+            try:
                 result = await _run_builtin_agent(
                     prompt,
                     resolved=resolved,
@@ -435,18 +448,6 @@ def _register_http_chat(
                 return _json_error(
                     str(exc),
                     status_code=exc.status_code,
-                    headers=_session_id_response_headers(
-                        resolved_session_id,
-                        caller_supplied=supplied_session_id is not None,
-                        state=session_state,
-                    ),
-                )
-            except ValueError as exc:
-                span.set_attribute(ATTR_AGENT_OUTCOME, SpanOutcome.ERROR)
-                span.set_error(str(exc), fault_domain=FaultDomain.APP)
-                return _json_error(
-                    str(exc),
-                    status_code=400,
                     headers=_session_id_response_headers(
                         resolved_session_id,
                         caller_supplied=supplied_session_id is not None,
@@ -520,8 +521,13 @@ def _register_http_chat_stream(
                     status_code=auth_error.status_code,
                     session_id=supplied_session_id,
                 )
-            body = await req.json()
-            prompt = _extract_prompt_from_body(body)
+            try:
+                body = await req.json()
+                prompt = _extract_prompt_from_body(body)
+            except ValueError as exc:
+                return _sse_error_response(
+                    str(exc), status_code=400, session_id=supplied_session_id
+                )
             session_state = HarnessSessionState(
                 caller_supplied=supplied_session_id is not None
             )
@@ -558,10 +564,6 @@ def _register_http_chat_stream(
                     else stream_with_owned_client(durable_client_config)
                 ),
                 media_type="text/event-stream",
-            )
-        except ValueError as exc:
-            return _sse_error_response(
-                str(exc), status_code=400, session_id=supplied_session_id
             )
         except Exception as exc:
             error_msg = _format_exception_message(exc)
@@ -850,7 +852,8 @@ def _register_history_endpoint(
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
-        if message := get_agent_runner(selected_harness).session_history_unavailable_message:
+        selected_runner = get_agent_runner(selected_harness)
+        if message := selected_runner.session_history_unavailable_message:
             return _json_error(message, status_code=501)
         session_id = _request_header_value(req, _SESSION_ID_HEADER) or ""
         if not session_id:
@@ -869,9 +872,7 @@ def _register_history_endpoint(
             )
 
         try:
-            history = await get_agent_runner(selected_harness).get_session_history(
-                slug, session_id
-            )
+            history = await selected_runner.get_session_history(slug, session_id)
         except SessionHistoryUnavailableError as exc:
             return _json_error(str(exc), status_code=exc.status_code)
         except Exception:

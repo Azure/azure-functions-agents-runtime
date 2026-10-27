@@ -17,9 +17,13 @@ from ._agent_run_diagnostics import AgentExecutionSurface
 from ._hosted_recovery_input import prepare_recovery_input
 from ._hosted_skill_recovery import _validate_retry_options, recover_handler
 from ._logger import logger
-from .harness._harness_binding import AppHarness, UnsupportedCapabilityError
+from ._smart_retry_advisor import build_default_advisor
+from .config.schema import GlobalConfig
+from .harness._harness_binding import AppHarness, UnsupportedCapabilityError, validate_agent
 from .hosted_skill_binding import HostedSkill
+from .registration.capabilities import validate_runtime_tool_name_collisions
 from .registration.catalog import AgentCatalog, CatalogEntry
+from .system_tools._sandbox_endpoint import sandbox_runtime_tool_enabled
 
 type _Handler = Callable[..., Any]
 _F = TypeVar("_F", bound=_Handler)
@@ -100,6 +104,18 @@ def _validate_entry(entry: CatalogEntry, harness: AppHarness) -> None:
         raise UnsupportedCapabilityError(
             f"HostedSkill agent {resolved.slug!r} cannot enable Dynamic Workflows."
         )
+    try:
+        validate_runtime_tool_name_collisions(
+            resolved,
+            authored_tools=entry.capabilities.filtered_user_tools or (),
+            workflow_enabled=False,
+            sandbox_enabled=sandbox_runtime_tool_enabled(
+                resolved.sandbox_config,
+                tools_disabled=resolved.tools_disabled,
+            ),
+        )
+    except ValueError as exc:
+        raise UnsupportedCapabilityError(str(exc)) from exc
     validator = get_agent_runner(harness).validate_hosted_skill
     if validator is not None:
         validator(resolved)
@@ -126,16 +142,21 @@ class _HostedSkillAppMixin:
     _hosted_skill_harness: AppHarness
     _hosted_skill_recovery_bindings: dict[_Handler, _RecoveryBinding]
     _hosted_skill_wrappers: set[_Handler]
+    _default_smart_retry_advisor: CatalogEntry
 
     def _configure_hosted_skills(
         self,
         catalog: AgentCatalog,
         harness: AppHarness,
+        default_advisor: CatalogEntry | None = None,
     ) -> None:
         self._hosted_skill_catalog = catalog
         self._hosted_skill_harness = harness
         self._hosted_skill_recovery_bindings = {}
         self._hosted_skill_wrappers = set()
+        self._default_smart_retry_advisor = (
+            default_advisor if default_advisor is not None else build_default_advisor(GlobalConfig())
+        )
 
     def _decorator_entry(self, agent_name: str, decorator: str) -> CatalogEntry:
         """Qualify one catalog agent without acquiring execution resources."""
@@ -215,7 +236,7 @@ class _HostedSkillAppMixin:
     def smart_retry(
         self,
         *,
-        agent_name: str,
+        agent_name: str | None = None,
         max_retries: int = 1,
         timeout: float = 60,
         request_arg: str | None = None,
@@ -226,7 +247,12 @@ class _HostedSkillAppMixin:
             request_arg=request_arg, timeout=timeout, max_retries=max_retries,
             audit_only=audit_only,
         )
-        entry = self._decorator_entry(agent_name, "smart_retry")
+        if agent_name is None:
+            entry = self._default_smart_retry_advisor
+            validate_agent(self._hosted_skill_harness, entry.resolved, entry.capabilities)
+            _validate_entry(entry, self._hosted_skill_harness)
+        else:
+            entry = self._decorator_entry(agent_name, "smart_retry")
 
         def decorate(handler: _F) -> _F:
             self._validate_decorator_handler(handler, "smart_retry")
@@ -276,10 +302,11 @@ class HostedSkillFunctionApp(_HostedSkillAppMixin, func.FunctionApp):
         *,
         catalog: AgentCatalog,
         harness: AppHarness,
+        default_advisor: CatalogEntry | None = None,
         http_auth_level: func.AuthLevel | str = func.AuthLevel.FUNCTION,
     ) -> None:
         super().__init__(http_auth_level=http_auth_level)
-        self._configure_hosted_skills(catalog, harness)
+        self._configure_hosted_skills(catalog, harness, default_advisor)
 
     def get_functions(self) -> list[Function]:
         """Index functions and resolve automatic recovery input selection."""
@@ -296,10 +323,11 @@ class HostedSkillDFApp(_HostedSkillAppMixin, df.DFApp):
         *,
         catalog: AgentCatalog,
         harness: AppHarness,
+        default_advisor: CatalogEntry | None = None,
         http_auth_level: func.AuthLevel | str = func.AuthLevel.FUNCTION,
     ) -> None:
         super().__init__(http_auth_level=http_auth_level)
-        self._configure_hosted_skills(catalog, harness)
+        self._configure_hosted_skills(catalog, harness, default_advisor)
 
     def get_functions(self) -> list[Function]:
         """Index functions and resolve automatic recovery input selection."""

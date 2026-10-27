@@ -134,7 +134,7 @@ Roles come from invocation surfaces and references, not file placement:
 | --- | --- |
 | Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
 | HostedSkill target | Any discovered agent selected by its filename-derived identity slug through `@app.hosted_skill`. It may be inert with no registered surface. |
-| Smart-retry advisor | A catalog agent selected by slug through `@app.smart_retry` for isolated handler recovery, without injection. It may have no registered surface. |
+| Smart-retry advisor | `@app.smart_retry()` selects a private bundled advisor without an agent file; an explicit `agent_name` selects a catalog agent's authored guidance and configuration. No skill is injected. |
 | Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
 | Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
 | Workflow-enabled agent | Sets `workflows.enabled: true`. |
@@ -174,8 +174,11 @@ The injected parameter is runtime-managed and hidden from Azure Functions
 binding discovery. Each Function invocation receives a fresh lightweight
 facade; model clients, agents, MCP resources, sandbox closures, and sessions
 are created only when `skill.run()` or `skill.stream()` is called. Supply a
-valid `session_id` to continue a conversation, or omit it to receive a new
-public session ID in the result/events.
+valid `session_id` to open or continue that conversation identity, or omit it
+to receive a new public session ID in the result/events. A supplied ID with no
+persisted state starts a conversation under that ID; existing state continues.
+Storage and native session errors propagate without replacement creation or
+state reset.
 
 The handler must be a plain `async def`, the HostedSkill decorator must be
 immediately above the handler and below its Azure Functions trigger decorator,
@@ -232,13 +235,13 @@ app = HostedSkillFunctionApp()
 
 
 @app.route(route="value", methods=["GET"])
-@app.smart_retry(agent_name="error_advisor")
+@app.smart_retry()
 async def value(req: Request) -> JSONResponse:
   return JSONResponse({"value": int(req.query_params["value"])})
 ```
 
 The keyword-only API is
-`app.smart_retry(*, agent_name, max_retries=1, timeout=60, request_arg=None, audit_only=False)`.
+`app.smart_retry(*, agent_name: str | None = None, max_retries=1, timeout=60, request_arg=None, audit_only=False)`.
 These are plain decorator options, not front-matter fields or a public
 configuration object. It preserves the handler's signature and annotations,
 injects no argument, and has no `arg_name` option. No `HostedSkill` parameter,
@@ -251,6 +254,29 @@ handler is unsupported and rejected, as is applying `smart_retry` twice.
 Synchronous handlers and SDK FunctionBuilder objects (from incorrect decorator
 order) are also rejected.
 
+**Default advisor:** omit `agent_name` or pass `None` to use the bundled Smart
+Retry Advisor; no customer advisor file is required or written at startup. Its
+packaged markdown preserves the former sample queue advisor's body, with a
+generic name and description for failed function handlers. Its model and
+`agent_configuration` inherit app global defaults through normal composition,
+then existing environment/provider defaults apply. No settings are inferred
+from another discovered agent. The decorator's `timeout=60` remains the recovery
+deadline, independent of global or agent execution timeouts.
+
+The private `_smart_retry_advisor` history identity stays outside the authored
+catalog, discovery, trigger/endpoint registration and delegation. It grants no
+discovered capabilities and does not make an app Durable. That exact slug is
+reserved; an authored agent with it is rejected. Each app captures its own
+immutable default configuration snapshot.
+
+**Custom advisor:** `@app.smart_retry(agent_name="error_advisor")` selects an
+authored catalog agent by filename-derived slug. Its resolved markdown
+instructions, model and agent configuration are forwarded to recovery; packaged
+guidance is not appended. Selected guidance supplements mandatory runtime-owned
+recovery or audit policy and cannot grant tools, increase budgets or change
+failure semantics. Empty strings, wrong types and unknown names are errors,
+not fallback requests. `hosted_skill` still requires an explicit `agent_name`.
+
 Options are validated when the decorator is defined: `max_retries` must be a
 positive integer and `timeout` a finite positive number; neither accepts booleans.
 `request_arg` must be `None` or a non-keyword Python identifier naming a concrete
@@ -259,8 +285,9 @@ not an integer, string or `None`. Its default is `False`; existing defaults rema
 `max_retries=1`, `timeout=60`, and `request_arg=None`. With `audit_only=True`, any
 otherwise valid positive `max_retries` is ignored for execution and the effective
 retry budget is zero. Explicit `max_retries=0` is invalid even in audit mode.
-The selected agent must pass the existing catalog capability/provider checks,
-without acquiring a model client.
+The selected advisor passes capability/provider qualification at decorator
+application, including provider preflight for the default only when selected.
+Qualification acquires no model client; a successful original handler needs none.
 
 By default, indexing selects the actual trigger argument from Azure Functions
 binding metadata and recovery has a 60-second deadline. Set `request_arg`
@@ -277,8 +304,9 @@ no advice log, including in audit mode.
 
 On an uncaught handler exception, the runtime starts **one agent run**, which may
 contain multiple model/tool roundtrips. The isolated turn uses the selected
-model, app harness and agent configuration. Normal mode (`audit_only=False`)
-uses internal recovery system instructions and only runtime `list_files`,
+model, app harness, agent configuration and selected markdown guidance alongside
+mandatory runtime policy. Normal mode (`audit_only=False`)
+uses recovery system instructions and only runtime `list_files`,
 `read_file`, `search_source`, and `retry_function` tools.
 It does not inherit authored tools, MCP servers, skills, sandbox, web access or
 response schemas/examples, and does not mutate the agent catalog. Read-only
@@ -290,7 +318,7 @@ excluded. There is no write or arbitrary-code-execution tool.
 decorator, keeping the SDK binding and handler unchanged:
 
 ```python
-@app.smart_retry(agent_name="queue_advisor", max_retries=3, audit_only=True)
+@app.smart_retry(max_retries=3, audit_only=True)
 ```
 
 The valid positive `max_retries=3` is overridden with an effective zero budget.
@@ -314,7 +342,7 @@ untrusted model text and adds no confidentiality guarantee.
 
 **Normal retry mode:** `max_retries` is a positive integer, defaulting to one,
 excluding the initial failed handler invocation. For example,
-`@app.smart_retry(agent_name="queue_advisor", max_retries=3)` lets the agent make
+`@app.smart_retry(max_retries=3)` lets the agent make
 up to three sequential correction attempts in one recovery run.
 Failed handler executions consume attempts; invalid tool arguments and rejected
 overlapping calls do not. The first successful return blocks further execution,
@@ -385,7 +413,9 @@ Opt-in is a **data-sharing decision, not automatic secret redaction**; generated
 remediation, including audit advice written to logs, is not a confidentiality
 guarantee. See the [whole-function recovery sample](../samples/hosted-skill-remediation/) and
 [FRD 0014](frds/0014-smart-retry-decorator.md) for the standalone API;
-[FRD 0015](frds/0015-smart-retry-audit-only.md) adds audit-only mode. Historical
+[FRD 0015](frds/0015-smart-retry-audit-only.md) adds audit-only mode;
+[FRD 0016](frds/0016-default-smart-retry-advisor.md) adds the bundled default and
+custom advisor guidance. Historical
 [FRD 0012](frds/0012-hosted-skill-recovery.md) and
 [FRD 0013](frds/0013-hosted-skill-queue-recovery.md) describe the engine and input
 contracts; FRD 0014 supersedes their recovery authoring API.
@@ -479,9 +509,9 @@ bounds only the message context sent to the model. Specialist runs remain fresh,
 executions with no nested delegation or persistent history.
 
 On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), the runtime also uses
-the SDK's native compaction defaults. Configured `max_output_tokens` is rejected on that path; the
-underlying Copilot SDK/provider surface has similarly named token-budget fields, but this bounded
-internal preview does not map or expose them as a supported authoring contract.
+the SDK's native compaction defaults. Configured `max_output_tokens` is passed through on that
+path as the Copilot provider's per-request native output-token cap. The runtime does not add a
+second host-owned truncation layer; the selected SDK/provider remains authoritative for enforcement.
 
 Session storage is not an `agent_configuration` or front-matter setting.
 The selected harness uses the existing `AzureWebJobsStorage` connection string
@@ -786,7 +816,16 @@ system_tools:
 
 ##### `system_tools.dynamic_sessions_code_interpreter`
 - **Type:** `object` (global), `boolean` (agent)
-- **Description:** Configures the built-in `execute_python` tool using Azure Container Apps dynamic sessions. All agents inherit code interpreter access by default. Agents can opt out by setting to `false`.
+- **Description:** Configures the built-in `fhs_execute_python` tool using Azure Container Apps dynamic sessions. It is on by default. Agents can opt out with `false`.
+
+The `fhs_` prefix avoids collisions with user-authored functions. Runtime
+injection and its built-in guidance update automatically, so most users do not
+need a migration step. Only explicitly hardcoded references to the runtime
+sandbox in authored instructions, skills, or selectors need
+`fhs_execute_python` (or `custom:fhs_execute_python` in Copilot selectors).
+There is no old-name alias: an authored `execute_python` stays independent, and
+an authored `fhs_execute_python` collides only when the sandbox tool is enabled
+for that execution role.
 
 **Global configuration (in `agents.config.yaml`):**
 ```yaml
@@ -913,11 +952,28 @@ workflows:
 ```
 
 `workflows.enabled` is a strict boolean. When true, it injects
-workflow-management tools (`start_workflow`, `get_workflow_status`,
-`list_workflows`, `cancel_workflow`, `terminate_workflow`) and exposes the
+workflow-management tools (`fhs_start_workflow`, `fhs_get_workflow_status`,
+`fhs_list_workflows`, `fhs_cancel_workflow`, `fhs_terminate_workflow`) and exposes the
 agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
 workflow task targets. No new role or starter fields are required; workflow
 identity comes from the agent's canonical slug.
+
+The `fhs_` prefix avoids collisions with user-authored functions. Runtime
+injection and its built-in guidance update automatically, so most users do not
+need a migration step. Only explicitly hardcoded references to the runtime
+control-plane tools in authored instructions, skills, or selectors need
+`fhs_start_workflow`, `fhs_get_workflow_status`, `fhs_list_workflows`,
+`fhs_cancel_workflow`, and `fhs_terminate_workflow`
+(`custom:fhs_start_workflow` in Copilot selectors). There are no old-name
+aliases.
+
+Authored `start_workflow`, `get_workflow_status`, `list_workflows`,
+`cancel_workflow`, and `terminate_workflow` remain usable as authored names.
+Only exact collisions with enabled management tools are rejected, and
+`tools.exclude` / `workflows.exclude` entries still use literal authored names.
+The five prefixed control-plane names cannot be workflow task targets. Python helper APIs,
+HTTP routes, result envelopes, and historical tool records are unchanged.
+
 Workflow tool handlers can be synchronous (`def`) or asynchronous (`async def`).
 They must accept one dictionary argument and return a JSON-serializable value.
 The Activity awaits async handlers and runs synchronous handlers in a worker
@@ -925,13 +981,21 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools may be runtime `@tool` descriptors or local public
-functions in `tools/*.py`. Discovery selects one tool per module: runtime
-descriptors first, then the first local public function. It does not invoke
-authored functions or expose imported functions, classes, and unrelated
-globals. The convenience `@tool` accepts `name`, `description`, `schema`, and
-`approval_mode`; extra keyword arguments are warned and ignored. Runtime
-schemas and capability authorization still apply.
+Normal custom tools use the runtime's `@tool` or Python callables in
+`tools/*.py`. Discovery selects one tool per module:
+runtime `@tool` descriptors first, then named tool objects with public
+`name`/`description`, then the first local public function. Classes, imported
+functions, unrelated globals, and workflow-only declarations are not exposed as
+fallback tools, and discovery never invokes authored functions. Runtime `@tool`
+accepts only `name`, `description`, `schema`, and `approval_mode`; unexpected
+keyword arguments raise the normal Python `TypeError`. Authored functions and
+callable instances become runtime tool descriptors before either harness adapts
+them. Both use the same tool names, descriptions, and input schemas.
+The decorator accepts `"never_require"` and `"always_require"` approval strings
+and normalizes them to the runtime's `azure_functions_agents.ApprovalMode`
+enum; you may also pass `ApprovalMode.NEVER_REQUIRE` or
+`ApprovalMode.ALWAYS_REQUIRE` directly. Other values raise `ValueError` during
+authoring.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. Use `_`-prefixed helpers for

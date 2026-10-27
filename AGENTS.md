@@ -146,7 +146,7 @@ Grounded in `pyproject.toml` and current code:
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
 - **MAF remains the default production runtime.** The only migration exception is the
-  internal, app-level `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` local preview
+  internal, app-level `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` preview
   ([sample and limits](samples/copilot-preview/README.md)). Keep harness dispatch
   behind that once-per-app boundary; no per-agent selectors, mixed-harness roles,
   or automatic fallback. The legacy `runtime:` frontmatter field stays ignored
