@@ -329,8 +329,8 @@ def test_generation_fence_rejects_stale_and_mismatched_work() -> None:
     [
         (TurnTerminalStatus.COMPLETED, _content_ref("b"), None),
         (TurnTerminalStatus.FAILED, None, "provider_failure"),
-        (TurnTerminalStatus.CANCELLED, None, "cancelled"),
-        (TurnTerminalStatus.TIMED_OUT, None, "deadline_exceeded"),
+        (TurnTerminalStatus.CANCELLED, None, None),
+        (TurnTerminalStatus.TIMED_OUT, None, None),
     ],
 )
 def test_terminal_commit_releases_slot_for_next_admission(
@@ -366,6 +366,43 @@ def test_terminal_commit_releases_slot_for_next_admission(
     assert isinstance(next_admission, AdmissionAccepted)
     assert next_admission.receipt.turn_generation == 2
     assert next_state.active_turn is not None
+
+
+def test_failed_terminal_commit_requires_error_code() -> None:
+    state, accepted = _started_turn()
+
+    with pytest.raises(ValueError, match="failed turns require an error code"):
+        CompleteTurnCommand(
+            request_id=accepted.receipt.request_id,
+            run_id=accepted.receipt.run_id,
+            turn_generation=accepted.receipt.turn_generation,
+            status=TurnTerminalStatus.FAILED,
+            terminal_at=NOW + timedelta(minutes=5),
+        )
+
+    assert state.active_turn is not None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [TurnTerminalStatus.CANCELLED, TurnTerminalStatus.TIMED_OUT],
+)
+def test_cancelled_and_timed_out_terminal_reject_error_code(
+    status: TurnTerminalStatus,
+) -> None:
+    state, accepted = _started_turn()
+
+    with pytest.raises(ValueError, match="cannot contain an error code"):
+        CompleteTurnCommand(
+            request_id=accepted.receipt.request_id,
+            run_id=accepted.receipt.run_id,
+            turn_generation=accepted.receipt.turn_generation,
+            status=status,
+            terminal_at=NOW + timedelta(minutes=5),
+            error_code="unexpected",
+        )
+
+    assert state.active_turn is not None
 
 
 def test_terminal_commit_rejects_turn_without_start_acknowledgement() -> None:

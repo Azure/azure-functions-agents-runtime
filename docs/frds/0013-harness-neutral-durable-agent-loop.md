@@ -831,6 +831,9 @@ Cancellation is acknowledged intent, not rollback.
   if the turn orchestration is lost. Duplicate acknowledgement and human input
   never extend it.
 - The Entity records terminal intent and fences later state commits.
+- Completed turns require a result reference, failed turns require a bounded
+  machine-readable error code, and cancelled or timed-out turns use their
+  terminal status as the reason without a separate error code.
 - The orchestrator stops scheduling new checkpoints or external work.
 - Activities receive the absolute deadline and enforce it locally.
 - The worker owning an active operation observes cancellation through a
@@ -1037,6 +1040,7 @@ The feature contract is satisfied when:
 | 36 | Terminal lifecycle sequencing | Permit terminal commit after admission / require start acknowledgement | Reject terminal commit until the Entity has bound the turn start and absolute deadline | Human | 2026-10-27 |
 | 37 | Deletion idempotency | Conflict on a different deletion key / converge on the first tombstone | Keep the first tombstone authoritative and return its stable receipt for every later authorized deletion request regardless of key | Human | 2026-10-27 |
 | 38 | Entity state queries | Generic full-state read / purpose-specific typed queries | Do not expose the persistence model; add typed query results only when a runtime caller requires them | Human | 2026-10-27 |
+| 39 | Terminal error metadata | Optional error codes for every non-completed status / status-specific metadata | Require a bounded error code for failed turns; use cancelled and timed-out status values as their complete reason | Human | 2026-10-27 |
 
 ## 6. Test plan
 

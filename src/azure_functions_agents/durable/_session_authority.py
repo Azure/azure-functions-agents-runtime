@@ -162,6 +162,13 @@ class TerminalTurn(_AuthorityModel):
                 raise ValueError("completed turns require only a result reference")
         elif self.result_ref is not None:
             raise ValueError("non-completed turns cannot contain a result reference")
+        elif self.status is TurnTerminalStatus.FAILED:
+            if self.error_code is None:
+                raise ValueError("failed turns require an error code")
+        elif self.error_code is not None:
+            raise ValueError(
+                "cancelled and timed-out turns cannot contain an error code"
+            )
         return self
 
 
