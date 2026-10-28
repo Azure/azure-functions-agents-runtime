@@ -1,11 +1,12 @@
 # Evaluate agent behavior with Vally
 
-> **Preview.** The executor is pinned to Vally 0.16.0. Vally is pre-1.0, so review and rerun the
-> compatibility gates before upgrading it.
+> **Preview.** The executor requires Vally 0.16.0 or later. Dependency requirements permit newer
+> versions; the lockfile retains exact versions for reproducible builds. Vally is pre-1.0, so review
+> and rerun the compatibility gates before upgrading. Future breaking releases are not guaranteed compatible.
 
 [Vally](https://microsoft.github.io/vally/) evaluates an agent through its existing synchronous
 chat endpoint. Vally owns stimuli, graders, repeated trials, scores, reports, and CI verdicts. This
-repository supplies a custom `azure-functions-agent` executor that calls a local or staging Function
+repository supplies a custom `azure-functions-hosted-skill` executor that calls a local or staging Function
 App and converts its generic response and tool evidence into a Vally trajectory.
 
 Evaluation covers **authored agent behavior**. It does not test Functions availability, scaling,
@@ -29,7 +30,7 @@ HTTP is accepted only for loopback development targets such as `localhost`, `127
 `[::1]`. Staging targets must use HTTPS. The executor rejects redirects so Functions keys and Entra
 tokens are never forwarded to another location.
 
-Install and build the pinned executor from the repository root:
+Install and build the executor using locked dependencies from the repository root:
 
 ```powershell
 Push-Location integrations/vally-executor-azure-functions
@@ -47,7 +48,7 @@ name: receipt-agent-evaluation
 
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrlEnv: AGENT_EVAL_TARGET_URL
       auth:
@@ -77,7 +78,7 @@ runtime session. Independent trials receive independent generated sessions.
 
 ## Run locally
 
-Start the Function App, set its complete chat URL, and invoke the pinned CLI:
+Start the Function App, set its complete chat URL, and invoke the locally installed CLI:
 
 ```powershell
 $env:AGENT_EVAL_TARGET_URL = "http://localhost:7071/agents/receipt/chat"

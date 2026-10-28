@@ -112,7 +112,7 @@ trajectory.
 ```mermaid
 sequenceDiagram
   participant C as Vally CLI / CI
-  participant E as azure-functions-agent Executor
+  participant E as azure-functions-hosted-skill Executor
   participant H as Function App<br/>Core Tools / staging
   participant G as Vally graders
   C->>E: Stimulus + ExecutorOptions
@@ -152,9 +152,10 @@ A 2026-09-18 package and documentation spike established:
   failing-verdict exit code, and can emit JUnit.
 - Vally does not currently load executor plug-ins during standalone `vally lint`; executor-name and
   executor-config validation must therefore be tested through planning in `vally eval`.
-- Vally is pre-1.0. The package, lockfile, compiler tests, and CLI smoke tests will pin exact `0.16.0`
-  compatibility. Any upgrade requires re-running the compatibility suite and reviewing trajectory
-  semantics.
+- Vally is pre-1.0. The package requires Vally and its CLI at `>=0.16.0`; all runtime and development
+  dependencies use minimum-version requirements. The lockfile retains exact resolved versions for
+  reproducible compiler and CLI smoke tests. Any upgrade requires re-running the compatibility suite
+  and reviewing trajectory semantics; future breaking releases are not guaranteed compatible.
 
 ### 4.2 Generic runtime evidence contract
 
@@ -224,8 +225,8 @@ TypeScript, and exports:
 - its validated public configuration types;
 - `registerExecutors()`.
 
-The registered executor name is `azure-functions-agent`. Its Vally dependency and development CLI
-are pinned to `0.16.0`; its package metadata requires Node.js `>=22.12.0`. Publication naming and
+The registered executor name is `azure-functions-hosted-skill`. Its Vally dependency and development CLI
+require `>=0.16.0`; its package metadata requires Node.js `>=22.12.0`. Publication naming and
 semantic-version policy are deferred until the integration proves stable.
 
 A Vally eval selects it with opaque executor config:
@@ -233,7 +234,7 @@ A Vally eval selects it with opaque executor config:
 ```yaml
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrlEnv: AGENT_EVAL_TARGET_URL
       auth:
@@ -394,6 +395,7 @@ document the Vally pivot.
 | 23 | Session contract checking | Trust body / compare body only / compare body and response header | Executor compares requested ID with body and response header | Agent review | 2026-09-18 |
 | 24 | Vally-first FRD approval | Request changes / approve finalized design | Approve and continue to implementation | Human | 2026-09-18 |
 | 25 | Endpoint transport security | Any HTTP(S) / HTTPS only / HTTPS with loopback HTTP | Require HTTPS except for loopback HTTP and reject redirects | Agent review | 2026-09-30 |
+| 26 | Dependency version requirements (supersedes #19) | Exact pins / bounded ranges / minimum versions | Current runtime and dev versions are minimums (`>=`); retain exact lockfile resolutions for reproducible checks | Human | 2026-10-27 |
 
 ## 7. Test plan
 

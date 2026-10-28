@@ -1,6 +1,6 @@
 # Vally executor for Azure Functions Agents Runtime
 
-Vally 0.16.0 executor for an Azure Functions Agents Runtime synchronous chat
+Vally 0.16.0 or later executor for an Azure Functions Agents Runtime synchronous chat
 endpoint. It converts generic runtime response and tool evidence into a Vally trajectory; it does not
 start, deploy, or reconfigure the Function App.
 
@@ -22,16 +22,19 @@ npm run test:cli
 ```
 
 `test:cli` runs positive and negative `--require-pass` evaluations against a temporary local HTTP
-server. Vally and its CLI are pinned to 0.16.0; review compatibility before changing either version.
+server. Runtime and development dependencies use minimum-version (`>=`) requirements. Vally and its
+CLI require 0.16.0 or later. The lockfile retains exact versions for reproducible repository builds;
+review compatibility and rerun these checks when upgrading. Newer breaking releases are not
+guaranteed compatible.
 
 ## Configure
 
-The registered executor name is `azure-functions-agent`:
+The registered executor name is `azure-functions-hosted-skill`:
 
 ```yaml
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrlEnv: AGENT_EVAL_TARGET_URL
       auth:
