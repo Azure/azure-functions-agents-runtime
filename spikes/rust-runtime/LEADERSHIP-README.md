@@ -41,7 +41,7 @@ sequenceDiagram
     Note over CSharp,Rust: Once per worker process startup
     CSharp->>Rust: Spawn fhs-runtime
     CSharp->>Rust: initialize(agent files, skills, tool descriptors)
-    Rust->>Rust: Discover agent and skills; resolve model and mode
+    Rust->>Rust: Discover agent and skills and resolve model and mode
     Rust-->>CSharp: initialize result (agents, tools, mode)
 
     Note over Host,Store: Repeated for each POST /api/support
