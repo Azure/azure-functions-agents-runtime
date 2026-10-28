@@ -193,6 +193,8 @@ class SessionAuthorityState(_AuthorityModel):
     @model_validator(mode="after")
     def validate_authority(self) -> SessionAuthorityState:
         """Keep persisted identities, receipts and the active fence consistent."""
+        # Re-derive the session identity so persisted state cannot be moved to
+        # another owner, agent, entry point or session.
         expected_incarnation = derive_session_incarnation_id(
             backend_name=self.backend_name,
             task_hub_name=self.task_hub_name,
@@ -214,6 +216,8 @@ class SessionAuthorityState(_AuthorityModel):
         seen_generations: set[int] = set()
         expected_generation = 1
         receipts_by_request: dict[str, AdmissionReceipt] = {}
+        # Every accepted request advances the turn number exactly once. Gaps,
+        # duplicates or altered identities would make retries ambiguous.
         for receipt in self.admission_receipts:
             expected_request_id = derive_request_id(
                 self.session_incarnation_id,
@@ -240,6 +244,8 @@ class SessionAuthorityState(_AuthorityModel):
             seen_generations.add(receipt.turn_generation)
             receipts_by_request[receipt.request_id] = receipt
 
+        # The next turn number and active turn must agree with the accepted
+        # request history; an older retry cannot become active again.
         if self.next_turn_generation != expected_generation:
             raise ValueError("next turn generation must follow accepted generations")
         if self.active_turn is not None:
@@ -252,6 +258,9 @@ class SessionAuthorityState(_AuthorityModel):
                 raise ValueError("active turn must match an admission receipt")
             if active_receipt is not self.admission_receipts[-1]:
                 raise ValueError("active turn must be the latest accepted generation")
+
+        # Terminal state represents the latest turn that released the session
+        # slot. Earlier or invented outcomes cannot replace it.
         if self.last_terminal_turn is not None:
             terminal_receipt = receipts_by_request.get(
                 self.last_terminal_turn.request_id
@@ -284,6 +293,9 @@ class SessionAuthorityState(_AuthorityModel):
             raise ValueError("an idle admitted session requires a terminal turn")
         elif self.active_turn is not None and self.active_turn.turn_generation > 1:
             raise ValueError("later active generations require the prior terminal turn")
+
+        # Deletion permanently closes this session incarnation. Its tombstone
+        # must match the session and fence whichever turn was active.
         if self.tombstone is not None:
             expected_deletion_id = derive_deletion_id(
                 self.session_incarnation_id,
