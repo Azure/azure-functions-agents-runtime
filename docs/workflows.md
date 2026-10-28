@@ -764,7 +764,7 @@ Stored wait-mode selection does not isolate those SDK changes. Check other
 orchestrators in the app before upgrading their SDK; do not infer general replay
 compatibility from this workflow input field.
 
-Use the [release evidence review sample](../samples/workflow-fanout-review/README.md)
+Use the [release evidence review sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-fanout-review/README.md)
 for deterministic parallel, collection, failure, cancellation, and continuation
 scenarios.
 
