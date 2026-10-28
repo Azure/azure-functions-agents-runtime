@@ -41,7 +41,7 @@ sequenceDiagram
     Note over CSharp,Rust: Once per worker process startup
     CSharp->>Rust: Spawn fhs-runtime
     CSharp->>Rust: initialize(agent files, skills, tool descriptors)
-    Rust->>Rust: Discover agent + skills; resolve model and mode
+    Rust->>Rust: Discover agent and skills; resolve model and mode
     Rust-->>CSharp: initialize result (agents, tools, mode)
 
     Note over Host,Store: Repeated for each POST /api/support
@@ -102,6 +102,10 @@ protocol. Each worker keeps its own language-native functions and tools, while
 the shared runtime owns common agent execution, skill discovery, and session
 handling.
 
+The GitHub Copilot SDK also has a Rust implementation, which could be evaluated
+as another way to connect the runtime to Copilot. This spike uses its current
+provider path; it does not integrate the Copilot SDK.
+
 ```text
 Node.js worker ─┐
 Python worker ──┼── same JSON-RPC-over-stdio contract ──> Rust agent runtime
@@ -118,6 +122,10 @@ over the same pipes.
 claim that every language integration exists today.** This spike currently
 demonstrates the Rust runtime with a .NET isolated worker. Node.js, Python, and
 other language workers have not been implemented or validated here.
+
+> **Nit:** Go is another option worth evaluating. Before choosing it, compare
+> runtime size and performance, SDK and ecosystem support, cross-platform
+> distribution, implementation effort, and operational fit in more detail.
 
 ## What it takes to productionize this approach
 
