@@ -16,10 +16,10 @@ public sealed class OrderTools
         totalUsd = 149.99
     };
 
-    public object CalculateShipping(JsonElement input, string? sessionId, string invocationPath) => new
+    public object CalculateShipping(ShippingRequest input, string? sessionId, string invocationPath) => new
     {
-        orderId = input.GetProperty("orderId").GetString(),
-        zip = input.GetProperty("zip").GetString(),
+        orderId = input.OrderId,
+        zip = input.Zip,
         sessionId,
         invocationPath,
         carrier = "PriorityExpress",
@@ -29,7 +29,13 @@ public sealed class OrderTools
 
 public sealed record SupportRequest(string Prompt, string? SessionId);
 
-public sealed class OrderFunctions(HostedSkill skill, OrderTools tools, RuntimeService runtime)
+public sealed record ShippingRequest
+{
+    public required string OrderId { get; init; }
+    public required string Zip { get; init; }
+}
+
+public sealed class OrderFunctions(HostedSkill skill, RuntimeService runtime)
 {
     [Function("HostedSkillSupport")]
     public async Task<HttpResponseData> SupportAsync(
@@ -52,17 +58,46 @@ public sealed class OrderFunctions(HostedSkill skill, OrderTools tools, RuntimeS
         return response;
     }
 
+}
+
+public sealed class ShippingFunctions(OrderTools tools)
+{
     [Function("ShippingQuote")]
+    [AgentTool("calculate_shipping_http", "Calculate shipping for an order and destination ZIP.",
+        InputType = typeof(ShippingRequest))]
     public async Task<HttpResponseData> ShippingQuoteAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "shipping/quote")] HttpRequestData request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
-        using var body = await JsonDocument.ParseAsync(request.Body, cancellationToken: cancellationToken);
+        ShippingRequest? input;
+        try
+        {
+            input = await JsonSerializer.DeserializeAsync<ShippingRequest>(
+                request.Body, JsonSerializerOptions.Web, cancellationToken);
+        }
+        catch (JsonException)
+        {
+            return await BadRequestAsync(request, cancellationToken);
+        }
+        if (input is null || string.IsNullOrWhiteSpace(input.OrderId) || string.IsNullOrWhiteSpace(input.Zip))
+            return await BadRequestAsync(request, cancellationToken);
+
         var sessionId = request.Headers.TryGetValues("x-fhs-session-id", out var values)
             ? values.FirstOrDefault() : null;
-        var result = tools.CalculateShipping(body.RootElement, sessionId, "http-trigger");
+        var directToolCall = request.FunctionContext.Items.TryGetValue(nameof(AgentToolAttribute), out var marker)
+            && marker is true;
+        var result = tools.CalculateShipping(
+            input, sessionId, directToolCall ? "stdio-function-handler" : "http-trigger");
         var response = request.CreateResponse(HttpStatusCode.OK);
         await response.WriteAsJsonAsync(result, cancellationToken);
+        return response;
+    }
+
+    private static async Task<HttpResponseData> BadRequestAsync(
+        HttpRequestData request, CancellationToken cancellationToken)
+    {
+        var response = request.CreateResponse(HttpStatusCode.BadRequest);
+        await response.WriteAsJsonAsync(new { error = "orderId and zip must be nonempty strings" }, cancellationToken);
         return response;
     }
 }

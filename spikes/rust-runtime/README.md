@@ -6,38 +6,119 @@ one managed Rust `fhs-runtime` subprocess over bidirectional JSON-lines stdio.
 **Inference is deterministic MOCK, not a live model or Copilot session.**
 This does not change the production Python runtime or add a production binding.
 
+For the visual overview and demonstrated outcomes, see the
+[leadership README](LEADERSHIP-README.md).
+
 ## What is real, and what is not
 
 | Surface | Behavior |
 | --- | --- |
 | `HostedSkillSupport` | Real `[Function]` + `[HttpTrigger]`, `POST /api/support`, genuine `HttpRequestData` / `HttpResponseData` |
-| `ShippingQuote` | Real `[Function]` + `[HttpTrigger]`, `POST /api/shipping/quote` |
+| `ShippingQuote` | One handler with `[Function]`, `[AgentTool]` and `[HttpTrigger]`; real `POST /api/shipping/quote` plus direct tool invocation |
 | `HostedSkill` | Ordinary singleton worker DI service; **not** a Functions input binding. There is no `HostedSkillInput` attribute |
 | `lookup_order` | Rust reverse `tool.call` executes a plain C# `[AgentTool]` method in the worker |
-| `calculate_shipping_http` | Rust reverse `tool.call` executes an explicit adapter to the **same `OrderTools.CalculateShipping` application logic** used by `ShippingQuote`; no HTTP loopback |
-| Trigger metadata | Describes the adapter's related function, method and route. It is not an instruction to the Functions binding system |
+| `calculate_shipping_http` | Rust reverse `tool.call` executes **the same `ShippingQuoteAsync` handler** using runtime-owned synthetic HTTP objects; no app-authored adapter or HTTP loopback |
+| Trigger metadata | Describes the attributed function, method and route. It is not an instruction to the Functions binding system |
 | Session persistence | Rust SessionFs writes actual local files or actual Azurite Blobs; mock conversation turns, not a live SDK transcript |
 | Provider | Configuration is resolved, but no model/token endpoint is contacted by the smoke test |
 
-The shipping tool **does not invoke the Functions trigger method or invocation
-pipeline**: no synthetic `FunctionContext`, middleware, authorization, HTTP
-headers, binding converters, or output bindings run on this callback path.
-The direct HTTP smoke request tests that framework path separately. The outputs
-identify the path as `stdio-shared-handler` versus `http-trigger`. `[AgentTool]`
-is a spike-only registration marker, not an Azure binding attribute.
+The shipping tool **directly invokes the handler in the same .NET worker**, in a
+fresh DI scope, but **does not enter the Functions invocation pipeline**. Its
+synthetic request/context supplies a JSON body and configured response serializer,
+not real caller identity, ingress headers, middleware, host authorization, binding
+converters, retries, or output-binding orchestration. The direct HTTP smoke request
+tests the framework path separately. The outputs identify the path as
+`stdio-function-handler` versus `http-trigger`. `[AgentTool]` is a spike-only
+registration marker, not an Azure binding attribute.
 
 ```text
 curl /api/support
   -> actual Functions host HTTP binding -> .NET isolated OrderFunctions
   -> DI HostedSkill -> JSON-RPC agent.run -> Rust mock agent loop
        -> reverse tool.call -> C# LookupOrder
-       -> reverse tool.call -> C# shared CalculateShipping logic
+       -> reverse tool.call -> synthetic HTTP request -> ShippingQuoteAsync
        -> SessionFs persistence -> agent.run result
   -> actual HttpResponseData
 
 curl /api/shipping/quote
   -> actual Functions host HTTP binding -> ShippingQuote -> same shipping logic
 ```
+
+## One function, two entry paths
+
+The sample's shipping function carries both method attributes. Attribute order
+does not matter; the Functions SDK still owns normal trigger indexing.
+
+```csharp
+public sealed record ShippingRequest
+{
+    public required string OrderId { get; init; }
+    public required string Zip { get; init; }
+}
+
+public sealed class ShippingFunctions(OrderTools tools)
+{
+    [Function("ShippingQuote")]
+    [AgentTool("calculate_shipping_http", "Calculate shipping for an order and destination ZIP.",
+        InputType = typeof(ShippingRequest))]
+    public async Task<HttpResponseData> ShippingQuoteAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "shipping/quote")]
+        HttpRequestData request,
+        CancellationToken cancellationToken = default)
+    {
+        var input = await JsonSerializer.DeserializeAsync<ShippingRequest>(
+            request.Body, JsonSerializerOptions.Web, cancellationToken);
+        if (input is null)
+            throw new JsonException("Shipping input is required.");
+        var response = request.CreateResponse(HttpStatusCode.OK);
+        await response.WriteAsJsonAsync(
+            tools.CalculateShipping(input, null, "example"), cancellationToken);
+        return response;
+    }
+}
+```
+
+In `Program.cs`, `registry.RegisterFunctions<ShippingFunctions>(provider)` inspects
+the type without constructing it. Each tool call creates an async DI scope and
+resolves the function instance only then; startup does not resolve `HostedSkill`
+while its Rust process is still being initialized. Existing plain methods such
+as `OrderTools.LookupOrder` still use `RegisterFromObject(tools)`.
+
+The tool schema is generated from `ShippingRequest`, **not** from
+`HttpRequestData` or `CancellationToken`. Required DTO fields must be present
+and non-null; wrong JSON types and unknown fields are rejected before invocation.
+The bounded input contract supports scalar string, boolean and numeric properties
+and nullable scalar properties, with web JSON naming. Unsupported DTO forms,
+missing input types, unsupported trigger/signature shapes, and duplicate tool
+names fail registration rather than silently registering an unusable tool.
+
+For the HTTP adapter, use exactly one `[HttpTrigger] HttpRequestData` parameter,
+return `HttpResponseData` or `Task<HttpResponseData>`, and give any other supported
+optional parameters defaults. Additional binding parameters are not supported.
+There is **no** Queue, Service Bus, timer, or generic trigger adaptation.
+
+The synthetic request is `POST http://localhost/api/tool` with an
+`application/json` body, empty query, and no inbound headers or identities.
+The sample recognizes the direct-call context marker only for diagnostic
+`invocationPath` output. This marker is **not** authorization. Handlers that
+depend on middleware, authenticated callers, or other host facilities are not
+suitable for direct invocation without a separately designed application policy.
+
+Tool results preserve the Python spike's HTTP envelope:
+
+```json
+{
+  "status_code": 200,
+  "body": "{\"carrier\":\"PriorityExpress\",\"rateUsd\":14.25}"
+}
+```
+
+The body stays UTF-8 text even when it contains JSON; headers are discarded.
+The generated tool description tells the agent to inspect `status_code` and
+interpret `body`. A handler returning 400 is still a completed tool call carrying
+an HTTP error response, not a thrown tool exception. This is information for the
+model, not deterministic enforcement of business success. Thrown exceptions use
+the tool-error channel. Request/response streams and the DI scope are disposed.
 
 ## Prerequisites
 
@@ -102,9 +183,11 @@ actually live), and asserts:
    and `invocationPath=http-trigger`.
 2. Missing support prompt returns HTTP 400.
 3. First support HTTP turn calls **both C# tools over Rust stdio**, returns
-   `Ada Lovelace`, `PAID`, `149.99`, and shipping output with
-   `invocationPath=stdio-shared-handler`. Loaded skill and substituted tenant
-   instructions appear in the mock response.
+   `Ada Lovelace`, `PAID`, `149.99`, and shipping's actual status/body envelope
+   with `invocationPath=stdio-function-handler` and no synthetic caller session
+   header. The dual-attributed handler remains present in SDK trigger metadata.
+   An empty ZIP returns 400 from the same handler on both HTTP and tool paths.
+   Loaded skill and substituted tenant instructions appear in the mock response.
 4. Second HTTP turn with the same session ID reports `resumed=true`, `turn=2`,
    and persisted transcript records 1 and 2.
 5. After stopping and restarting the **entire host, worker and Rust process**,
@@ -124,15 +207,19 @@ cargo test
 dotnet run --project dotnet/HostedSkills.Spike.Checks
 ```
 
-The dependency-free C# checks use a deliberately faulty Python stdio peer
+The C# executable checks use a deliberately faulty Python stdio peer
 (**not** Rust or an LLM) to check initialize/run EOF, stderr backpressure,
 stream listener scoping/cleanup, cancellation, abandoned streams, bounded
-idempotent shutdown, and required plain-tool arguments. The executable fixture
+idempotent shutdown, and required plain-tool arguments. Additional adapter checks
+exercise dual attributes, DTO validation, HTTP status/body conversion, scoped DI,
+serialization, cleanup, and unsupported signatures without a live host or model.
+The checks use the same pinned worker/HTTP libraries as the sample. The executable fixture
 needs its checked-in executable bit on Linux.
 
-Verified locally with Core Tools 4.16.0, .NET SDK 10.0.402 and Azurite 3.37.0:
-both real-host storage modes pass, including full-process restart persistence;
-all 11 Rust tests and all 8 C# lifecycle/tool checks pass.
+Verified with Core Tools 4.16.0 and .NET SDK 10.0.402: all 21 C# checks and
+11 Rust tests pass. Both local and Azurite real-host smoke modes pass, including
+dual-attribute metadata, the handler's success/error responses on both entry
+paths, and whole-host restart persistence. These checks use mock inference only.
 
 ## Manual host and HTTP requests
 
@@ -166,6 +253,21 @@ curl --fail-with-body -sS --max-time 55 http://localhost:7071/api/shipping/quote
   -d '{"orderId":"ORD-900","zip":"98052"}'
 ```
 
+The first request exercises the attributed shipping handler as an agent tool;
+the last exercises the **same method** through the real HTTP trigger. To inspect
+the error-status envelope, use a separate session and an empty ZIP:
+
+```bash
+curl --fail-with-body -sS --max-time 55 http://localhost:7071/api/support \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"calculate_shipping_http {\"orderId\":\"ORD-900\",\"zip\":\"\"}","sessionId":"manual-shipping-error"}'
+```
+
+The outer support HTTP response is 200 because the agent turn completed; its mock
+tool output contains `status_code=400` and the handler's error body. The mock
+prints tool results deterministically; it does not demonstrate a live model's
+ability to interpret or react to HTTP statuses.
+
 These anonymous endpoints expose mock customer/session data and are **local
 test endpoints only**. Do not publish this sample unchanged to the internet.
 
@@ -184,7 +286,8 @@ test endpoints only**. Do not publish this sample unchanged to the internet.
   Foundry/Azure OpenAI/OpenAI authentication and inference are **not tested**
   by this integration. `mock-model` is only a diagnostic label.
 - `dotnet/HostedSkills.Spike`: genuine Functions SDK metadata and HTTP bindings;
-  sample-only DI facade and explicit shared-handler adapter.
+  sample-only DI facade, dual-attribute function discovery, and runtime-owned
+  direct HTTP adapter. See [FRD 0012](../../docs/frds/0012-dotnet-function-tools-spike.md).
 - `RuntimeService`: owns a singleton Rust subprocess per worker; initializes
   before the worker hosted service starts, and shuts it down through
   `IHostedService` / async DI disposal.

@@ -12,6 +12,15 @@ translates generic response/tool evidence into a Vally trajectory. Vally owns st
 repeated trials, scores, reports and CI verdicts; the executor does not add a second discovery,
 composition, registration or execution path (FRD 0010).
 
+The separate [Rust/.NET spike](../spikes/rust-runtime/README.md) is not part of this
+production pipeline. Its C# HTTP handler can carry both `[Function]` and
+`[AgentTool]`: reverse stdio tool calls adapt an explicit input DTO into synthetic
+HTTP objects and invoke the handler in-process in a fresh DI scope (FRD 0012).
+That path bypasses Functions middleware, ingress authorization, and binding
+orchestration; ordinary HTTP calls still use the real host. This HTTP-only
+experiment uses mock inference and does not establish a production binding or
+general trigger support.
+
 ## 2. High-level data flow
 
 ```mermaid

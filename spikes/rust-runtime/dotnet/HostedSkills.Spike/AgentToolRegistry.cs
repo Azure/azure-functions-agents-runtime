@@ -2,6 +2,8 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace HostedSkills.Spike;
 
@@ -13,6 +15,7 @@ public sealed class AgentToolAttribute(string name, string description) : Attrib
 {
     public string Name { get; } = name;
     public string Description { get; } = description;
+    public Type? InputType { get; set; }
 }
 
 public sealed record TriggerToolMetadata(
@@ -39,7 +42,7 @@ public sealed record ToolCallResult(
     [property: JsonPropertyName("is_error")] bool IsError = false);
 
 /// <summary>
-/// Registry of plain C# tools and explicit shared-handler adapters invoked over stdio.
+/// Registry of plain C# tools and direct HTTP function adapters invoked over stdio.
 /// </summary>
 public sealed class AgentToolRegistry
 {
@@ -56,7 +59,7 @@ public sealed class AgentToolRegistry
         WorkerToolDescriptor descriptor,
         Func<ToolCallParams, Task<string>> handler)
     {
-        _tools[descriptor.Name] = (descriptor, async call =>
+        if (!_tools.TryAdd(descriptor.Name, (descriptor, async call =>
         {
             try
             {
@@ -65,16 +68,19 @@ public sealed class AgentToolRegistry
             }
             catch (Exception ex)
             {
-                var errJson = JsonSerializer.Serialize(new { error = ex.Message });
+                var error = ex is TargetInvocationException { InnerException: not null } invocation
+                    ? invocation.InnerException!.Message
+                    : ex.Message;
+                var errJson = JsonSerializer.Serialize(new { error });
                 return new ToolCallResult(errJson, IsError: true);
             }
         }
-        );
+        )))
+            throw new ArgumentException($"Duplicate tool name '{descriptor.Name}'.");
     }
 
     /// <summary>
-    /// Discover plain `[AgentTool]` methods. HTTP functions use explicit adapters to
-    /// shared application logic, never reflection over framework trigger parameters.
+    /// Discover plain `[AgentTool]` methods on an existing instance.
     /// </summary>
     public void RegisterFromObject(object target)
     {
@@ -87,54 +93,134 @@ public sealed class AgentToolRegistry
                 continue;
             }
 
-            var parameters = method.GetParameters();
-            var props = new JsonObject();
-            var required = new JsonArray();
-            foreach (var p in parameters)
-            {
-                var pName = p.Name ?? "arg";
-                props[pName] = new JsonObject { ["type"] = MapJsonSchemaType(p.ParameterType) };
-                if (!p.HasDefaultValue) required.Add(pName);
-            }
-            var schema = new JsonObject
-            {
-                ["type"] = "object",
-                ["properties"] = props,
-                ["required"] = required
-            };
-            var descriptor = new WorkerToolDescriptor(
-                Name: toolAttr.Name,
-                Description: toolAttr.Description,
-                Parameters: schema,
-                TriggerMetadata: new TriggerToolMetadata(
-                    BindingType: "plain",
-                    FunctionName: method.Name));
-
-            RegisterTool(descriptor, async call =>
-            {
-                var args = new object?[parameters.Length];
-                for (var i = 0; i < parameters.Length; i++)
-                {
-                    var p = parameters[i];
-                    if (call.Arguments.ValueKind == JsonValueKind.Object &&
-                        call.Arguments.TryGetProperty(p.Name!, out var propVal))
-                    {
-                        args[i] = JsonSerializer.Deserialize(propVal.GetRawText(), p.ParameterType);
-                    }
-                    else if (p.HasDefaultValue)
-                    {
-                        args[i] = p.DefaultValue;
-                    }
-                    else
-                    {
-                        throw new ArgumentException($"Missing required tool argument '{p.Name}'.");
-                    }
-                }
-                var invokeTarget = method.IsStatic ? null : target;
-                var rawResult = method.Invoke(invokeTarget, args);
-                return await UnwrapResultAsync(rawResult).ConfigureAwait(false);
-            });
+            if (method.GetCustomAttribute<FunctionAttribute>() is not null)
+                throw new ArgumentException(
+                    $"Function tool '{method.Name}' must use RegisterFunctions<T>(provider) for per-call DI scopes.");
+            var (descriptor, handler) = BuildPlainTool(method, toolAttr);
+            RegisterTool(descriptor, call => handler(call, () => target));
         }
+    }
+
+    /// <summary>
+    /// Inspect tools without constructing their function class. Each invocation gets its
+    /// own asynchronous DI scope, and only then resolves the target instance.
+    /// </summary>
+    public void RegisterFunctions<T>(IServiceProvider provider) where T : class
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        foreach (var method in typeof(T).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
+        {
+            var tool = method.GetCustomAttribute<AgentToolAttribute>();
+            if (tool is null)
+                continue;
+            var function = method.GetCustomAttribute<FunctionAttribute>();
+            if (function is null)
+            {
+                var (plainDescriptor, handler) = BuildPlainTool(method, tool);
+                RegisterTool(plainDescriptor, call => InvokeInScopeAsync<T>(provider,
+                    (_, resolve) => handler(call, resolve)));
+                continue;
+            }
+            var adapter = new FunctionHttpToolAdapter(method, tool.InputType);
+            var trigger = method.GetParameters()
+                .Select(p => p.GetCustomAttribute<HttpTriggerAttribute>())
+                .Single(t => t is not null)!;
+            var descriptor = new WorkerToolDescriptor(
+                tool.Name,
+                $"{tool.Description} Returns {{status_code, body:text}}; check status_code for HTTP success or failure before interpreting body. The body is UTF-8 response text, including when it contains JSON.",
+                adapter.Schema,
+                new TriggerToolMetadata("httpTrigger", function.Name, "POST", trigger.Route));
+            RegisterTool(descriptor, call => InvokeInScopeAsync<T>(provider,
+                (services, resolve) => adapter.InvokeAsync(call, services, resolve)));
+        }
+    }
+
+    private static async Task<string> InvokeInScopeAsync<T>(
+        IServiceProvider provider,
+        Func<IServiceProvider, Func<object?>, Task<string>> handler) where T : class
+    {
+        await using var scope = provider.CreateAsyncScope();
+        T? target = null;
+        var ownsTarget = false;
+        object Resolve()
+        {
+            if (target is not null)
+                return target;
+            target = scope.ServiceProvider.GetService<T>();
+            if (target is null)
+            {
+                target = ActivatorUtilities.CreateInstance<T>(scope.ServiceProvider);
+                ownsTarget = true;
+            }
+            return target;
+        }
+        try
+        {
+            return await handler(scope.ServiceProvider, Resolve).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (ownsTarget && target is IAsyncDisposable asyncDisposable)
+                await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+            else if (ownsTarget && target is IDisposable disposable)
+                disposable.Dispose();
+        }
+    }
+
+    private static (WorkerToolDescriptor Descriptor, Func<ToolCallParams, Func<object?>, Task<string>> Handler) BuildPlainTool(
+        MethodInfo method,
+        AgentToolAttribute toolAttr)
+    {
+        if (toolAttr.InputType is not null)
+            throw new ArgumentException($"Plain tool '{method.Name}' cannot specify InputType; it is only supported on dual-attribute HTTP function tools.");
+        var parameters = method.GetParameters();
+        var props = new JsonObject();
+        var required = new JsonArray();
+        foreach (var p in parameters)
+        {
+            var pName = p.Name ?? "arg";
+            props[pName] = new JsonObject { ["type"] = MapJsonSchemaType(p.ParameterType) };
+            if (!p.HasDefaultValue) required.Add(pName);
+        }
+        var schema = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = props,
+            ["required"] = required
+        };
+        var descriptor = new WorkerToolDescriptor(
+            Name: toolAttr.Name,
+            Description: toolAttr.Description,
+            Parameters: schema,
+            TriggerMetadata: new TriggerToolMetadata(
+                BindingType: "plain",
+                FunctionName: method.Name));
+
+        async Task<string> Invoke(ToolCallParams call, Func<object?> resolve)
+        {
+            var args = new object?[parameters.Length];
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                var p = parameters[i];
+                if (call.Arguments.ValueKind == JsonValueKind.Object &&
+                    call.Arguments.TryGetProperty(p.Name!, out var propVal))
+                {
+                    args[i] = JsonSerializer.Deserialize(propVal.GetRawText(), p.ParameterType);
+                }
+                else if (p.HasDefaultValue)
+                {
+                    args[i] = p.DefaultValue;
+                }
+                else
+                {
+                    throw new ArgumentException($"Missing required tool argument '{p.Name}'.");
+                }
+            }
+            var invokeTarget = method.IsStatic ? null : resolve();
+            var rawResult = method.Invoke(invokeTarget, args);
+            return await UnwrapResultAsync(rawResult).ConfigureAwait(false);
+        }
+        return (descriptor, Invoke);
     }
 
     public async Task<ToolCallResult> ExecuteAsync(ToolCallParams call)

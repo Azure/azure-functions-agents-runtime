@@ -6,22 +6,23 @@ using HostedSkills.Spike;
 // the real Core Tools HTTP / Rust / Azurite smoke.
 var fixture = Path.Combine(AppContext.BaseDirectory, "rpc_fixture.py");
 var stderr = Console.Error;
+var passed = 0;
 Console.SetError(TextWriter.Null);
 try
 {
     await ExpectAsync<EndOfStreamException>(async () => { await StartAsync("initialize_eof"); });
-    Console.WriteLine("PASS: initialize EOF fails instead of hanging");
+    Pass("initialize EOF fails instead of hanging");
 
     await using (var client = await StartAsync("stderr_flood"))
         AssertEmpty(client);
-    Console.WriteLine("PASS: >pipe-capacity stderr is drained before initialize reply");
+    Pass(">pipe-capacity stderr is drained before initialize reply");
 
     await using (var client = await StartAsync("run_eof"))
     {
         await ExpectAsync<EndOfStreamException>(() => client.GetHostedSkill("agent").RunAsync("hello", "eof"));
         AssertEmpty(client);
     }
-    Console.WriteLine("PASS: pending run fails promptly on child EOF");
+    Pass("pending run fails promptly on child EOF");
 
     await using (var client = await StartAsync("normal"))
     {
@@ -35,7 +36,7 @@ try
             AssertEmpty(client);
         }
     }
-    Console.WriteLine("PASS: stream listeners are session-scoped and removed on completion");
+    Pass("stream listeners are session-scoped and removed on completion");
 
     await using (var client = await StartAsync("stall"))
     {
@@ -45,7 +46,7 @@ try
         AssertEmpty(client);
         await ExpectAsync<IOException>(() => client.GetHostedSkill("agent").RunAsync("unsafe overlap", "cancel"));
     }
-    Console.WriteLine("PASS: canceled run cleans requests and fails closed before another turn");
+    Pass("canceled run cleans requests and fails closed before another turn");
 
     await using (var client = await StartAsync("stall"))
     {
@@ -54,7 +55,7 @@ try
         AssertEmpty(client);
         await ExpectAsync<IOException>(() => client.GetHostedSkill("agent").RunAsync("unsafe overlap", "abandon"));
     }
-    Console.WriteLine("PASS: abandoned stream cancels its request and removes its listener");
+    Pass("abandoned stream cancels its request and removes its listener");
 
     var shutdownClient = await StartAsync("shutdown_stall");
     var process = (Process)Field(shutdownClient, "_process");
@@ -67,7 +68,7 @@ try
     try { using var child = Process.GetProcessById(pid); stillRunning = !child.HasExited; }
     catch (ArgumentException) { }
     Assert(!stillRunning, "stalled child was reaped");
-    Console.WriteLine("PASS: unresponsive shutdown is bounded, idempotent and kills only owned child");
+    Pass("unresponsive shutdown is bounded, idempotent and kills only owned child");
 
     var registry = new AgentToolRegistry();
     registry.RegisterFromObject(new OrderCheckTool());
@@ -76,12 +77,19 @@ try
     var missing = await registry.ExecuteAsync(new ToolCallParams("lookup", "id", "session",
         System.Text.Json.JsonSerializer.SerializeToElement(new { }), null));
     Assert(missing.IsError, "missing required tool argument");
-    Console.WriteLine("PASS: plain tool registration and required-argument errors");
-    Console.WriteLine("All 8 C# RPC / tool lifecycle checks passed.");
+    Pass("plain tool registration and required-argument errors");
+    await HttpToolChecks.RunAsync(Pass);
+    Console.WriteLine($"All {passed} C# RPC / tool / HTTP adapter checks passed.");
 }
 finally
 {
     Console.SetError(stderr);
+}
+
+void Pass(string message)
+{
+    passed++;
+    Console.WriteLine($"PASS {passed}: {message}");
 }
 
 async Task<HostedSkillRuntimeClient> StartAsync(string mode)

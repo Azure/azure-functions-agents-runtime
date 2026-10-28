@@ -11,17 +11,7 @@ var host = new HostBuilder()
             var tools = provider.GetRequiredService<OrderTools>();
             var registry = new AgentToolRegistry();
             registry.RegisterFromObject(tools);
-            // This adapter calls the HTTP function's shared application logic, not the
-            // Functions invocation pipeline (no synthetic binding or loopback request).
-            registry.RegisterTool(new WorkerToolDescriptor(
-                "calculate_shipping_http",
-                "Calculate shipping using the same handler logic as ShippingQuote.",
-                System.Text.Json.Nodes.JsonNode.Parse("""
-                {"type":"object","properties":{"orderId":{"type":"string"},"zip":{"type":"string"}},"required":["orderId","zip"]}
-                """)!,
-                new TriggerToolMetadata("httpTrigger", "ShippingQuote", "POST", "shipping/quote")),
-                call => Task.FromResult(System.Text.Json.JsonSerializer.Serialize(
-                    tools.CalculateShipping(call.Arguments, call.SessionId, "stdio-shared-handler"))));
+            registry.RegisterFunctions<ShippingFunctions>(provider);
             return registry;
         });
         services.AddSingleton<RuntimeService>();

@@ -129,6 +129,14 @@ def check_turn(response, session_id, number, storage):
     assert [turn["turn"] for turn in turns] == list(range(1, number + 1))
 
 
+def tool_result(response, name):
+    """Decode a mock tool's actual JSON result, not a substring of its prompt."""
+    _, marker, remaining = response["result"]["content"].partition(f"{name}=")
+    assert marker, (name, response)
+    result, _ = json.JSONDecoder().raw_decode(remaining)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--func", default=str(ROOT / ".tools" / "core-tools" / "func"))
@@ -167,6 +175,14 @@ def main():
                        env=env, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
         subprocess.run(["dotnet", "build", "--nologo", "--verbosity", "minimal"], cwd=APP,
                        env=env, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
+    output = APP / "bin" / "Debug" / "net10.0"
+    metadata = json.loads((output / "functions.metadata").read_text())
+    shipping_function = next(function for function in metadata if function["name"] == "ShippingQuote")
+    assert shipping_function["entryPoint"] == "HostedSkills.Spike.ShippingFunctions.ShippingQuoteAsync"
+    shipping_trigger = next(
+        binding for binding in shipping_function["bindings"] if binding["type"] == "httpTrigger"
+    )
+    assert shipping_trigger["route"] == "shipping/quote", shipping_trigger
 
     host = azurite = None
     logs = []
@@ -209,7 +225,7 @@ def main():
             process = subprocess.Popen(
                 [str(Path(shutil.which(args.func) or args.func).resolve()),
                  "host", "start", "--no-build", "--port", str(port)],
-                cwd=APP / "bin" / "Debug" / "net10.0",
+                cwd=output,
                 env=env, stdout=log, stderr=subprocess.STDOUT,
             )
             return process, logfile
@@ -222,6 +238,9 @@ def main():
             "orderId": "ORD-900", "zip": "98052", "sessionId": "direct-http",
             "invocationPath": "http-trigger", "carrier": "PriorityExpress", "rateUsd": 14.25,
         }, shipping
+        bad_shipping = post(base, "/api/shipping/quote",
+                            {"orderId": "ORD-900", "zip": ""}, evidence, "shipping-bad-request", status=400)
+        assert bad_shipping == {"error": "orderId and zip must be nonempty strings"}, bad_shipping
         post(base, "/api/support", {}, evidence, "bad-request", status=400)
         session_id = "host-smoke-" + uuid.uuid4().hex
         prompt = 'Please lookup_order and calculate_shipping_http for {"orderId":"ORD-900","zip":"98052"}'
@@ -231,8 +250,24 @@ def main():
         result = first["result"]
         assert set(result["tool_calls_made"]) == {"lookup_order", "calculate_shipping_http"}, result
         for value in ("Ada Lovelace", "PAID", "149.99", "PriorityExpress", "14.25",
-                      "ORD-900", "98052", "stdio-shared-handler", "ContosoRetail", "order-policy"):
+                      "ORD-900", "98052", "ContosoRetail", "order-policy"):
             assert value in result["content"], (value, result)
+        shipping_tool = tool_result(first, "calculate_shipping_http")
+        assert shipping_tool["status_code"] == 200, shipping_tool
+        assert isinstance(shipping_tool["body"], str), shipping_tool
+        assert json.loads(shipping_tool["body"]) == {
+            "orderId": "ORD-900", "zip": "98052", "sessionId": None,
+            "invocationPath": "stdio-function-handler", "carrier": "PriorityExpress", "rateUsd": 14.25,
+        }, shipping_tool
+        bad_tool_turn = post(
+            base, "/api/support",
+            {"prompt": 'calculate_shipping_http {"orderId":"ORD-900","zip":""}',
+             "sessionId": session_id + "-bad-shipping"},
+            evidence, "shipping-tool-bad-request",
+        )
+        bad_tool_result = tool_result(bad_tool_turn, "calculate_shipping_http")
+        assert bad_tool_result["status_code"] == 400, bad_tool_result
+        assert json.loads(bad_tool_result["body"]) == bad_shipping, bad_tool_result
         second = post(base, "/api/support",
                       {"prompt": "Confirm this is a resumed conversation.", "sessionId": session_id},
                       evidence, "turn2")
@@ -250,6 +285,9 @@ def main():
             "inference": "MOCK", "storage": storage, "http_port": port, "session_id": session_id,
             "assertions": [
                 "HTTP ShippingQuote returns PriorityExpress / 14.25",
+                "dual-attributed ShippingQuote remains indexed as an HTTP trigger",
+                "shipping tool directly invokes ShippingQuote and returns status/body envelope",
+                "shipping handler returns 400 for invalid ZIP on HTTP and tool paths",
                 "HTTP support rejects missing prompt with 400",
                 "HTTP support calls both C# tools over Rust stdio",
                 "second HTTP request resumes persisted turns 1 and 2",
