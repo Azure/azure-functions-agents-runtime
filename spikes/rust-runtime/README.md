@@ -358,6 +358,42 @@ cargo build --bin fhs-runtime
 ```
 
 `FOUNDRY` identifies the **model provider**, not a different agent harness.
+
+### Application Insights traces
+
+The .NET worker exports OpenTelemetry traces to Application Insights when
+`APPLICATIONINSIGHTS_CONNECTION_STRING` is set. Host invocation traces and the
+custom agent-run, Foundry model-call, and C# tool-callback spans share one trace.
+Set the connection string in the shell that starts Core Tools; optionally set
+`OTEL_SERVICE_NAME` to choose the service name:
+
+```bash
+export APPLICATIONINSIGHTS_CONNECTION_STRING='<connection-string-from-your-Application-Insights-resource>'
+export OTEL_SERVICE_NAME='fhs-rust-dotnet-spike'
+```
+
+Without the connection string, no trace exporter is registered. Custom spans
+include only agent/provider/model/tool names and bounded outcomes. They exclude
+prompts, completions, tool arguments/results, session/user identifiers,
+endpoints, tokens, and exception messages. The tool span measures the worker's
+full reverse-stdio callback, including C# handler execution.
+
+In the Application Insights Logs view, find a trace by its `OperationId`:
+
+```kusto
+union withsource=table AppRequests, AppDependencies, AppTraces
+| where OperationId == "<trace-id>"
+| extend SpanName = coalesce(
+    tostring(column_ifexists("Name", "")),
+    tostring(column_ifexists("Message", "")))
+| project TimeGenerated, table, SpanName, OperationId, ParentId, Properties
+| order by TimeGenerated asc
+```
+
+The support response's `tool_calls_made` field is still a quick confirmation of
+tool dispatch. The trace adds timing, outcome, and parent-child relationships.
+Offline telemetry checks use an in-memory listener and do not verify ingestion
+to a live Application Insights resource.
 The existing live branch deliberately runs the Copilot SDK agent loop with a
 Foundry provider configuration and Entra authentication; it does not use GitHub
 Copilot inference or require a separately installed interactive Copilot CLI.

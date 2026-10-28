@@ -123,6 +123,8 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> _pending = new();
     private readonly ConcurrentDictionary<(string Agent, string Session), Action<AgentStreamEvent>> _streamListeners = new();
+    private readonly ConcurrentDictionary<string, ActivityContext> _activeRuns = new();
+    private readonly ConcurrentDictionary<(string RunId, string CallId), Activity> _modelActivities = new();
     // Rust SessionFs does not provide transactional concurrent turns. Serialize runs
     // in this worker, including streams, rather than implying multi-writer safety.
     private readonly SemaphoreSlim _runLock = new(1, 1);
@@ -207,30 +209,52 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         await _runLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         sessionId ??= Guid.NewGuid().ToString("N");
         var key = (agentName, sessionId);
+        var runActivity = SpikeTelemetry.StartAgentRun(agentName, InferenceMode);
+        var traceContext = SpikeTelemetry.GetTraceContext(runActivity);
+        var runId = traceContext is null ? null : Guid.NewGuid().ToString("N");
         try
         {
             if (onStreamEvent is not null) _streamListeners[key] = onStreamEvent;
-            return await SendRequestAsync<AgentRunResult>(
+            if (runId is not null)
+                _activeRuns[runId] = runActivity!.Context;
+
+            var result = await SendRequestAsync<AgentRunResult>(
                 "agent.run",
                 new
                 {
                     agent_name = agentName,
                     prompt,
                     session_id = sessionId,
-                    stream
+                    stream,
+                    run_id = runId,
+                    trace_context = traceContext
                 },
                 cancellationToken).ConfigureAwait(false);
+            SpikeTelemetry.SetRunOutcome(runActivity, isError: false);
+            return result;
         }
         catch (OperationCanceledException)
         {
+            SpikeTelemetry.SetRunOutcome(runActivity, isError: true);
             // The spike protocol has no cancellation RPC. Stop this child rather than
             // allowing a timed-out turn to overlap the next writer to SessionFs.
             FailPending(new IOException("Rust turn was canceled; restart the worker before running more turns."));
             StopChild();
             throw;
         }
+        catch
+        {
+            SpikeTelemetry.SetRunOutcome(runActivity, isError: true);
+            throw;
+        }
         finally
         {
+            if (runId is not null)
+            {
+                CloseModelActivities(runId);
+                _activeRuns.TryRemove(runId, out _);
+            }
+            runActivity?.Dispose();
             _streamListeners.TryRemove(key, out _);
             _runLock.Release();
         }
@@ -328,9 +352,13 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
                         var callbackId = Interlocked.Increment(ref _nextCallbackId);
                         var callback = Task.Run(async () =>
                         {
+                            using var activity = SpikeTelemetry.StartToolExecution(
+                                callParams,
+                                ResolveRunParent(callParams.RunId));
                             try
                             {
                                 var toolResult = await _toolRegistry.ExecuteAsync(callParams).ConfigureAwait(false);
+                                SpikeTelemetry.SetToolOutcome(activity, toolResult.IsError);
                                 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                                 await WriteFrameAsync(new
                                 {
@@ -341,12 +369,30 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
                             }
                             catch (Exception ex)
                             {
+                                SpikeTelemetry.SetToolOutcome(activity, isError: true);
                                 FailPending(ex);
                             }
                         });
                         _callbacks[callbackId] = callback;
                         _ = callback.ContinueWith(_ => { _callbacks.TryRemove(callbackId, out var ignored); },
                             TaskScheduler.Default);
+                    }
+                    else if (method == "fhs.telemetry.model_call"
+                        && root.TryGetProperty("params", out var modelCallParams))
+                    {
+                        try
+                        {
+                            var telemetry = JsonSerializer.Deserialize<ModelCallTelemetry>(
+                                modelCallParams.GetRawText());
+                            if (telemetry is not null
+                                && !string.IsNullOrWhiteSpace(telemetry.RunId)
+                                && !string.IsNullOrWhiteSpace(telemetry.CallId))
+                                HandleModelTelemetry(telemetry);
+                        }
+                        catch (JsonException)
+                        {
+                            Console.Error.WriteLine("[fhs-runtime] Ignoring malformed telemetry notification.");
+                        }
                     }
                     else if (method == "agent.stream" && root.TryGetProperty("params", out var streamParams))
                     {
@@ -387,6 +433,43 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         finally
         {
             FailPending(new EndOfStreamException("fhs-runtime stdout closed; the child process is unavailable."));
+        }
+    }
+
+    private ActivityContext? ResolveRunParent(string? runId) =>
+        runId is not null && _activeRuns.TryGetValue(runId, out var context) ? context : null;
+
+    private void HandleModelTelemetry(ModelCallTelemetry telemetry)
+    {
+        var key = (telemetry.RunId, telemetry.CallId);
+        if (telemetry.Phase == "start")
+        {
+            if (!_activeRuns.TryGetValue(telemetry.RunId, out var parent)
+                || _modelActivities.ContainsKey(key))
+                return;
+
+            var activity = SpikeTelemetry.StartModelCall(telemetry, parent);
+            if (activity is not null && !_modelActivities.TryAdd(key, activity))
+                activity.Dispose();
+            return;
+        }
+
+        if (telemetry.Phase == "end" && _modelActivities.TryRemove(key, out var completed))
+        {
+            SpikeTelemetry.SetModelOutcome(completed, telemetry.Outcome);
+            completed.Dispose();
+        }
+    }
+
+    private void CloseModelActivities(string runId)
+    {
+        foreach (var (key, _) in _modelActivities)
+        {
+            if (key.RunId == runId && _modelActivities.TryRemove(key, out var remaining))
+            {
+                SpikeTelemetry.SetModelOutcome(remaining, "error");
+                remaining.Dispose();
+            }
         }
     }
 

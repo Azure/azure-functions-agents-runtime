@@ -170,6 +170,8 @@ Follow the order-policy skill when answering.
         prompt: "Please lookup_order and calculate_shipping_http for {\"order_id\": \"ORD-42\", \"zip\": \"98052\"}".to_string(),
         session_id: Some("session-abc".to_string()),
         stream: true,
+        run_id: None,
+        trace_context: None,
     };
     send_worker_request(&mut worker_writer, 2, "agent.run", &run1).await;
 
@@ -254,6 +256,8 @@ Follow the order-policy skill when answering.
         prompt: "What was the status of my order?".to_string(),
         session_id: Some("session-abc".to_string()),
         stream: false,
+        run_id: None,
+        trace_context: None,
     };
     send_worker_request(&mut worker_writer, 3, "agent.run", &run2).await;
     let run2_line = worker_lines.next_line().await.unwrap().unwrap();
@@ -360,6 +364,8 @@ async fn azure_blob_storage_session_fs_persists_multi_turn_sessions() {
             prompt: "First turn stored in Azure Blob".to_string(),
             session_id: Some("blob-sess-1".to_string()),
             stream: false,
+            run_id: None,
+            trace_context: None,
         },
     )
     .await;
@@ -380,6 +386,8 @@ async fn azure_blob_storage_session_fs_persists_multi_turn_sessions() {
             prompt: "Second turn resumed from Azure Blob".to_string(),
             session_id: Some("blob-sess-1".to_string()),
             stream: false,
+            run_id: None,
+            trace_context: None,
         },
     )
     .await;

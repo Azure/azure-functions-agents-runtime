@@ -1,10 +1,27 @@
+using Azure.Monitor.OpenTelemetry.Exporter;
 using HostedSkills.Spike;
+using Microsoft.Azure.Functions.Worker.OpenTelemetry;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var host = new HostBuilder()
     .ConfigureServices(services =>
     {
+        var connectionString = Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING");
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            services.AddOpenTelemetry()
+                .WithTracing(tracing => tracing
+                    .AddSource(SpikeTelemetry.SourceName)
+                    .ConfigureResource(resource => resource.AddService(
+                        Environment.GetEnvironmentVariable("OTEL_SERVICE_NAME")
+                        ?? "fhs-rust-dotnet-spike")))
+                .UseFunctionsWorkerDefaults()
+                .UseAzureMonitorExporter();
+        }
+
         services.AddSingleton<OrderTools>();
         services.AddSingleton<AgentToolRegistry>(provider =>
         {

@@ -13,6 +13,7 @@
   <ItemGroup>
     <Compile Include="../HostedSkills.Spike/HostedSkillRuntimeClient.cs" Link="HostedSkillRuntimeClient.cs" />
     <Compile Include="../HostedSkills.Spike/AgentToolRegistry.cs" Link="AgentToolRegistry.cs" />
+    <Compile Include="../HostedSkills.Spike/SpikeTelemetry.cs" Link="SpikeTelemetry.cs" />
     <Compile Include="../HostedSkills.Spike/*Adapter*.cs" Link="%(Filename)%(Extension)" />
     <None Update="rpc_fixture.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

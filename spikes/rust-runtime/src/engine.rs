@@ -1,7 +1,7 @@
 //! Core runtime engine tying together config discovery, skills, providers,
 //! Azure Blob/Local `SessionFsProvider`, and `github-copilot-sdk` execution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,12 +22,88 @@ use crate::config::{ResolvedAgent, discover_agents};
 use crate::env::EnvMap;
 use crate::protocol::{
     AgentRunParams, AgentRunResult, AgentStreamEvent, AgentSummary, InitializeParams,
-    InitializeResult, RegisterToolsParams, RegisterToolsResult, SessionInspectParams,
-    SessionInspectResult, StdioRpcPeer, ToolCallParams, ToolCallResult, WorkerToolDescriptor,
+    InitializeResult, ModelCallTelemetry, RegisterToolsParams, RegisterToolsResult,
+    SessionInspectParams, SessionInspectResult, StdioRpcPeer, TelemetryTraceContext,
+    ToolCallParams, ToolCallResult, WorkerToolDescriptor,
 };
 use crate::providers::{InferenceMode, ResolvedProvider, resolve_inference};
 use crate::session_fs::{CopilotSessionFs, SESSION_STATE_ROOT, StorageRoute, WORKSPACE_ROOT};
 use crate::skills::{SkillDescriptor, discover_skills, filter_skills_for_agent};
+
+#[derive(Debug, Clone)]
+struct RunTelemetryContext {
+    run_id: String,
+}
+
+struct PendingModelCall {
+    call_id: String,
+    model: String,
+}
+
+fn valid_trace_context(context: &TelemetryTraceContext) -> bool {
+    fn valid_hex(value: &str, length: usize) -> bool {
+        value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    valid_hex(&context.trace_id, 32)
+        && context.trace_id.bytes().any(|byte| byte != b'0')
+        && valid_hex(&context.span_id, 16)
+        && context.span_id.bytes().any(|byte| byte != b'0')
+        && valid_hex(&context.trace_flags, 2)
+}
+
+fn model_call_telemetry(
+    event_type: &str,
+    data: &Value,
+    telemetry: &RunTelemetryContext,
+    model_fallback: &str,
+    pending_calls: &mut HashMap<String, PendingModelCall>,
+    next_call_id: &mut u64,
+) -> Option<ModelCallTelemetry> {
+    let turn_id = data.get("turnId").and_then(Value::as_str)?;
+    match event_type {
+        "model.call_start" if !pending_calls.contains_key(turn_id) => {
+            let call_id = next_call_id.to_string();
+            *next_call_id += 1;
+            let model = data
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(model_fallback)
+                .to_string();
+            pending_calls.insert(
+                turn_id.to_string(),
+                PendingModelCall {
+                    call_id: call_id.clone(),
+                    model: model.clone(),
+                },
+            );
+            Some(ModelCallTelemetry {
+                run_id: telemetry.run_id.clone(),
+                call_id,
+                phase: "start".to_string(),
+                model,
+                outcome: None,
+            })
+        }
+        "model.call_finished" => {
+            let pending = pending_calls.remove(turn_id)?;
+            let outcome = data
+                .get("outcome")
+                .and_then(Value::as_str)
+                .filter(|value| matches!(*value, "success" | "error" | "cancelled" | "rejected"))
+                .unwrap_or("unknown")
+                .to_string();
+            Some(ModelCallTelemetry {
+                run_id: telemetry.run_id.clone(),
+                call_id: pending.call_id,
+                phase: "end".to_string(),
+                model: pending.model,
+                outcome: Some(outcome),
+            })
+        }
+        _ => None,
+    }
+}
 
 /// Tool handler that forwards `github-copilot-sdk` tool invocations over stdio
 /// back to the host language worker (`tool.call`) and returns the worker's response.
@@ -37,6 +113,7 @@ pub struct StdioCallbackToolHandler {
     session_id: String,
     agent_name: String,
     stream: bool,
+    run_id: Option<String>,
     recorded_calls: Arc<Mutex<Vec<String>>>,
 }
 
@@ -71,6 +148,7 @@ impl ToolHandler for StdioCallbackToolHandler {
             session_id: self.session_id.clone(),
             arguments: invocation.arguments,
             trigger_metadata: self.descriptor.trigger_metadata.clone(),
+            run_id: self.run_id.clone(),
         };
 
         let result: Result<ToolCallResult, _> = self.peer.call_worker("tool.call", &params).await;
@@ -282,6 +360,17 @@ impl RuntimeEngine {
         peer: Arc<StdioRpcPeer>,
         params: AgentRunParams,
     ) -> Result<AgentRunResult, (i32, String)> {
+        let telemetry = match (&params.run_id, &params.trace_context) {
+            (Some(run_id), Some(trace_context))
+                if !run_id.trim().is_empty() && valid_trace_context(trace_context) =>
+            {
+                Some(RunTelemetryContext {
+                    run_id: run_id.clone(),
+                })
+            }
+            _ => None,
+        };
+
         let app_state = {
             let guard = self.state.read().await;
             guard
@@ -353,6 +442,7 @@ impl RuntimeEngine {
                     &skill_plan.enabled,
                     &enabled_tools,
                     session_fs,
+                    telemetry.clone(),
                 )
                 .await;
         }
@@ -370,6 +460,7 @@ impl RuntimeEngine {
             &skill_plan.disabled_names,
             &enabled_tools,
             session_fs,
+            telemetry,
         )
         .await
     }
@@ -389,6 +480,7 @@ impl RuntimeEngine {
         disabled_skills: &[String],
         enabled_tools: &[WorkerToolDescriptor],
         session_fs: Arc<CopilotSessionFs>,
+        telemetry: Option<RunTelemetryContext>,
     ) -> Result<AgentRunResult, (i32, String)> {
         use github_copilot_sdk::session_fs::SessionFsProvider as _;
 
@@ -406,6 +498,7 @@ impl RuntimeEngine {
                 session_id: session_id.to_string(),
                 agent_name: agent.slug.clone(),
                 stream,
+                run_id: telemetry.as_ref().map(|context| context.run_id.clone()),
                 recorded_calls: recorded_calls.clone(),
             });
             let mut tool = Tool::new(desc.name.clone())
@@ -447,7 +540,7 @@ impl RuntimeEngine {
             cfg.system_message = Some(sys_msg);
             cfg.tools = Some(sdk_tools);
             cfg.available_tools = Some(available_tool_names);
-            cfg.streaming = Some(stream);
+            cfg.streaming = Some(stream || telemetry.is_some());
             cfg.enable_config_discovery = Some(false);
             cfg.enable_skills = Some(!enabled_skills.is_empty());
             cfg.skill_directories = Some(skill_dirs);
@@ -466,7 +559,7 @@ impl RuntimeEngine {
             cfg.system_message = Some(sys_msg);
             cfg.tools = Some(sdk_tools);
             cfg.available_tools = Some(available_tool_names);
-            cfg.streaming = Some(stream);
+            cfg.streaming = Some(stream || telemetry.is_some());
             cfg.enable_config_discovery = Some(false);
             cfg.enable_skills = Some(!enabled_skills.is_empty());
             cfg.skill_directories = Some(skill_dirs);
@@ -480,25 +573,49 @@ impl RuntimeEngine {
                 .map_err(|e| (-32010, format!("Copilot resume_session failed: {e}")))?
         };
 
-        // Forward streaming delta events if requested.
+        // Consume SDK events with the run future so model-call notifications cannot be lost.
         let mut sub = session.subscribe();
-        let peer_stream = peer.clone();
-        let sid_owned = session_id.to_string();
-        let slug_owned = agent.slug.clone();
-        let stream_task = tokio::spawn(async move {
-            if !stream {
-                return;
-            }
-            while let Ok(ev) = sub.recv().await {
-                if ev.event_type == "assistant.message_delta"
-                    && let Some(delta_text) = ev.data.get("deltaContent").and_then(|v| v.as_str())
+        let mut msg_opts = MessageOptions::from(prompt);
+        msg_opts.wait_timeout = Some(Duration::from_secs(agent.timeout_seconds));
+        let mut model_calls = HashMap::<String, PendingModelCall>::new();
+        let mut next_call_id = 1_u64;
+        let mut events_open = true;
+        let send_res = {
+            let send = session.send_and_wait(msg_opts);
+            tokio::pin!(send);
+            loop {
+                let event = tokio::select! {
+                    result = &mut send => break result,
+                    event = sub.recv(), if events_open => event,
+                };
+                let Ok(ev) = event else {
+                    events_open = false;
+                    continue;
+                };
+
+                if let Some(telemetry) = &telemetry
+                    && let Some(model_event) = model_call_telemetry(
+                        &ev.event_type,
+                        &ev.data,
+                        telemetry,
+                        model,
+                        &mut model_calls,
+                        &mut next_call_id,
+                    )
                 {
-                    let _ = peer_stream
+                    let _ = peer.notify("fhs.telemetry.model_call", &model_event).await;
+                }
+
+                if stream
+                    && ev.event_type == "assistant.message_delta"
+                    && let Some(delta_text) = ev.data.get("deltaContent").and_then(Value::as_str)
+                {
+                    let _ = peer
                         .notify(
                             "agent.stream",
                             &AgentStreamEvent {
-                                session_id: sid_owned.clone(),
-                                agent_name: slug_owned.clone(),
+                                session_id: session_id.to_string(),
+                                agent_name: agent.slug.clone(),
                                 kind: "delta".to_string(),
                                 content: Some(delta_text.to_string()),
                                 tool_name: None,
@@ -508,14 +625,8 @@ impl RuntimeEngine {
                         .await;
                 }
             }
-        });
-
-        let mut msg_opts = MessageOptions::from(prompt);
-        msg_opts.wait_timeout = Some(Duration::from_secs(agent.timeout_seconds));
-
-        let send_res = session.send_and_wait(msg_opts).await;
+        };
         let _ = session.disconnect().await;
-        stream_task.abort();
 
         let final_event = send_res
             .map_err(|e| (-32011, format!("Copilot send_and_wait failed: {e}")))?
@@ -618,6 +729,7 @@ impl RuntimeEngine {
         enabled_skills: &[SkillDescriptor],
         enabled_tools: &[WorkerToolDescriptor],
         session_fs: Arc<CopilotSessionFs>,
+        telemetry: Option<RunTelemetryContext>,
     ) -> Result<AgentRunResult, (i32, String)> {
         use github_copilot_sdk::session_fs::SessionFsProvider as _;
 
@@ -650,6 +762,7 @@ impl RuntimeEngine {
                     session_id: session_id.to_string(),
                     agent_name: agent.slug.clone(),
                     stream,
+                    run_id: telemetry.as_ref().map(|context| context.run_id.clone()),
                     recorded_calls: recorded_calls.clone(),
                 };
                 let args = extract_json_args_from_prompt(prompt)
@@ -801,6 +914,81 @@ fn extract_json_args_from_prompt(prompt: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_call_telemetry_pairs_events_without_exporting_sdk_turn_ids() {
+        let telemetry = RunTelemetryContext {
+            run_id: "run-1".to_string(),
+        };
+        let mut pending = HashMap::new();
+        let mut next_call_id = 1;
+        let start = model_call_telemetry(
+            "model.call_start",
+            &serde_json::json!({"turnId": "sdk-private-id", "model": "deployment"}),
+            &telemetry,
+            "fallback",
+            &mut pending,
+            &mut next_call_id,
+        )
+        .unwrap();
+        assert_eq!(start.call_id, "1");
+        assert_eq!(start.phase, "start");
+        assert!(
+            !serde_json::to_string(&start)
+                .unwrap()
+                .contains("sdk-private-id")
+        );
+        assert!(
+            model_call_telemetry(
+                "model.call_start",
+                &serde_json::json!({"turnId": "sdk-private-id"}),
+                &telemetry,
+                "fallback",
+                &mut pending,
+                &mut next_call_id,
+            )
+            .is_none()
+        );
+
+        let end = model_call_telemetry(
+            "model.call_finished",
+            &serde_json::json!({"turnId": "sdk-private-id", "outcome": "success"}),
+            &telemetry,
+            "fallback",
+            &mut pending,
+            &mut next_call_id,
+        )
+        .unwrap();
+        assert_eq!(end.call_id, start.call_id);
+        assert_eq!(end.phase, "end");
+        assert_eq!(end.outcome.as_deref(), Some("success"));
+        assert!(pending.is_empty());
+        assert!(
+            model_call_telemetry(
+                "model.call_finished",
+                &serde_json::json!({"turnId": "unmatched", "outcome": "success"}),
+                &telemetry,
+                "fallback",
+                &mut pending,
+                &mut next_call_id,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_trace_context_is_not_forwarded_to_runtime_tools() {
+        let valid = TelemetryTraceContext {
+            trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+            span_id: "0123456789abcdef".to_string(),
+            trace_flags: "01".to_string(),
+        };
+        assert!(valid_trace_context(&valid));
+        assert!(!valid_trace_context(&TelemetryTraceContext {
+            trace_id: "00000000000000000000000000000000".to_string(),
+            ..valid
+        }));
+    }
 
     #[tokio::test]
     async fn foundry_mode_starts_managed_sdk_runtime_without_model_contact() {

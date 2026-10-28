@@ -42,6 +42,7 @@ The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.co
 | [0011](0011-hosted-skill-binding.md) | HostedSkill binding | Finalized |
 | [0012](0012-dotnet-function-tools-spike.md) | Dual-attribute HTTP function tools in the .NET spike | Finalized |
 | [0013](0013-foundry-inference-in-rust-spike.md) | Configurable Foundry inference in the Rust runtime spike | Finalized |
+| [0014](0014-rust-dotnet-spike-observability.md) | End-to-end observability for the Rust/.NET spike | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

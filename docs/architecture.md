@@ -22,7 +22,10 @@ experiment defaults to mock inference and can attempt live Foundry inference
 through the Copilot SDK agent loop when configured. Cargo acquires the SDK's
 version-matched native runtime; Foundry selects the model provider, not a
 separate harness. Live service validation is separate. It does not establish a
-production binding or general trigger support.
+production binding or general trigger support. With an Application Insights
+connection string, the spike can export correlated OpenTelemetry traces for
+Functions requests, Rust agent runs, model calls, and C# tool callbacks; this
+does not change production observability.
 
 ## 2. High-level data flow
 

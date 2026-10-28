@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Text.Json.Nodes;
 using HostedSkills.Spike;
 
 // No test framework dependencies: fault injection complements (never replaces)
@@ -42,6 +43,89 @@ try
     await using (var client = await StartAsync("foundry"))
         Assert(client.InferenceMode == "foundry", "initialization reports Foundry inference mode");
     Pass("Foundry inference mode is forwarded from Rust initialization");
+
+    var originalConnectionString = Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING");
+    try
+    {
+        Environment.SetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING", null);
+        Assert(SpikeTelemetry.StartAgentRun("agent", "mock") is null,
+            "telemetry remains disabled without an Application Insights connection string");
+        Assert(SpikeTelemetry.ParseTraceContext(new TelemetryTraceContext("bad", "bad", "bad")) is null,
+            "malformed trace context does not create child spans");
+
+        Environment.SetEnvironmentVariable(
+            "APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=00000000-0000-0000-0000-000000000000");
+        var stoppedActivities = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == SpikeTelemetry.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) =>
+                ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = stoppedActivities.Add,
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        var telemetryRegistry = new AgentToolRegistry();
+        var toolFails = false;
+        telemetryRegistry.RegisterTool(
+            new WorkerToolDescriptor("fixture_tool", "Fixture tool.", JsonNode.Parse("{}")!),
+            _ => toolFails
+                ? Task.FromException<string>(new InvalidOperationException("private tool error"))
+                : Task.FromResult("fixture result"));
+        await using (var client = await StartAsync("telemetry", telemetryRegistry))
+            await client.GetHostedSkill("agent").RunAsync("private prompt", "telemetry-session");
+
+        var runActivity = stoppedActivities.Single(activity => activity.OperationName == "fhs.rust.agent.run");
+        var modelActivity = stoppedActivities.Single(activity => activity.OperationName == "gen_ai.request");
+        var toolActivity = stoppedActivities.Single(activity => activity.OperationName == "fhs.tool.execute");
+        Assert(modelActivity.TraceId == runActivity.TraceId && toolActivity.TraceId == runActivity.TraceId,
+            "agent, model and tool spans share one trace");
+        Assert(modelActivity.ParentSpanId == runActivity.SpanId && toolActivity.ParentSpanId == runActivity.SpanId,
+            "model and tool spans are children of the agent run");
+        Assert(!stoppedActivities.Any(activity => activity.TagObjects.Any(tag =>
+                tag.Value?.ToString()?.Contains("private prompt", StringComparison.Ordinal) == true
+                || tag.Value?.ToString()?.Contains("telemetry-session", StringComparison.Ordinal) == true)),
+            "telemetry spans do not contain prompt content");
+
+        Assert(modelActivity.GetTagItem("gen_ai.request.model") as string == "fixture-model",
+            "model span retains only the configured model name");
+        Assert(modelActivity.GetTagItem("fhs.outcome") as string == "success"
+            && toolActivity.GetTagItem("fhs.outcome") as string == "success",
+            "successful model and tool callbacks have successful outcomes");
+        var allowedTags = new HashSet<string>
+        {
+            "fhs.agent.name", "fhs.inference.mode", "fhs.outcome",
+            "fhs.tool.name", "fhs.provider", "gen_ai.request.model",
+        };
+        Assert(stoppedActivities.All(activity =>
+                activity.TagObjects.All(tag => allowedTags.Contains(tag.Key))),
+            "spans emit only allowlisted metadata attributes");
+
+        stoppedActivities.Clear();
+        toolFails = true;
+        await using (var client = await StartAsync("telemetry_tool_error", telemetryRegistry))
+            await client.GetHostedSkill("agent").RunAsync("private prompt", "tool-error-session");
+        var failedTool = stoppedActivities.Single(activity => activity.OperationName == "fhs.tool.execute");
+        Assert(failedTool.Status == ActivityStatusCode.Error
+            && failedTool.GetTagItem("fhs.outcome") as string == "error",
+            "tool errors set span outcome without exporting exception content");
+
+        stoppedActivities.Clear();
+        await using (var client = await StartAsync("telemetry_failure"))
+            await ExpectAsync<InvalidOperationException>(() =>
+                client.GetHostedSkill("agent").RunAsync("private prompt", "failure-session"));
+        var failedRun = stoppedActivities.Single(activity => activity.OperationName == "fhs.rust.agent.run");
+        var failedModel = stoppedActivities.Single(activity => activity.OperationName == "gen_ai.request");
+        Assert(failedRun.Status == ActivityStatusCode.Error
+            && failedModel.Status == ActivityStatusCode.Error,
+            "failed agent runs close unmatched model spans with error status");
+        Pass("Application Insights opt-in, trace propagation, model/tool spans and content exclusion");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(
+            "APPLICATIONINSIGHTS_CONNECTION_STRING", originalConnectionString);
+    }
 
     await using (var client = await StartAsync("stall"))
     {
@@ -97,11 +181,11 @@ void Pass(string message)
     Console.WriteLine($"PASS {passed}: {message}");
 }
 
-async Task<HostedSkillRuntimeClient> StartAsync(string mode)
+async Task<HostedSkillRuntimeClient> StartAsync(string mode, AgentToolRegistry? registry = null)
 {
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var (client, _) = await HostedSkillRuntimeClient.StartAsync(
-        fixture, AppContext.BaseDirectory, new AgentToolRegistry(),
+        fixture, AppContext.BaseDirectory, registry ?? new AgentToolRegistry(),
         new Dictionary<string, string> { ["fixture_mode"] = mode },
         mockLlm: true, cancellationToken: deadline.Token);
     return client;

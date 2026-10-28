@@ -198,6 +198,27 @@ pub struct AgentRunParams {
     pub session_id: Option<String>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<TelemetryTraceContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryTraceContext {
+    pub trace_id: String,
+    pub span_id: String,
+    pub trace_flags: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCallTelemetry {
+    pub run_id: String,
+    pub call_id: String,
+    pub phase: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// `agent.run` response returned to the language worker.
@@ -236,6 +257,8 @@ pub struct ToolCallParams {
     pub arguments: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_metadata: Option<TriggerToolMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 /// Response from the language worker for a `tool.call` request.

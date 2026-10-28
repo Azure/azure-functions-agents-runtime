@@ -35,7 +35,8 @@ public sealed record ToolCallParams(
     [property: JsonPropertyName("call_id")] string CallId,
     [property: JsonPropertyName("session_id")] string SessionId,
     [property: JsonPropertyName("arguments")] JsonElement Arguments,
-    [property: JsonPropertyName("trigger_metadata")] TriggerToolMetadata? TriggerMetadata);
+    [property: JsonPropertyName("trigger_metadata")] TriggerToolMetadata? TriggerMetadata,
+    [property: JsonPropertyName("run_id")] string? RunId = null);
 
 public sealed record ToolCallResult(
     [property: JsonPropertyName("content")] string Content,
