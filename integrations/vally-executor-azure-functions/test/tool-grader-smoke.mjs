@@ -131,7 +131,7 @@ function yaml(endpoint, prompt, config) {
   return `name: tool-grader-smoke
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrl: "${endpoint}"
   runs: 1

@@ -2,7 +2,7 @@ name: receipt-agent-evaluation
 
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrlEnv: AGENT_EVAL_TARGET_URL
       auth:
