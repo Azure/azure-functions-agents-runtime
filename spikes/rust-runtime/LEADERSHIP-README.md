@@ -48,10 +48,10 @@ sequenceDiagram
     opt Agent requests a registered C# tool
         Model-->>Rust: Tool name + JSON arguments
         Rust->>CSharp: JSON-RPC tool.call (same stdio connection)
-        CSharp->>Tool: Validate DTO; invoke handler in a fresh DI scope
+        CSharp->>Tool: Validate DTO and invoke handler in a fresh DI scope
         Tool-->>CSharp: Tool result (or HTTP status/body envelope)
         CSharp-->>Rust: JSON-RPC response for tool.call
-        Rust->>Model: Tool result; continue the agent turn
+        Rust->>Model: Tool result and continue the agent turn
     end
     Rust->>Store: Persist updated session
     Rust-->>CSharp: JSON-RPC result for agent.run
