@@ -377,6 +377,12 @@ for together. The current scheduler raises Durable exceptions during that wait.
 It processes returned terminal failure outcomes only after the wave completes.
 These are different failure paths; do not change both to immediate failure.
 
+[Workflow fan-out groups](0012-workflow-fan-out-groups.md) changes the ordinary-wave
+contract for new instances whose stored input selects the all-task wait mode.
+Those instances wait for all children before reporting a Durable task failure.
+The earlier timing below remains the contract for instances without that mode.
+Continuation waves keep the per-instance behavior below under either input format.
+
 If no instance in a wave has persisted `continue_on_error: true`, keep the
 existing wait and result-processing path. This includes old histories,
 timeout-only policies, and explicit `continue_on_error: false`. Preserve the

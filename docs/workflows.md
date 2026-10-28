@@ -112,7 +112,7 @@ Three concrete wins versus chaining tool calls in conversation:
    as a Durable orchestration; the tool returns immediately with a
    `workflow_id`.
 4. The orchestration runs each task as a Durable activity (tool calls) or
-   a Durable timer (waits), using `task_all` to fan out parallel tasks and
+   a Durable timer (waits), using native task composites for parallel tasks and
    `depends_on` edges for sequencing.
 5. **`fhs_start_workflow` is fire-and-forget from the agent's perspective.**
    After receiving the `workflow_id`, the agent reports or records it as its
@@ -687,10 +687,18 @@ workflow as soon as that instance completes. If cancellation wins after a
 continued failure but before the wave finishes, the runtime discards all
 uncommitted wave results and restores the pending wave.
 
-Waves without enabled continuation keep the earlier timing. This includes old
-histories, timeout-only policies, and explicit `continue_on_error: false`.
-Returned terminal failures are processed after the wave, and cancellation keeps
-its earlier order.
+For workflows started by the updated runtime, an ordinary wave waits for
+`when_all(wave_tasks)` and races that group against cancellation. A Durable
+task failure is reported only after every child finishes, including retries and
+timers. Cancellation can win before the group finishes, even after a child has
+failed. Returned terminal failures are still processed after the wave.
+
+The runtime stores this selection as the internal `wave_wait_mode: "all"` input.
+Existing instances without that field keep the earlier per-task wait and
+failure timing. Do not add the field to an existing instance. An unsupported
+mode fails before dispatch. The mode is not a frontmatter field or a
+`fhs_start_workflow` argument. A wave with persisted continuation enabled always
+keeps per-instance processing, under either input format.
 
 A workflow can reach Durable `Completed` when some or all tasks have continued
 failures. `Completed` means that control flow finished. It does not mean that
@@ -739,6 +747,26 @@ Only tasks whose policy was frozen at submission time are dispatched with
 policy-aware execution. The persisted `timeout_ms` and `continue_on_error` keys
 are optional and are written only when declared. Histories without persisted
 execution data keep the legacy Activity call and result envelope.
+
+### DTS fan-out groups
+
+Ordinary parallel waves in new workflows use a nested composite:
+`when_any([cancel, when_all(tasks)])`. This structure lets Durable Task Scheduler
+(DTS) show a native **Fan-out** group. The existing display-name tags identify
+tool and Sub Agent Activities. Activity inputs retain distinct iteration IDs.
+
+The grouping unit is a bounded wave, not an entire `for_each` collection or
+the complete authored graph. Continuation waves and old instances keep their
+per-task wait path. No new DTS display is promised for those paths.
+
+The SDK update also changes some nested and shared-composite replay behavior.
+Stored wait-mode selection does not isolate those SDK changes. Check other
+orchestrators in the app before upgrading their SDK; do not infer general replay
+compatibility from this workflow input field.
+
+Use the [release evidence review sample](../samples/workflow-fanout-review/README.md)
+for deterministic parallel, collection, failure, cancellation, and continuation
+scenarios.
 
 ### Determinism contract
 

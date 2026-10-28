@@ -36,6 +36,7 @@ from durabletask.task import (
     OrchestrationContext,
     Task,
     TaskFailedError,
+    when_all,
     when_any,
 )
 
@@ -65,6 +66,7 @@ from .schema import (
     WAIT_TASK_TYPE,
     EffectiveWorkflowTaskExecution,
     TemplateResolutionError,
+    WaveWaitMode,
     WorkflowCondition,
     WorkflowPayload,
     WorkflowPlanPolicy,
@@ -298,12 +300,21 @@ def _await_wave(
     context: OrchestrationContext,
     cancel_task: Task[Any],
     wave_tasks: list[Task[Any]],
+    *,
+    wait_mode: WaveWaitMode | None = None,
 ) -> Generator[Task[Any], Task[Any], list[Any] | None]:
-    """Await leaf tasks until cancellation wins or the whole wave completes.
+    """Wait for a wave with the behavior selected by its stored input."""
+    if wait_mode is WaveWaitMode.ALL:
+        if not wave_tasks:
+            return []
+        all_task = when_all(wave_tasks)
+        winner = yield when_any([cancel_task, all_task])
+        if winner is cancel_task:
+            return None
+        if winner is not all_task:
+            raise RuntimeError("workflow task selection returned an unknown task")
+        return all_task.result
 
-    Durable 2.x composite tasks do not notify their own composite parent, so
-    racing ``task_all(wave_tasks)`` against cancellation would never resume.
-    """
     outcomes: dict[int, Any] = {}
     pending = list(range(len(wave_tasks)))
     while pending:
@@ -414,16 +425,10 @@ def _run_static_workflow(
     context: OrchestrationContext,
     payload: WorkflowPayload,
     tasks: list[WorkflowTaskInput],
+    *,
+    wait_mode: WaveWaitMode | None,
 ) -> Any:
-    """Execute a static-DAG plan in deterministic waves (pre-#1276 behavior).
-
-    Input: ``{"tasks": [{"id", "type", "tool"?, "args"?, "duration"?,
-    "until"?, "depends_on"}, ...]}``.
-
-    Return on success: ``{"results": {task_id: result, ...}}``.
-    Return on cooperative cancel: ``{"results": ..., "canceled": True,
-    "reason": <event payload>, "completed_count": N, "total_count": M}``.
-    """
+    """Execute a static plan with the stored wave wait mode."""
     by_id: dict[str, WorkflowTaskInput] = {t["id"]: t for t in tasks}
     deps: dict[str, set[str]] = {
         t["id"]: set(t.get("depends_on") or []) for t in tasks
@@ -552,6 +557,7 @@ def _run_static_workflow(
                     context,
                     cancel_task,
                     wave_tasks,
+                    wait_mode=wait_mode,
                 )
         except Exception as exc:
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
@@ -1239,6 +1245,8 @@ def _run_dynamic_workflow(
     context: OrchestrationContext,
     payload: WorkflowPayload,
     tasks: list[WorkflowTaskInput],
+    *,
+    wait_mode: WaveWaitMode | None,
 ) -> Any:
     """Execute a data-driven plan with deterministic phase helpers."""
     state = _new_dynamic_workflow_state(payload, tasks)
@@ -1305,6 +1313,7 @@ def _run_dynamic_workflow(
                     context,
                     cancel_task,
                     wave_tasks,
+                    wait_mode=wait_mode,
                 )
         except Exception as exc:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
@@ -1638,21 +1647,10 @@ def register_workflows(
         context: OrchestrationContext,
         raw_payload: WorkflowPayload | None,
     ) -> Any:
-        """Execute a workflow plan, selecting the static or dynamic scheduler.
+        """Execute a static or data-driven plan with stored wait behavior.
 
-        A plan is *static* when no task carries a ``when`` predicate or a
-        ``for_each`` expansion; it runs through :func:`_run_static_workflow`
-        with its exact pre-#1276 wave scheduling and string ``custom_status``
-        behavior. Any ``when`` / ``for_each`` selects
-        :func:`_run_dynamic_workflow`, which materializes instances, aggregates
-        results, and publishes structured (schema_version=2) status.
-
-        Determinism contract (both paths):
-        - Ready/runnable sets ordered deterministically before each wave.
-        - Templates resolved against the JSON-normalized ``results`` dict.
-        - Time read only via ``context.current_utc_datetime``.
-        - No I/O outside ``call_activity`` / ``create_timer`` /
-          ``wait_for_external_event``.
+        Both schedulers use deterministic task order, stored input, and Durable
+        time. Activities own external work.
         """
         if raw_payload is None:
             payload: WorkflowPayload = {
@@ -1661,10 +1659,24 @@ def register_workflows(
             }
         else:
             payload = raw_payload
+        wait_mode: WaveWaitMode | None = None
+        if "wave_wait_mode" in payload:
+            try:
+                wait_mode = WaveWaitMode(payload["wave_wait_mode"])
+            except ValueError as exc:
+                raise ValueError("unsupported workflow wave_wait_mode") from exc
         tasks = list(payload.get("tasks", []))
         if _plan_is_dynamic(tasks):
-            return (yield from _run_dynamic_workflow(context, payload, tasks))
-        return (yield from _run_static_workflow(context, payload, tasks))
+            return (
+                yield from _run_dynamic_workflow(
+                    context, payload, tasks, wait_mode=wait_mode,
+                )
+            )
+        return (
+            yield from _run_static_workflow(
+                context, payload, tasks, wait_mode=wait_mode,
+            )
+        )
 
     app.register_blueprint(bp)
 

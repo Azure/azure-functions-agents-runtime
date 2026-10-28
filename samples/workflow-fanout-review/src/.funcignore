@@ -1,0 +1,5 @@
+local.settings.json
+__pycache__
+.venv
+host.dts.json
+local.settings.template.json

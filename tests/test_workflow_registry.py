@@ -1186,6 +1186,8 @@ async def test_start_workflow_persists_sorted_owner_policy_in_client_input():
     result = json.loads(await tools.start_workflow(params, session, policy=policy))
 
     assert "workflow_id" in result
+    assert client.client_input["wave_wait_mode"] == "all"
+    assert "wave_wait_mode" not in tools.StartWorkflowParams.model_fields
     persisted = client.client_input["policy"]
     assert persisted["allowed_tools"] == sorted(policy.allowed_tools)
     assert persisted["allowed_subagents"] == ["alpha", "zeta"]
