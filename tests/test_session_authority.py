@@ -291,6 +291,90 @@ def test_start_acknowledgement_binds_deadline_once() -> None:
     assert unchanged is started_state
 
 
+@pytest.mark.parametrize(
+    ("started_at", "deadline"),
+    [
+        (NOW - timedelta(seconds=1), NOW + timedelta(minutes=5)),
+        (NOW + timedelta(seconds=1), NOW + timedelta(seconds=1)),
+    ],
+)
+def test_active_turn_rejects_invalid_start_timestamps(
+    started_at: datetime,
+    deadline: datetime,
+) -> None:
+    state, accepted = _accepted_turn()
+
+    with pytest.raises(ValueError, match="must follow admission"):
+        ActiveTurn(
+            request_id=accepted.receipt.request_id,
+            run_id=accepted.receipt.run_id,
+            turn_generation=accepted.receipt.turn_generation,
+            admitted_at=NOW,
+            started_at=started_at,
+            deadline=deadline,
+        )
+
+    assert state.active_turn is not None
+
+
+def test_start_command_rejects_nonpositive_deadline_window() -> None:
+    _, accepted = _accepted_turn()
+    started_at = NOW + timedelta(seconds=1)
+
+    with pytest.raises(ValueError, match="deadline must follow"):
+        StartTurnCommand(
+            request_id=accepted.receipt.request_id,
+            run_id=accepted.receipt.run_id,
+            turn_generation=accepted.receipt.turn_generation,
+            started_at=started_at,
+            deadline=started_at,
+        )
+
+
+@pytest.mark.parametrize(
+    "expected_reason",
+    [
+        "session_deleted",
+        "no_active_turn",
+        "stale_generation",
+        "identity_mismatch",
+    ],
+)
+def test_start_acknowledgement_rejects_nonactive_turns(
+    expected_reason: str,
+) -> None:
+    state, accepted = _accepted_turn()
+    command = StartTurnCommand(
+        request_id=accepted.receipt.request_id,
+        run_id=accepted.receipt.run_id,
+        turn_generation=accepted.receipt.turn_generation,
+        started_at=NOW + timedelta(seconds=1),
+        deadline=NOW + timedelta(minutes=5),
+    )
+    if expected_reason == "session_deleted":
+        state, _ = mark_session_deleted(
+            state,
+            DeleteSessionCommand(
+                idempotency_key="delete-key",
+                requested_at=NOW + timedelta(seconds=1),
+            ),
+        )
+    elif expected_reason == "no_active_turn":
+        state = _state()
+    elif expected_reason == "stale_generation":
+        command = command.model_copy(
+            update={"turn_generation": command.turn_generation + 1}
+        )
+    else:
+        command = command.model_copy(update={"request_id": "b" * 64})
+
+    unchanged, outcome = acknowledge_turn_start(state, command)
+
+    assert isinstance(outcome, StartRejected)
+    assert outcome.reason == expected_reason
+    assert unchanged is state
+
+
 def test_generation_fence_rejects_stale_and_mismatched_work() -> None:
     state, accepted = _accepted_turn()
     receipt = accepted.receipt
@@ -445,6 +529,66 @@ def test_terminal_commit_rejects_changed_replay() -> None:
     assert isinstance(outcome, TerminalCommitRejected)
     assert outcome.reason == "terminal_conflict"
     assert unchanged is terminal_state
+
+
+def test_terminal_commit_rejects_timestamp_before_admission() -> None:
+    state, accepted = _started_turn()
+
+    with pytest.raises(ValueError, match="cannot precede admission"):
+        complete_turn(
+            state,
+            CompleteTurnCommand(
+                request_id=accepted.receipt.request_id,
+                run_id=accepted.receipt.run_id,
+                turn_generation=accepted.receipt.turn_generation,
+                status=TurnTerminalStatus.FAILED,
+                terminal_at=NOW - timedelta(seconds=1),
+                error_code="provider_failure",
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "expected_reason",
+    [
+        "session_deleted",
+        "no_active_turn",
+        "stale_generation",
+        "identity_mismatch",
+    ],
+)
+def test_terminal_commit_rejects_nonactive_turns(expected_reason: str) -> None:
+    state, accepted = _started_turn()
+    command = CompleteTurnCommand(
+        request_id=accepted.receipt.request_id,
+        run_id=accepted.receipt.run_id,
+        turn_generation=accepted.receipt.turn_generation,
+        status=TurnTerminalStatus.FAILED,
+        terminal_at=NOW + timedelta(minutes=5),
+        error_code="provider_failure",
+    )
+    if expected_reason == "session_deleted":
+        state, _ = mark_session_deleted(
+            state,
+            DeleteSessionCommand(
+                idempotency_key="delete-key",
+                requested_at=NOW + timedelta(seconds=2),
+            ),
+        )
+    elif expected_reason == "no_active_turn":
+        state = _state()
+    elif expected_reason == "stale_generation":
+        command = command.model_copy(
+            update={"turn_generation": command.turn_generation + 1}
+        )
+    else:
+        command = command.model_copy(update={"request_id": "b" * 64})
+
+    unchanged, outcome = complete_turn(state, command)
+
+    assert isinstance(outcome, TerminalCommitRejected)
+    assert outcome.reason == expected_reason
+    assert unchanged is state
 
 
 def test_state_rejects_obsolete_active_generation() -> None:

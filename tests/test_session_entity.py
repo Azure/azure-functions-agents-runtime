@@ -73,8 +73,8 @@ def _creation(*, nonce: str = "nonce-1") -> SessionCreation:
     )
 
 
-def _entity_key() -> str:
-    creation = _creation()
+def _entity_key(creation: SessionCreation | None = None) -> str:
+    creation = creation or _creation()
     return derive_session_entity_key(
         backend_name=creation.backend_name,
         task_hub_name=creation.task_hub_name,
@@ -176,6 +176,27 @@ def test_create_persists_state_and_reconciles_to_original_incarnation() -> None:
     assert created.result["created"] is True
     assert reconciled.result == created.result | {"created": False}
     assert reconciled._state == created._state
+
+
+def test_create_rejects_conflicting_persisted_identity() -> None:
+    entity = _registered_entity()
+    created = _invoke(
+        entity,
+        operation=SessionAuthorityOperation.CREATE,
+        operation_input=_creation().model_dump(mode="json"),
+    )
+    conflicting_creation = _creation().model_copy(
+        update={"session_id": "different-session"}
+    )
+
+    with pytest.raises(SessionAuthorityEntityError, match="identity conflicts"):
+        _invoke(
+            entity,
+            operation=SessionAuthorityOperation.CREATE,
+            operation_input=conflicting_creation.model_dump(mode="json"),
+            state=created._state,
+            entity_key=_entity_key(conflicting_creation),
+        )
 
 
 def test_entity_dispatches_admission_and_terminal_transitions() -> None:
