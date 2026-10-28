@@ -302,6 +302,7 @@ def _validate_creation_identity(
         )
 
 
+# Documents the intended module exports; it does not prevent direct imports.
 __all__ = [
     "SESSION_AUTHORITY_ENTITY_NAME",
     "SessionAuthorityEntityError",
