@@ -1,8 +1,8 @@
 # Evaluate agent behavior with Vally
 
-> **Preview.** The executor requires Vally 0.16.0 or later. Dependency requirements permit newer
-> versions; the lockfile retains exact versions for reproducible builds. Vally is pre-1.0, so review
-> and rerun the compatibility gates before upgrading. Future breaking releases are not guaranteed compatible.
+> **Preview.** The executor requires Vally `>=0.16.0 <1.0.0`. Dependency requirements permit newer
+> minor and patch versions within the existing major version; the lockfile retains exact versions
+> for reproducible builds. Vally is pre-1.0, so review and rerun the compatibility gates before upgrading.
 
 [Vally](https://microsoft.github.io/vally/) evaluates an agent through its existing synchronous
 chat endpoint. Vally owns stimuli, graders, repeated trials, scores, reports, and CI verdicts. This

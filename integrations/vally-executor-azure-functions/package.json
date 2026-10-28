@@ -32,13 +32,13 @@
     "pack:check": "npm run build && npm pack --dry-run"
   },
   "dependencies": {
-    "@azure/identity": ">=4.13.3",
-    "@microsoft/vally": ">=0.16.0"
+    "@azure/identity": ">=4.13.3 <5.0.0",
+    "@microsoft/vally": ">=0.16.0 <1.0.0"
   },
   "devDependencies": {
-    "@microsoft/vally-cli": ">=0.16.0",
-    "@types/node": ">=24.13.4",
-    "prettier": ">=3.9.6",
-    "typescript": ">=5.9.3"
+    "@microsoft/vally-cli": ">=0.16.0 <1.0.0",
+    "@types/node": ">=24.13.4 <25.0.0",
+    "prettier": ">=3.9.6 <4.0.0",
+    "typescript": ">=5.9.3 <6.0.0"
   }
 }

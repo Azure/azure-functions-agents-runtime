@@ -152,8 +152,10 @@ A 2026-09-18 package and documentation spike established:
   failing-verdict exit code, and can emit JUnit.
 - Vally does not currently load executor plug-ins during standalone `vally lint`; executor-name and
   executor-config validation must therefore be tested through planning in `vally eval`.
-- Vally is pre-1.0. The package requires Vally and its CLI at `>=0.16.0`; all runtime and development
-  dependencies use minimum-version requirements. The lockfile retains exact resolved versions for
+- Vally is pre-1.0. The package requires Vally and its CLI at `>=0.16.0 <1.0.0`; all runtime and development
+  dependencies retain their current minimums and exclude the next major version. Newer minor and
+  patch versions within the existing major are allowed, including newer `0.x` minor releases.
+  The lockfile retains exact resolved versions for
   reproducible compiler and CLI smoke tests. Any upgrade requires re-running the compatibility suite
   and reviewing trajectory semantics; future breaking releases are not guaranteed compatible.
 
@@ -226,7 +228,7 @@ TypeScript, and exports:
 - `registerExecutors()`.
 
 The registered executor name is `azure-functions-hosted-skill`. Its Vally dependency and development CLI
-require `>=0.16.0`; its package metadata requires Node.js `>=22.12.0`. Publication naming and
+require `>=0.16.0 <1.0.0`; its package metadata requires Node.js `>=22.12.0`. Publication naming and
 semantic-version policy are deferred until the integration proves stable.
 
 A Vally eval selects it with opaque executor config:
@@ -396,6 +398,7 @@ document the Vally pivot.
 | 24 | Vally-first FRD approval | Request changes / approve finalized design | Approve and continue to implementation | Human | 2026-09-18 |
 | 25 | Endpoint transport security | Any HTTP(S) / HTTPS only / HTTPS with loopback HTTP | Require HTTPS except for loopback HTTP and reject redirects | Agent review | 2026-09-30 |
 | 26 | Dependency version requirements (supersedes #19) | Exact pins / bounded ranges / minimum versions | Current runtime and dev versions are minimums (`>=`); retain exact lockfile resolutions for reproducible checks | Human | 2026-10-27 |
+| 27 | Dependency major-version bounds (supersedes #26) | Unbounded minimums / same-major ranges / pre-1.0 caret ranges | Retain minimums and exclude the next major for all runtime and dev dependencies; allow newer `0.x` minor releases for Vally | Human | 2026-10-28 |
 
 ## 7. Test plan
 

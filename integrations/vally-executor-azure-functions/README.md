@@ -22,10 +22,10 @@ npm run test:cli
 ```
 
 `test:cli` runs positive and negative `--require-pass` evaluations against a temporary local HTTP
-server. Runtime and development dependencies use minimum-version (`>=`) requirements. Vally and its
-CLI require 0.16.0 or later. The lockfile retains exact versions for reproducible repository builds;
-review compatibility and rerun these checks when upgrading. Newer breaking releases are not
-guaranteed compatible.
+server. Runtime and development dependencies allow newer minor and patch versions within the
+existing major version, retaining their current minimums. Vally and its CLI use `>=0.16.0 <1.0.0`,
+including newer `0.x` minor releases. The lockfile retains exact versions for reproducible repository
+builds; review compatibility and rerun these checks when upgrading, especially for pre-1.0 releases.
 
 ## Configure
 
