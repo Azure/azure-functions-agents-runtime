@@ -27,6 +27,32 @@ existing major version, retaining their current minimums. Vally and its CLI use 
 including newer `0.x` minor releases. The lockfile retains exact versions for reproducible repository
 builds; review compatibility and rerun these checks when upgrading, especially for pre-1.0 releases.
 
+### Security overrides
+
+Azure Identity currently depends on MSAL Node 6, which is affected by
+[GHSA-xcx6-jx8p-x3h5](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5).
+The repository overrides that dependency to `>=7.1.0 <8.0.0`, the patched major, rather than
+downgrading Azure Identity below its declared minimum. Remove the override when Azure Identity
+adopts a patched MSAL dependency.
+
+npm only applies overrides from the root project; this override does not propagate when the
+evaluator is installed as a dependency. Until Azure Identity updates its MSAL requirement,
+consuming npm projects must add the following to their root package manifest and refresh their
+lockfile:
+
+```json
+{
+  "overrides": {
+    "@azure/identity": {
+      "@azure/msal-node": ">=7.1.0 <8.0.0"
+    }
+  }
+}
+```
+
+Run the authentication and evaluation checks after applying it. The lockfile also includes patched
+Zod and Hono versions; downstream projects should refresh their own lockfiles and run `npm audit`.
+
 ## Configure
 
 The registered executor name is `azure-functions-hosted-skill`:
