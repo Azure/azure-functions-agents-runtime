@@ -1,9 +1,7 @@
 # One function. Two entry points. Shared Rust runtime.
 
-**Working local prototype:** an existing C# HTTP function also serves as an
-agent tool, without a second business implementation or app-authored adapter.
-Inference uses deterministic MOCK by default and can attempt configured Foundry
-inference; live service validation is separate from the mock evidence below.
+**One C# function, two entry points:** HTTP and the agent call the same handler.
+The demo uses mock inference by default and supports configured Foundry.
 
 ## What we built
 
@@ -20,12 +18,9 @@ flowchart LR
 
 ## What happens on a HostedSkill run?
 
-**The worker does not start a new Rust process for each request.** When a .NET
-Functions worker starts, its `RuntimeService` starts one Rust `fhs-runtime`
-subprocess and keeps it for that worker's lifetime. Startup sends one
-`initialize` message: Rust reads the copied agent configuration and skill files,
-resolves inference mode, and receives the C# tool descriptors. Agent/tool
-metadata is not reparsed for every request.
+Each .NET worker starts one reusable Rust process. At startup, Rust loads the
+agent, skills, and C# tool descriptors; each request then runs through that
+initialized runtime.
 
 ```mermaid
 sequenceDiagram
@@ -66,45 +61,15 @@ sequenceDiagram
     Host-->>Caller: HTTP response
 ```
 
-In the diagram, JSON-RPC requests and their responses share the same
-bidirectional JSON-lines **stdin/stdout pipes**; `tool.call` is a reverse
-request while the original `agent.run` is still in progress. The C# RPC
-reader stays active and dispatches that callback, then writes its correlated
-response so Rust can continue its model/tool loop.
-
-For `calculate_shipping_http`, the callback calls `ShippingQuoteAsync` directly
-inside the same .NET worker with synthetic HTTP request/response objects. It
-does not loop back through the Functions host. The resulting HTTP
-`status_code` and text `body` are tool output; the Rust agent run completes
-after the model receives that output. Finally, the Rust `agent.run` response
-becomes `AgentRunResult`, the HTTP function adds session inspection data, and
-the Functions host returns the outer HTTP response.
-
-Each scaled-out .NET worker process owns its own Rust subprocess. Within one
-worker, agent runs are serialized to protect session files. A worker restart
-starts a new Rust process; persisted session data lets a later run resume the
-conversation.
-
-| Building block | Demonstrated value |
-| --- | --- |
-| **Rust runtime** | Common agent orchestration and persistence live behind a language-neutral stdio protocol; C# retains its application logic. |
-| **`[AgentTool]` attribute** | Mark the existing function handler as a tool and declare its input DTO. No separately authored shipping-tool adapter. |
-| **Two entry points** | A real HTTP request and an agent-tool callback reach the same shipping method. |
-| **Persistent sessions** | Conversations resume across turns and a complete host, worker, and Rust-process restart. |
+JSON-RPC runs over shared bidirectional **stdin/stdout** pipes. Rust can call a
+C# tool mid-run; C# invokes the handler in the same worker and returns its
+status and body. Sessions persist across worker restarts.
 
 ## Why Rust for the shared runtime?
 
-The goal is to keep agent orchestration in **one language-neutral runtime**
-instead of reimplementing it separately for every Functions language worker.
-Rust can run as a managed subprocess; a Node.js, Python, C#, or other worker
-could communicate with it through the same bidirectional JSON-lines stdio
-protocol. Each worker keeps its own language-native functions and tools, while
-the shared runtime owns common agent execution, skill discovery, and session
-handling.
-
-The GitHub Copilot SDK also has a Rust implementation, which could be evaluated
-as another way to connect the runtime to Copilot. This spike uses its current
-provider path; it does not integrate the Copilot SDK.
+One Rust runtime can provide shared orchestration to language workers over
+JSON-RPC/stdio, while each worker keeps its own functions and tools. This demo
+exercises .NET; Node.js and Python adapters are future work.
 
 ```text
 Node.js worker ─┐
@@ -112,27 +77,16 @@ Python worker ──┼── same JSON-RPC-over-stdio contract ──> Rust age
 C# worker ──────┘
 ```
 
-This boundary can make runtime behavior more consistent across languages and
-lets the protocol be tested independently of a specific worker. For the sample,
-the Rust-to-C# `tool.call` is a concrete example: Rust asks for a tool by name
-and JSON arguments; the C# worker invokes its own handler and returns a result
-over the same pipes.
+The GitHub Copilot SDK has a Rust implementation that could be evaluated for
+provider integration.
 
-**This is an architectural benefit the protocol is designed to enable, not a
-claim that every language integration exists today.** This spike currently
-demonstrates the Rust runtime with a .NET isolated worker. Node.js, Python, and
-other language workers have not been implemented or validated here.
-
-> **Nit:** Go is another option worth evaluating. Before choosing it, compare
-> runtime size and performance, SDK and ecosystem support, cross-platform
-> distribution, implementation effort, and operational fit in more detail.
+> **Also evaluate Go:** compare performance, distribution, ecosystem, and
+> implementation effort before selecting the long-term runtime language.
 
 ## What it takes to productionize this approach
 
-The spike validates a **Rust runtime + one C# worker** locally. Making it a
-supported multi-language capability takes investment in the runtime package,
-one adapter per language worker, and the operations and compatibility contract
-around them.
+Productionizing the **Rust runtime + C# worker** means packaging the runtime,
+adding language adapters, and defining shared compatibility and operations.
 
 ```mermaid
 flowchart LR
@@ -149,44 +103,33 @@ flowchart LR
 
 | Investment area | What needs to be built or decided |
 | --- | --- |
-| **Runtime distribution** | Build and publish versioned Rust binaries for each supported OS/CPU; include the compatible runtime dependencies; package them into the worker image or deployment artifact; define updates, rollback, and software-supply-chain scanning. |
-| **Language adapters** | Implement and support a Node.js, Python, and C# wrapper for process startup, stdio framing, initialization, tool registration/callbacks, result mapping, cancellation, and shutdown. The spike contains only the C# adapter. |
-| **Stable protocol** | Version and document JSON-RPC messages, schemas, errors, streaming, compatibility, and capability negotiation so independent adapters can interoperate with runtime upgrades. |
-| **Functions behavior contract** | Define which triggers and handler signatures can be exposed as tools in each language, what execution bypasses, how authorization is enforced, and how HTTP/binding results map to agent-visible outcomes. Current direct-function adaptation covers only a bounded C# HTTP shape. |
-| **Shared conformance tests** | Create language-neutral protocol fixtures and adapter conformance tests; add CI for each language, real-host integration, cancellation/crash behavior, and session persistence across restart and scale-out. |
-| **Security and identity** | Set the trust boundary for prompts, tool arguments, skills, local files, and subprocess access; establish supported credential flows, least privilege, secret handling, and authorization policy for tool calls. |
-| **Persistence and scale** | Select supported storage backends and identity mechanisms; define concurrent-session behavior, worker scaling, locking, retention, recovery, and cost expectations. Current sample serializes runs per worker and has incomplete production Blob identity support. |
-| **Operations and support** | Add structured cross-process telemetry, health/readiness and diagnostics, timeouts/resource limits, failure policy, version inventory, incident ownership, and a documented support matrix. |
+| Investment | Production work |
+| --- | --- |
+| **Runtime + adapters** | Versioned binaries, packaging, and a thin process/tool adapter per language. |
+| **Protocol + Functions** | Versioned messages, compatibility, trigger coverage, authorization, and result mapping. |
+| **Quality + security** | Cross-language conformance tests, CI, identity, least privilege, and secret handling. |
+| **Scale + operations** | Shared persistence, concurrency, telemetry, health, upgrades, and support ownership. |
 
-The main leverage is that **agent orchestration and protocol behavior can be
-implemented once**, while each language adapter stays relatively thin and
-language-native. That is a design goal, not a measured cost saving yet: adapter
-work and ongoing compatibility testing still scale with each supported worker.
-The prototype has not established production readiness or estimated delivery
-effort; packaging, protocol guarantees, supported language/trigger scope, and
-operational requirements need to be agreed before sizing a rollout.
+The opportunity: implement orchestration once and keep language adapters
+focused. A rollout estimate needs agreed language/trigger scope and support
+requirements.
 
-## Small authoring change
+## Authoring
 
 ```csharp
 [Function("ShippingQuote")]
 [AgentTool("calculate_shipping_http", "Calculate shipping.",
     InputType = typeof(ShippingRequest))]
-public Task<HttpResponseData> ShippingQuoteAsync(
-    [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "shipping/quote")]
-    HttpRequestData request,
-    CancellationToken cancellationToken = default)
+public Task<HttpResponseData> ShippingQuoteAsync(...)
 ```
 
-Register the function type once:
-`registry.RegisterFunctions<ShippingFunctions>(provider)`.
-The runtime generates the tool schema from the DTO and invokes the handler in a
-fresh dependency-injection scope.
+Register the function type once. The runtime generates the tool schema from
+the DTO and invokes the same handler.
 
 ## Evidence: same handler, both paths
 
-**Fresh local verification: October 27, 2026**, using a real `func host start`,
-.NET 10 isolated worker, and Rust subprocess.
+**Local verification (Oct 27–28, 2026):** real Functions host, .NET 10 worker,
+Rust process, local and Azurite storage.
 
 | Scenario | HTTP entry | Agent-tool entry |
 | --- | --- | --- |
@@ -194,36 +137,15 @@ fresh dependency-injection scope.
 | Empty ZIP | **400** · validation error | **400** envelope · same handler error |
 | Execution evidence | `http-trigger` | `stdio-function-handler` |
 
-```text
-PASS  Real Functions trigger indexing and HTTP requests
-PASS  Rust → C# callbacks for order lookup and shipping
-PASS  HTTP status + text-body tool results, including errors
-PASS  Second conversation turn and third turn after full restart
-PASS  All 22 C# lifecycle / validation / adapter check groups
-```
+**22 C# checks and 20 Rust tests passed.** HTTP and tool paths returned matching
+success and validation-error results; sessions resumed after restart.
 
-On October 28, 22 C# checks and 20 Rust tests passed. Mode-selection tests
-confirmed mock-by-default behavior, Foundry-intent detection, and reporting the
-initialized mode to the C# host. Local and Azurite HTTP smoke runs also passed
-with explicit MOCK selection. The live service path was not exercised.
+## What the demo demonstrates
 
-Fresh logs, responses, and `summary.json` are retained locally under
-`.tools/leadership-validation-20261027-1912/` (ignored, not committed).
-Earlier verification also passed the real-host scenario with Azurite storage.
+The agent callback invokes the registered C# HTTP handler in-process with
+synthetic request/response objects; external HTTP uses the real Functions host.
+Configured Foundry support is implemented; live authentication and inference
+are the next validation step.
 
-## Scope, not a production claim
-
-**Real host, real worker, real Rust process; deterministic mock inference
-verified.** Configured Foundry inference is available, but this evidence does
-not validate live authentication, model invocation, or a live model's tool
-selection. The order/shipping data are fixed sample values.
-
-Agent callbacks invoke the handler directly; they **do not** run Functions
-middleware, HTTP ingress authorization, or binding orchestration.
-Support is limited to the documented HTTP request/response signatures.
-The prototype demonstrates the C# integration, not proven support for other
-languages, arbitrary triggers, or production deployment packaging.
-
-**Reproduce:** from this directory, run `python3 smoke_host.py --storage local`
-after activating the prerequisites. See the [technical README](README.md) for
-setup, manual HTTP requests, the error scenario, and limitations.
+**Run:** `python3 smoke_host.py --storage local` after setup. See the
+[technical README](README.md) for prerequisites and Foundry configuration.
