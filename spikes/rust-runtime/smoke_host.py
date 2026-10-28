@@ -154,6 +154,13 @@ def run_logged(command, cwd, env, log, log_path, timeout):
             file=sys.stderr,
         )
         raise
+    except OSError as error:
+        print(
+            f"\nCould not start build command ({command!r}): {error}\n"
+            "Ensure the required build tool is installed and on PATH.",
+            file=sys.stderr,
+        )
+        raise
 
 
 def main():
