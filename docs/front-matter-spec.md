@@ -173,8 +173,11 @@ The injected parameter is runtime-managed and hidden from Azure Functions
 binding discovery. Each Function invocation receives a fresh lightweight
 facade; model clients, agents, MCP resources, sandbox closures, and sessions
 are created only when `skill.run()` or `skill.stream()` is called. Supply a
-valid `session_id` to continue a conversation, or omit it to receive a new
-public session ID in the result/events.
+valid `session_id` to open or continue that conversation identity, or omit it
+to receive a new public session ID in the result/events. A supplied ID with no
+persisted state starts a conversation under that ID; existing state continues.
+Storage and native session errors propagate without replacement creation or
+state reset.
 
 The handler must be a plain `async def`, the HostedSkill decorator must be
 immediately above the handler and below its Azure Functions trigger decorator,
@@ -304,9 +307,9 @@ bounds only the message context sent to the model. Specialist runs remain fresh,
 executions with no nested delegation or persistent history.
 
 On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), the runtime also uses
-the SDK's native compaction defaults. Configured `max_output_tokens` is rejected on that path; the
-underlying Copilot SDK/provider surface has similarly named token-budget fields, but this bounded
-internal preview does not map or expose them as a supported authoring contract.
+the SDK's native compaction defaults. Configured `max_output_tokens` is passed through on that
+path as the Copilot provider's per-request native output-token cap. The runtime does not add a
+second host-owned truncation layer; the selected SDK/provider remains authoritative for enforcement.
 
 Session storage is not an `agent_configuration` or front-matter setting.
 The selected harness uses the existing `AzureWebJobsStorage` connection string

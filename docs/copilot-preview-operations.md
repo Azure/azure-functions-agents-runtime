@@ -16,7 +16,9 @@ Offline filesystem checks establish adapter behavior, not real-service
 authentication, SDK continuation or Functions hosting. Earlier Blob
 continuation and compaction runs exercised a different persistence
 implementation and do **not** qualify this thin filesystem adapter.
-Deployed-host and multi-worker behavior remain unqualified.
+Functions-host packaging, startup, provider auth, storage selection and
+restart behavior, and overlapping same-session behavior across workers or
+instances remain unqualified.
 
 Actual Linux native skill-helper execution and SDK managed-settings/approval
 scenarios remain unqualified. Earlier Windows mechanics checks are not Linux or
@@ -34,7 +36,7 @@ default per resolved app root.
 | Value | Result |
 | --- | --- |
 | Unset, `false`, `0` | MAF (default). No Copilot SDK import, native process, download, auth or telemetry. |
-| `true`, `1` | Internal Copilot preview for local qualification of every role served by that app. |
+| `true`, `1` | Internal Copilot preview for qualification of every role served by that app. |
 | Present but empty, whitespace-only, or any other text | Explicit configuration error; the app does not start. |
 
 Values are trimmed and case-insensitive. Changing the variable does **not**
@@ -50,8 +52,9 @@ shared configuration does not initialize or probe the other implementation.
 Runtime-owned telemetry keeps the same invocation surface under either
 harness. Direct, streaming, built-in chat, inbound MCP, non-HTTP, delegate, and
 leaf runtime spans use `agent.run {slug}` plus the shared `af.agent.*`
-attributes and `af.agent.harness=maf|copilot`. Copilot adds observed tool spans
-and usage events without changing the runtime-owned surface.
+attributes and `af.agent.harness=maf|copilot`. Copilot adds one semantic execution
+child span plus observed tool spans and usage events without changing that outer
+surface or MAF's framework-owned instrumentation.
 
 ## Authored Python tools
 
@@ -62,9 +65,9 @@ filters, authentication, and input schemas still apply.
 ## MCP and scoped skills
 
 These are outbound capabilities of the existing direct, non-streaming HTTP
-preview, not new triggers or endpoint support. Keep the local, single-worker
-hosting limit and the same `SessionFs`, lock, and create/resume/disconnect
-lifecycle. The checked-in sample does not require MCP credentials or skills.
+preview, not new triggers or endpoint support. Keep the same `SessionFs`,
+lock, and create/resume/disconnect lifecycle. The checked-in sample does not
+require MCP credentials or skills.
 
 ### MCP configuration and auth
 
@@ -164,6 +167,7 @@ network or configuration failures surface as errors, never a local fallback.
 | `AzureWebJobsStorage__clientId` / `AZURE_CLIENT_ID` | Optional managed-identity client ID for storage; the storage-specific `clientId` takes precedence. |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER` | Blob container name; defaults to `azure-functions-agents` (the same container the MAF history provider uses, in a disjoint prefix). |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Existing local root override; defaults to `~/.azure-functions-agents`. Determines the local SDK workspace even with Blob persistence, and the native file storage root when no Blob setting is configured. Keep it stable when resuming SDK sessions. |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` / `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional native Copilot reasoning settings captured once per app. Valid effort values are `low`, `medium`, `high`, `xhigh`, `max`; valid summary values are `none`, `concise`, `detailed`. Invalid values emit a warning and are omitted so the native SDK/provider default applies. |
 
 Storage configuration is captured per app. Restart the host after changing
 captured settings, and check both process variables and `local.settings.json`
@@ -218,9 +222,20 @@ These file operations are not a whole-session transaction.
 Turns for the same `(agent, session)` are serialized within one Python
 process, with bounded waiting. Independent sessions remain concurrent.
 Supported Azure Functions invocations in that process share the worker event
-loop while reusing the same app-owned runtime and native client. Cross-worker
-overlap is unsupported and caller-owned, as on the MAF path; Blob storage
-alone does not coordinate turns across workers.
+loop while reusing the same app-owned runtime and native client. There is no
+distributed lock across workers or scaled-out instances. Sequential requests
+can resume on another worker only when both see the same persisted namespace:
+Blob when configured, or a genuinely shared local filesystem if one exists.
+Configured Blob failures still error rather than falling back to local files.
+If overlapping same-session requests land on different workers, each can read
+prior state before the other writes. On the MAF path, append-blob transcript
+entries may arrive in either order. On the Copilot path, opaque multi-file
+SessionFs updates can lose updates or leave a mixed-file combination because
+the adapter performs overwrite, read-modify-write append, and copy/delete
+rename operations. The runtime does not guarantee corruption on every race,
+but it also does not provide exactly-once coordination or magical host-side
+recovery for these overlaps. Native SDK/provider formats, compaction, and
+recovery remain native responsibilities.
 
 ## Runtime lifetime and shutdown
 
@@ -241,33 +256,63 @@ that every host termination awaits that async shutdown path.
 
 ## Telemetry addendum
 
+The semantic execution boundary follows
+[FRD 0009 §4.10](frds/0009-copilot-sdk-harness.md#410-runtime-owned-genai-invocation-amendment).
+
 Copilot telemetry reuses the active turn's existing public session-event
-subscription, the current OpenTelemetry provider, and the custom-tool wrapper.
-It adds no new telemetry settings and leaves MAF behavior unchanged.
+subscription and custom-tool wrapper, with the existing tracer, provider,
+resource, sampling policy, processors, and exporter. It remains no-op when
+observability is inactive and leaves MAF's framework-owned instrumentation unchanged.
+There is no native file bridge, OTLP receiver, new dependency, telemetry setting,
+or native telemetry opt-in; native session-telemetry policy is unchanged.
+
+Each actual Copilot execution has exactly one
+`invoke_agent {readable-agent-name}` semantic span beneath the unchanged neutral
+`agent.run {slug}` outer span. It has `gen_ai.operation.name=invoke_agent` and
+kind `INTERNAL`. It starts after resolved request identity, before native
+session acquisition, and continues through adapter cleanup. Its duration includes
+setup and cleanup, not just model inference. Direct runner calls without an outer
+runtime span still emit this span under available caller context, without inventing
+ingress or mutating an unrelated caller span.
+
+`gen_ai.agent.id` and `gen_ai.agent.name` reuse the existing stable ID and
+app-qualified readable name. `gen_ai.conversation.id` is the resolved public
+session ID, never a native storage/session identifier; `gen_ai.request.model`
+is the configured model when known. Provider fields require proven provider
+semantics, not a harness label or a legacy Azure compatibility assumption.
+Unavailable values are omitted.
 
 Each unique public `ASSISTANT_USAGE` event is recorded as a custom
-`af.agent.model.usage` span event on the owning runtime invocation span.
+`af.agent.model.usage` span event on the owning runtime invocation span, or on
+the semantic span when no runtime span exists. Name-only skill observations
+follow the same rule; runtime summaries and lifecycle events remain outer.
 It uses standard `gen_ai.usage.*` fields where reported semantics match
 exactly; reported duration, TTFT, and inter-token measures remain custom
 `af.agent.usage.*` values. The existing once-only eight-field invocation totals
-stay unchanged.
+stay unchanged, as do deduplication, public results, and accounting. Token totals
+on the semantic invocation are recommended optional enrichment, not a semantic
+discovery or compatibility prerequisite, and are explicitly deferred. Missing
+usage and recursive child totals are not inferred.
 
 Completion records, including completion-only records, continue to contribute
 to `AgentResult` and aggregate tool counts. A timed telemetry span requires a
 coherent call-ID/timestamp-matched `tool.execution_start` /
 `tool.execution_complete` pair. Custom tools restore captured host context
 before invocation, and the wrapper owns each wrapped call ID so one wrapped
-call is counted once. This preserves the host's nested coordinator invocation
--> `execute_tool delegate_<slug>` -> child invocation trace shape for delegates
-while leaving coordinator-visible SSE limited to the delegate tool boundary and
-final child text.
+call is counted once. Both custom-wrapper and event-derived native tool spans
+explicitly use the captured semantic invocation parent, rather than incidental
+native callback context. This preserves the host's nested coordinator semantic invocation
+-> `execute_tool delegate_<slug>` -> specialist execution (including its outer
+runtime span where present and semantic invocation) trace shape for delegates,
+with isolated contexts for concurrent agents. Coordinator-visible SSE remains
+limited to the delegate tool boundary and final child text.
 
 | Source | Expectation |
 | --- | --- |
 | Direct HTTP and built-in chat UI turns | Use the same turn-scoped runtime invocation span, tool accounting, and usage observations. |
 | `/chatstream` SSE | Mirrors translated callbacks for the current turn only; it is not evidence of full native child-span hierarchy. |
 | Delegates | Preserve the nested host trace shape above; native specialist session events do not appear as a second coordinator stream. |
-| Workflow Sub Agent leaves | Each leaf is observed as its own invocation span; model/duration appear only when reported by the SDK. |
+| Workflow Sub Agent leaves | Each leaf has its own semantic execution span including setup/cleanup; its configured model is attached when known. Inference timing is not fabricated. |
 | Non-HTTP triggers, inbound MCP, and Debug UI continuation | Follow the same turn-scoped rules when routed through the shared runner, but remain offline-only expectations rather than live host/Application Insights qualification. |
 
 `ENABLE_SENSITIVE_DATA` may enable prompt/request and response capture, but
@@ -281,6 +326,13 @@ cancellation, or SSE termination.
 Caught Python exception messages and stack traces are recorded regardless of
 `ENABLE_SENSITIVE_DATA`, matching MAF behavior; application exception text
 may contain sensitive data.
+
+Actual invocation errors receive error status, `error.type`, and existing
+fault-domain/exception diagnostics. Recovered tool errors do not fail a successful
+invocation; cancellation is a distinct nonfailure outcome. Original errors remain
+authoritative over cleanup errors. This adds no fabricated inference spans/latency,
+standard model metrics, cost, or complete native hierarchy. Agent-level telemetry
+does not establish portal parity or live Azure/Application Insights verification.
 
 ## Inspecting a session
 
@@ -304,6 +356,15 @@ az storage blob show --account-name "<account>" --container-name "<container>" `
 Native files may contain conversation content or tool output. Do not publish
 their contents in diagnostics or hand-edit them; the SDK owns their format.
 
+Every caller-supplied primary session ID uses open-or-create, including HTTP,
+inbound MCP, direct runner API, and HostedSkill calls. This is the same
+surface-neutral continuity behavior as MAF. After the Copilot session namespace
+opens, an empty root or only an empty, correctly typed `/workspace` directory
+is treated as host scaffolding and creates the requested native session. Any
+other entry, including a zero-byte file, empty native directory, or nonempty
+workspace, selects SDK resume. The host reads entry names and types only; it
+does not parse native filenames or contents.
+
 ## Error behavior
 
 Missing files, existing destinations, wrong entry types, nonempty directory
@@ -317,7 +378,9 @@ Configured Blob auth, network and configuration failures are errors, not
 reasons to change backend or switch to MAF. Session and provider failures
 surface through the runtime's existing error responses, without prompts,
 tool payloads, file contents or credentials in diagnostics. Resume and format
-compatibility decisions belong to the SDK, not a host lifecycle/error table.
+compatibility decisions belong to the SDK. State-classification failures never
+authorize create, and a failed resume never triggers create, deletion, reset,
+or repair.
 
 ## Retention and targeted cleanup
 
@@ -338,8 +401,10 @@ Native compaction is enabled with the SDK's own defaults; the host adds no
 summarizer, no second compacted-context format and no token-threshold mapping.
 Legacy `agent_configuration.agent_framework.compaction.max_context_window_tokens`
 configuration emits a warning and is ignored; MAF and Copilot each use their
-native defaults. The portable `max_output_tokens` cap remains rejected in this
-preview.
+native defaults. On the Copilot path, `agent_configuration.max_output_tokens`
+maps to the request-local native `ProviderConfig.max_output_tokens` override.
+The host does not add a second truncation layer or mutate the shared app-level
+provider configuration.
 
 All compaction artifacts are persisted as opaque SDK files. Filesystem tests
 alone do not prove native compaction or session restoration, and the host adds
@@ -360,16 +425,6 @@ Use isolated local settings or offline fixtures, not a customer's storage:
 
 ## Known limits
 
-- The preview requires a local host and a single Functions worker. An app
-  with the flag on fails to start when
-  `FUNCTIONS_WORKER_PROCESS_COUNT` is set to anything other than `1`, or when
-  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. Rejecting those
-  pre-existing Azure Functions platform settings is this runtime's bounded
-  preview qualification policy, not a Copilot SDK or Functions platform limit.
-  Both rejections are
-  `UnsupportedCapabilityError`s raised before any native process, download or
-  provider call. They stay until deployed-host and multi-worker qualification
-  lands (issues #1357 and #1337).
 - History projection remains unsupported on the Copilot path. Native session
   files are never projected into MAF history.
 - The inbound built-in MCP tool (`builtin_endpoints.mcp: true`) is enabled
@@ -377,8 +432,9 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   the agent's session ID, and normalizes the extension-owned transport
   `sessionid` (also accepting the existing `sessionId` spelling) for native
   continuation. This is not a public tool argument for choosing an agent
-  session. A transport ID requests native resume; if no matching native
-  session exists, the error is returned without retry-as-create. Omitted
+  session. A transport ID creates with that ID only when typed storage listings
+  confirm no state beyond empty host scaffolding; otherwise it requests strict
+  native resume. A failed resume is returned without retry-as-create. Omitted
   transport IDs create fresh sessions.
   The Functions MCP extension owns `/runtime/webhooks/mcp` and its system-key
   authentication (`x-functions-key`); `builtin_endpoints.http_auth` controls
@@ -399,8 +455,12 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   extension that prevents host indexing is a setup/integration failure,
   not something the runtime must recover from.
 - HTTP streaming, declared delegates, Workflow Sub Agents, and workflow management
-  are supported by the local adapter. Leaf state is isolated locally and deleted;
-  it does not use the primary persistent storage route. These adapter tests do
+  are supported by the adapter. Leaf state is isolated locally and deleted; it
+  does not use the primary persistent storage route. These adapter tests do
   not qualify hosted execution or real-provider/service parity.
-- Same-session serialization is process-local only. Callers must avoid
-  cross-worker overlap; SDK recovery does not provide exactly-once tool effects.
+- Same-session serialization is process-local only. Sequential cross-worker
+  resume depends on a consistent accessible backend namespace and never on
+  request affinity. Overlap across workers or instances can observe stale
+  state, commit in nondeterministic order, lose Copilot file updates, or leave
+  mixed SessionFs state; the runtime does not promise exactly-once tool
+  effects or host-managed recovery for those races.

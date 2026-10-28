@@ -31,6 +31,7 @@ from azure_functions_agents.streaming_events import (
     HostedSkillEvent,
     HostedSkillEventKind,
 )
+from tests.test_copilot_execution import invocation_spans as invocation_spans
 
 
 class _CapturedSpan:
@@ -198,6 +199,36 @@ async def test_run_records_hosted_skill_span_and_result_attributes(
     assert span.attributes["af.agent.tool_call_count"] == 1
     assert span.attributes["af.agent.response_bytes"] == len("complete")
     assert span.attributes["af.agent.outcome"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_copilot_run_explicitly_owns_observations(
+    monkeypatch, tmp_path, invocation_spans,
+) -> None:
+    from azure_functions_agents.harness._harness_binding import HarnessRequest
+    from azure_functions_agents.harness.copilot_sdk._copilot_observability import invocation_span
+
+    _, exporter = invocation_spans
+    skill, _ = _make_skill(tmp_path, harness_kind=HarnessKind.COPILOT)
+
+    async def run_agent(_prompt: str, **kwargs: Any) -> AgentResult:
+        request = HarnessRequest(
+            prompt=_prompt, instructions=None, agent_slug=kwargs["agent_name"],
+            session_id=kwargs["session_id"], new_session=True, model=kwargs["model"],
+            tools=(), max_output_tokens=None, deadline=1,
+        )
+        with invocation_span(request) as observations:
+            observations.add_event("af.agent.model.usage", {"gen_ai.usage.output_tokens": 3})
+        return AgentResult(session_id=request.session_id, content="\u00e9")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+    await skill.run("hello")
+
+    semantic, outer = exporter.get_finished_spans()
+    assert semantic.parent.span_id == outer.context.span_id
+    assert semantic.events == ()
+    assert [event.name for event in outer.events] == ["af.agent.model.usage"]
+    assert outer.attributes["af.agent.response_bytes"] == 2
 
 
 @pytest.mark.asyncio

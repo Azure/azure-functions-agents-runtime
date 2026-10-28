@@ -150,5 +150,5 @@ See the [hybrid HostedSkill sample](../samples/hybrid-hosted-skill/).
 - [Front matter reference](front-matter-reference.md) — auto-generated, plain field-by-field reference (handy for quick lookups)
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Architecture](architecture.md) — how the runtime discovers, translates, and registers agents
-- [Copilot preview operations](copilot-preview-operations.md) — separate default-off, local-only preview; this quickstart uses MAF and its existing history provider
+- [Copilot preview operations](copilot-preview-operations.md) — separate default-off preview; this quickstart uses MAF and its existing history provider
 - The repository [README](https://github.com/Azure/azure-functions-agents-runtime#readme) also covers custom Python tools, built-in endpoint routes, and multi-agent delegation in more depth

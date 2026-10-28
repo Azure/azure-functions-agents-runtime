@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import json
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
+from contextlib import contextmanager
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ._observability import LifecycleStage, RuntimeSpan, start_span
+from ._observability import (
+    ATTR_AGENT_RESPONSE,
+    ATTR_AGENT_RESPONSE_BYTES,
+    ATTR_AGENT_TOOL_CALL_COUNT,
+    ATTR_AGENT_TOOL_ERROR_COUNT,
+    LifecycleStage,
+    RuntimeSpan,
+    agent_run_attributes,
+    agent_run_span_name,
+    bind_agent_run_span,
+    start_span,
+)
+
+if TYPE_CHECKING:
+    from .runner import AgentResult
 
 
 class AgentExecutionSurface(StrEnum):
@@ -18,6 +33,7 @@ class AgentExecutionSurface(StrEnum):
     HOSTED_SKILL_BINDING = "hosted_skill_binding"
 
 
+@contextmanager
 def start_agent_run_span(
     agent_name: str,
     *,
@@ -26,20 +42,23 @@ def start_agent_run_span(
     trigger_type: str | None = None,
     execution_surface: AgentExecutionSurface | None = None,
     session_id: str | None = None,
-) -> AbstractContextManager[RuntimeSpan]:
+) -> Iterator[RuntimeSpan]:
     """Start a run-level span with the shared agent identity attributes."""
-    return start_span(
-        f"agent.run {agent_name}",
+    with start_span(
+        agent_run_span_name(agent_name=agent_name),
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes={
-            "af.agent.name": agent_name,
-            "af.agent.display_name": display_name,
-            "af.agent.trigger_type": trigger_type,
+            **agent_run_attributes(
+                agent_name=agent_name,
+                display_name=display_name,
+                trigger_type=trigger_type,
+                session_id=session_id,
+                model=model,
+            ),
             "af.agent.execution_surface": execution_surface,
-            "af.agent.session_id": session_id,
-            "af.agent.model": model,
         },
-    )
+    ) as span, bind_agent_run_span(span):
+        yield span
 
 
 def _looks_like_tool_error(result: Any) -> bool:
@@ -71,11 +90,14 @@ def _total_tool_error_count(result: Any) -> int:
     return _tool_error_count(tool_calls) + delegate_error_count
 
 
-def _set_run_result_attributes(span: Any, result: Any) -> None:
+def _set_run_summary_attributes(span: RuntimeSpan, result: AgentResult) -> None:
+    """Attach content-free run-summary attributes."""
+    span.set_attribute(ATTR_AGENT_TOOL_CALL_COUNT, len(result.tool_calls))
+    span.set_attribute(ATTR_AGENT_TOOL_ERROR_COUNT, _total_tool_error_count(result))
+    span.set_attribute(ATTR_AGENT_RESPONSE_BYTES, len(result.content.encode("utf-8")))
+
+
+def _set_run_result_attributes(span: RuntimeSpan, result: AgentResult) -> None:
     """Attach non-sensitive run-summary attributes; content only when opted in."""
-    tool_calls = list(getattr(result, "tool_calls", None) or [])
-    content = str(getattr(result, "content", "") or "")
-    span.set_attribute("af.agent.tool_call_count", len(tool_calls))
-    span.set_attribute("af.agent.tool_error_count", _total_tool_error_count(result))
-    span.set_attribute("af.agent.response_bytes", len(content))
-    span.set_content("af.agent.response", content)
+    _set_run_summary_attributes(span, result)
+    span.set_content(ATTR_AGENT_RESPONSE, result.content)

@@ -28,7 +28,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness import _harness_execution, _harness_lifecycle
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runner
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from azure_functions_agents.registration.capabilities import (
     AgentCapabilities,
     with_runtime_skill_paths,
@@ -37,7 +37,8 @@ from azure_functions_agents.registration.catalog import CatalogEntry, build_cata
 from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
 from tests._harness_helpers import copilot_state, make_copilot_harness
-from tests.test_copilot_execution import _fake_client, _request
+from tests.test_copilot_execution import _fake_client, _request, _seed_session_state
+from tests.test_copilot_execution import invocation_spans as invocation_spans
 from tests.test_copilot_execution import preview as preview
 
 
@@ -67,6 +68,108 @@ def _exception_event(span, *, message: str):
     assert event.attributes["exception.message"] == message
     assert message in event.attributes["exception.stacktrace"]
     return event
+
+
+@pytest.mark.asyncio
+async def test_direct_invocation_summary_includes_recovered_delegate_errors(
+    preview, native, monkeypatch, invocation_spans,
+):
+    from copilot.tools import ToolInvocation
+
+    from azure_functions_agents._agent_run_diagnostics import _total_tool_error_count
+
+    _, exporter = invocation_spans
+    monkeypatch.setattr(
+        runner, "run_leaf_agent_task", AsyncMock(side_effect=RuntimeError("leaf failed")),
+    )
+    specialist = _specialist()
+    catalog = build_catalog({
+        specialist.slug: CatalogEntry(specialist, AgentCapabilities()),
+    })
+    session = native.create_session.return_value
+
+    async def create(**options):
+        [delegate] = options["tools"]
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+            tools=[SimpleNamespace(name=delegate.name)],
+        )
+
+        async def send(**_kwargs):
+            await delegate.handler(ToolInvocation(
+                session_id="example", tool_call_id="delegate-call",
+                tool_name=delegate.name, arguments={"task": "analyze"},
+            ))
+            return session.send_and_wait.return_value
+
+        session.send_and_wait.side_effect = send
+        return session
+
+    native.create_session.side_effect = create
+    try:
+        result = await copilot_state(preview).run_agent(
+            "hello", session_id="example", session_is_new=True, agent_name="main",
+            deadline=asyncio.get_running_loop().time() + 10,
+            subagents=[SubagentRef(agent=specialist.slug)], catalog=catalog,
+        )
+    finally:
+        await _harness_lifecycle._shutdown_harnesses()
+
+    invocation = next(
+        span for span in exporter.get_finished_spans() if span.name.startswith("invoke_agent ")
+    )
+    assert result.delegate_error_count == 1
+    assert invocation.attributes["af.agent.tool_error_count"] == _total_tool_error_count(result)
+    assert invocation.attributes["af.agent.outcome"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "timeout", "disconnect"])
+async def test_sse_semantic_invocation_tracks_actual_execution_lifecycle(
+    preview, native, invocation_spans, outcome,
+):
+    _, exporter = invocation_spans
+    session = native.create_session.return_value
+    if outcome != "success":
+        async def wait(**_kwargs):
+            await asyncio.Event().wait()
+
+        session.send_and_wait.side_effect = wait
+    stream = copilot_state(preview).run_agent_stream(
+        "hello", session_is_new=True, agent_name="main",
+        deadline=asyncio.get_running_loop().time() + (0.05 if outcome == "timeout" else 5),
+    )
+    events = []
+    try:
+        if outcome == "disconnect":
+            events.append(json.loads((await anext(stream)).removeprefix("data: ").strip()))
+            await stream.aclose()
+        else:
+            events = [
+                json.loads(chunk.removeprefix("data: ").strip()) async for chunk in stream
+            ]
+    finally:
+        await stream.aclose()
+        await _harness_lifecycle._shutdown_harnesses()
+
+    spans = exporter.get_finished_spans()
+    [invocation] = [span for span in spans if span.name.startswith("invoke_agent ")]
+    [outer] = [span for span in spans if span.name == "agent.run main"]
+    assert invocation.parent.span_id == outer.context.span_id
+    assert invocation.context.trace_id == outer.context.trace_id
+    assert events[0]["type"] == "session"
+    assert invocation.attributes["gen_ai.conversation.id"] == events[0]["session_id"]
+    assert native.create_session.call_args.kwargs["session_id"] != events[0]["session_id"]
+    assert invocation.attributes["gen_ai.request.model"] == "gpt-4.1-mini"
+    assert "gen_ai.operation.name" not in outer.attributes
+    assert invocation.attributes["af.agent.outcome"] == (
+        "cancelled" if outcome == "disconnect" else "error" if outcome == "timeout" else "success"
+    )
+    assert invocation.status.status_code.name == ("ERROR" if outcome == "timeout" else "UNSET")
+    if outcome != "disconnect":
+        assert events[-1]["type"] == ("error" if outcome == "timeout" else "done")
+    session.on.assert_called_once()
+    session.unsubscribe.assert_called_once()
+    session.disconnect.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -128,21 +231,34 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["cancel", "timeout", "success"])
 @pytest.mark.parametrize("delete_fails", [False, True])
-async def test_leaf_delete_failure_preserves_body_outcome(preview, native, failure, delete_fails):
+async def test_leaf_delete_failure_preserves_body_outcome(
+    preview, native, monkeypatch, failure, delete_fails,
+):
     session = native.create_session.return_value
     if delete_fails:
         native.delete_session.side_effect = RuntimeError("private deletion detail")
     started = asyncio.Event()
+    timeouts: list[asyncio.Timeout] = []
+    original_timeout_at = asyncio.timeout_at
+
+    def capture_timeout(deadline):
+        timeout = original_timeout_at(deadline)
+        timeouts.append(timeout)
+        return timeout
+
+    monkeypatch.setattr(_copilot_execution.asyncio, "timeout_at", capture_timeout)
 
     async def stall(*args, **kwargs):
         started.set()
+        if failure == "timeout":
+            timeouts[0].reschedule(asyncio.get_running_loop().time())
         await asyncio.Event().wait()
 
     if failure != "success":
         session.send_and_wait.side_effect = stall
     task = asyncio.create_task(runner.run_leaf_agent_task(
         _specialist(), AgentCapabilities(_harness=preview), "task",
-        timeout=0.03 if failure == "timeout" else 3,
+        timeout=10,
         execution_role="delegate",
     ))
     try:
@@ -154,9 +270,12 @@ async def test_leaf_delete_failure_preserves_body_outcome(preview, native, failu
         elif failure == "timeout":
             with pytest.raises(TimeoutError, match="specialist timed out"):
                 await task
+            assert started.is_set()
+            assert timeouts[0].expired()
         elif delete_fails:
-            with pytest.raises(CopilotPreviewError, match="ephemeral specialist"):
+            with pytest.raises(RuntimeError, match="private deletion detail") as caught:
                 await task
+            assert caught.value is native.delete_session.side_effect
         else:
             assert await task == "synthetic reply"
         native.delete_session.assert_awaited_once()
@@ -272,7 +391,10 @@ async def test_leaf_roles_keep_project_skills_without_runtime_workflow_skill(pre
 
 
 @pytest.mark.asyncio
-async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, monkeypatch):
+@pytest.mark.parametrize("execution_role", ["delegate", "workflow_subagent"])
+async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(
+    preview, monkeypatch, execution_role,
+):
     from copilot.tools import ToolInvocation
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
@@ -282,6 +404,7 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     import azure_functions_agents._observability as observability
     from azure_functions_agents._tool_descriptor import ToolDescriptor
     from azure_functions_agents.harness.copilot_sdk._copilot_execution import _tool
+    from azure_functions_agents.harness.copilot_sdk._copilot_observability import invocation_span
     from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
 
     exporter = InMemorySpanExporter()
@@ -297,10 +420,11 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     async def fake_leaf_execution(_harness, request):
         nonlocal leaf_request
         leaf_request = request
-        observability.current_span().add_event(
-            "af.agent.model.usage",
-            {"gen_ai.usage.output_tokens": 4},
-        )
+        with invocation_span(request) as observations:
+            observations.add_event(
+                "af.agent.model.usage",
+                {"gen_ai.usage.output_tokens": 4},
+            )
         return leaf_result
 
     monkeypatch.setattr(_copilot_execution, "run", AsyncMock(side_effect=fake_leaf_execution))
@@ -312,7 +436,7 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
             AgentCapabilities(_harness=preview),
             task,
             timeout=3,
-            execution_role="delegate",
+            execution_role=execution_role,
         )
 
     descriptor = ToolDescriptor.create(
@@ -341,9 +465,12 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
     root = spans["agent.run coordinator"]
     tool_span = spans["execute_tool delegate_analyst"]
     leaf_span = spans["agent.run analyst"]
+    semantic = spans["invoke_agent analyst"]
     assert tool_span.parent.span_id == root.context.span_id
     assert leaf_span.parent.span_id == tool_span.context.span_id
-    assert leaf_span.attributes["af.agent.execution_role"] == "delegate"
+    assert semantic.parent.span_id == leaf_span.context.span_id
+    assert not semantic.events
+    assert leaf_span.attributes["af.agent.execution_role"] == execution_role
     assert leaf_span.attributes["af.agent.outcome"] == "success"
     assert leaf_span.attributes["af.agent.harness"] == "copilot"
     assert "af.harness" not in leaf_span.attributes
@@ -357,7 +484,21 @@ async def test_copilot_delegate_trace_nests_wrapper_and_leaf_agent_run(preview, 
 
 
 @pytest.mark.asyncio
-async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, monkeypatch):
+@pytest.mark.parametrize(
+    ("agent_name", "workflow_agent_slug", "outer_name"),
+    [
+        ("sse_agent", None, "agent.run sse_agent"),
+        (None, None, "agent.run agent"),
+        (None, "workflow", "agent.run agent"),
+    ],
+)
+async def test_sse_execution_attaches_usage_event_to_stream_run_span(
+    preview,
+    monkeypatch,
+    agent_name,
+    workflow_agent_slug,
+    outer_name,
+):
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -372,16 +513,23 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
     monkeypatch.setattr(observability, "get_tracer", lambda: tracer)
 
     async def fake_execution(harness, request):
-        observability.current_span().add_event(
-            "af.agent.model.usage",
-            {"gen_ai.usage.output_tokens": 5},
+        from azure_functions_agents.harness.copilot_sdk._copilot_observability import (
+            invocation_span,
         )
-        return runner.AgentResult(
-            session_id=request.session_id,
-            content="stream reply",
-            tool_calls=[],
-            model=request.model,
-        )
+
+        with invocation_span(request) as observation_span:
+            observation_span.add_event(
+                "af.agent.model.usage",
+                {"gen_ai.usage.output_tokens": 5},
+            )
+            observation_span.add_event("af.skill.invoked", {"gen_ai.tool.name": "review"})
+            observation_span.add_event("af.tool.incomplete", {"gen_ai.tool.name": "search"})
+            return runner.AgentResult(
+                session_id=request.session_id,
+                content="stream reply",
+                tool_calls=[],
+                model=request.model,
+            )
 
     monkeypatch.setattr(_copilot_execution, "run", fake_execution)
     harness_runner = copilot_state(preview)
@@ -392,23 +540,34 @@ async def test_sse_execution_attaches_usage_event_to_stream_run_span(preview, mo
             deadline=asyncio.get_running_loop().time() + 5,
             model="test-model",
             session_id="sse-session",
-            agent_name="sse_agent",
+            agent_name=agent_name,
+            workflow_agent_slug=workflow_agent_slug,
             tools=[],
             mcp_tools=[],
         )
     ]
 
     assert [event["type"] for event in events] == ["delta", "done"], events
-    [span] = exporter.get_finished_spans()
-    assert span.name == "agent.run sse_agent"
+    finished_spans = exporter.get_finished_spans()
+    span = next(item for item in finished_spans if item.name == outer_name)
+    semantic = next(
+        item
+        for item in finished_spans
+        if item.attributes.get("gen_ai.operation.name") == "invoke_agent"
+    )
+    assert semantic.parent.span_id == span.context.span_id
     assert span.attributes["af.agent.harness"] == "copilot"
     assert "af.harness" not in span.attributes
     assert span.attributes["af.agent.session_id"] == "sse-session"
     assert "gen_ai.operation.name" not in span.attributes
-    [usage_event] = [
-        event for event in span.events if event.name == "af.agent.model.usage"
+    assert [event.name for event in span.events] == [
+        "af.agent.model.usage",
+        "af.skill.invoked",
+        "af.tool.incomplete",
     ]
+    usage_event = span.events[0]
     assert usage_event.attributes["gen_ai.usage.output_tokens"] == 5
+    assert semantic.events == ()
 
 
 @pytest.mark.asyncio
@@ -885,6 +1044,7 @@ async def test_stream_invalid_session_id_emits_sse_error_without_native_executio
 async def test_sse_supplied_session_id_is_emitted_once_even_when_resume_fails(
     preview, native, fail_resume,
 ):
+    await _seed_session_state(preview, session_id="caller-id")
     if fail_resume:
         native.resume_session.side_effect = RuntimeError("private resume failure")
     try:
@@ -900,6 +1060,25 @@ async def test_sse_supplied_session_id_is_emitted_once_even_when_resume_fails(
         assert events[-1]["type"] == ("error" if fail_resume else "done")
         native.create_session.assert_not_awaited()
         native.resume_session.assert_awaited_once()
+    finally:
+        await _harness_lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_sse_fresh_supplied_session_id_creates_requested_native_session(preview, native):
+    try:
+        events = [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in runner.run_agent_stream(
+                "hello", _harness=preview, tools=[], mcp_tools=[], session_id="caller-id",
+            )
+        ]
+        assert [event for event in events if event["type"] == "session"] == [
+            {"type": "session", "session_id": "caller-id"},
+        ]
+        assert events[-1]["type"] == "done"
+        assert native.create_session.call_args.kwargs["session_id"] == "main-caller-id"
+        native.resume_session.assert_not_awaited()
     finally:
         await _harness_lifecycle._shutdown_harnesses()
 

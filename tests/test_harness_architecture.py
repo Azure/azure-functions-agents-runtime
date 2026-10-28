@@ -48,7 +48,7 @@ def _concrete_import_violations(relative: str, source: str) -> list[str]:
     allowed = {
         "harness/_harness_binding.py": {
             ".agent_framework._maf_runner",
-            ".copilot_sdk._copilot_preview",
+            ".copilot_sdk._copilot_runtime",
         }
     }
     tree = ast.parse(source, filename=relative)
@@ -266,11 +266,11 @@ def test_neutrality_scanners_allow_sanctioned_boundaries() -> None:
     assert _concrete_string_violations("harness/_harness_binding.py", 'VALUE = "copilot"\n') == []
     assert _concrete_import_violations(
         "harness/_harness_binding.py",
-        "from .copilot_sdk._copilot_preview import select_copilot_harness\n",
+        "from .copilot_sdk._copilot_runtime import select_copilot_harness\n",
     ) == []
     assert _concrete_name_violations(
         "harness/_harness_binding.py",
-        "from .copilot_sdk._copilot_preview import select_copilot_harness\n"
+        "from .copilot_sdk._copilot_runtime import select_copilot_harness\n"
         "select_copilot_harness(root)\n"
         "FLAG = EnvVar.ENABLE_COPILOT\n",
     ) == []

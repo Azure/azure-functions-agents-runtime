@@ -27,6 +27,7 @@ from .._observability import (
     LifecycleStage,
     SpanOutcome,
     agent_run_span_name,
+    bind_agent_run_span,
     capture_sensitive_data,
     set_agent_session_attribute,
     start_span,
@@ -120,7 +121,7 @@ def _run_log_payload(harness: AppHarness, result: Any) -> dict[str, Any]:
     content = str(getattr(result, "content", "") or "")
     payload: dict[str, Any] = {
         "session_id": getattr(result, "session_id", None),
-        "response_bytes": len(content),
+        "response_bytes": len(content.encode("utf-8")),
         "tool_call_count": len(tool_calls),
         "tool_error_count": _total_tool_error_count(result),
     }
@@ -206,7 +207,7 @@ def make_agent_handler(
                 session_id=session_id,
                 model=resolved.model,
             ),
-        ) as span:
+        ) as span, bind_agent_run_span(span):
             try:
                 data_json = serialize_trigger_data(trigger_data)
                 span.set_attribute(ATTR_AGENT_INPUT_BYTES, len(data_json))
@@ -336,7 +337,7 @@ def make_http_agent_handler(
                 session_id=None,
                 model=resolved.model,
             ),
-        ) as span:
+        ) as span, bind_agent_run_span(span):
             try:
                 session_id = supplied_session_id or _new_session_id()
                 session_state = HarnessSessionState(

@@ -25,7 +25,7 @@ from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as _runtime,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from azure_functions_agents.system_tools.web_request import create_web_request_tools
 
 pytestmark = pytest.mark.skipif(

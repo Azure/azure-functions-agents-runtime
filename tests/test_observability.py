@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import types
+from contextlib import nullcontext
 
 import pytest
 
@@ -291,6 +292,56 @@ def test_start_span_gated_when_observability_disabled(monkeypatch) -> None:  # t
     monkeypatch.setattr(obs, "_enabled", False)
     with obs.start_span("gated.span", lifecycle_stage=obs.LifecycleStage.AGENT_RUN) as span:
         assert span._span is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
+async def test_explicit_run_span_binding_is_task_local_and_restored(outcome) -> None:
+    from opentelemetry import trace
+    from opentelemetry.trace import NonRecordingSpan, SpanContext
+
+    def make_span(number: int):
+        return NonRecordingSpan(
+            SpanContext(trace_id=number, span_id=number, is_remote=False),
+        )
+
+    raw_parent = make_span(1)
+    parent = obs.RuntimeSpan(raw_parent)
+    assert obs.current_agent_run_span() is None
+    with trace.use_span(raw_parent), obs.bind_agent_run_span(parent):
+        assert obs.current_agent_run_span() is parent
+
+        async def child(number: int) -> None:
+            assert obs.current_agent_run_span() is parent
+            raw_child = make_span(number)
+            owned_child = obs.RuntimeSpan(raw_child)
+            with trace.use_span(raw_child):
+                assert obs.current_agent_run_span() is None
+                with obs.bind_agent_run_span(owned_child):
+                    await asyncio.sleep(0)
+                    assert obs.current_agent_run_span() is owned_child
+                assert obs.current_agent_run_span() is None
+            assert obs.current_agent_run_span() is parent
+
+        await asyncio.gather(child(2), child(3))
+        assert obs.current_agent_run_span() is parent
+        raw_nested = make_span(4)
+        manager = (
+            pytest.raises(ValueError if outcome == "error" else asyncio.CancelledError)
+            if outcome != "success" else nullcontext()
+        )
+        with manager, trace.use_span(raw_nested), obs.bind_agent_run_span(obs.RuntimeSpan(raw_nested)):
+            if outcome == "error":
+                raise ValueError("failure")
+            if outcome == "cancelled":
+                raise asyncio.CancelledError()
+        assert obs.current_agent_run_span() is parent
+    assert obs.current_agent_run_span() is None
+
+
+def test_noop_run_binding_does_not_select_an_unrelated_span() -> None:
+    with obs.bind_agent_run_span(obs.RuntimeSpan(None)):
+        assert obs.current_agent_run_span() is None
 
 
 def test_runtime_span_add_event_noops_without_span() -> None:

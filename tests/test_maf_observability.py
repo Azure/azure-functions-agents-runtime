@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import gc
+import subprocess
+import sys
+from pathlib import Path
 from weakref import WeakSet, ref
 
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
@@ -75,14 +78,15 @@ def test_maf_instrumentation_tracker_releases_dead_harnesses(
 
 
 def test_maf_observability_module_imports_without_cycle() -> None:
-    import importlib
-    import sys
-
-    sys.modules.pop("azure_functions_agents.harness.agent_framework._maf_observability", None)
-    sys.modules.pop("azure_functions_agents._observability", None)
-
-    module = importlib.import_module(
-        "azure_functions_agents.harness.agent_framework._maf_observability"
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from azure_functions_agents.harness.agent_framework._maf_observability "
+            "import configure_maf_instrumentation; assert callable(configure_maf_instrumentation)",
+        ],
+        cwd=Path(__file__).resolve().parents[1] / "src",
+        check=True,
+        capture_output=True,
+        text=True,
     )
-
-    assert hasattr(module, "configure_maf_instrumentation")

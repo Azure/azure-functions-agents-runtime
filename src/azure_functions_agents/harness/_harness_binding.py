@@ -181,7 +181,7 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
         if not _flag_enabled(raw_env_value(FLAG)):
             selected = AppHarness(HarnessKind.MAF, root)
         else:
-            from .copilot_sdk._copilot_preview import select_copilot_harness
+            from .copilot_sdk._copilot_runtime import select_copilot_harness
 
             selected = select_copilot_harness(root)
         if not new_app:

@@ -24,15 +24,15 @@ from azure_functions_agents.harness.copilot_sdk import (
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as runtime,
 )
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
     _PROVIDERS,
     AzureOpenAIProvider,
     FoundryProvider,
     OpenAIProvider,
 )
+from azure_functions_agents.harness.copilot_sdk._copilot_runtime import CopilotPreviewError
 from tests._harness_helpers import copilot_state, make_copilot_harness
-from tests.test_copilot_preview import preview as preview
+from tests.test_copilot_runtime import preview as preview
 
 
 @pytest.fixture
@@ -200,6 +200,20 @@ def test_azure_api_key_provider_avoids_credential_construction(binding, monkeypa
         "azure": {"api_version": "2024-10-21"},
         "api_key": "sentinel-not-a-secret",
     }
+
+
+@pytest.mark.asyncio
+async def test_provider_applies_request_local_output_cap_without_mutating_binding(binding):
+    owner = runtime.get_runtime(binding)
+
+    capped = execution._provider(binding, owner, "per-agent-model", max_output_tokens=64)
+    uncapped = execution._provider(binding, owner, "per-agent-model")
+
+    assert capped["max_output_tokens"] == 64
+    assert "max_output_tokens" not in uncapped
+    assert "max_output_tokens" not in owner._runner.provider.sdk_config(
+        "per-agent-model", owner
+    )
 
 
 @pytest.mark.asyncio
