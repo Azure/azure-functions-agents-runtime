@@ -9,6 +9,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -137,6 +138,24 @@ def tool_result(response, name):
     return result
 
 
+def run_logged(command, cwd, env, log, log_path, timeout):
+    try:
+        subprocess.run(
+            command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
+            check=True, timeout=timeout,
+        )
+    except subprocess.CalledProcessError as error:
+        log.flush()
+        tail = log_path.read_text(errors="replace").splitlines()[-60:]
+        print(
+            f"\nBuild command failed ({command!r}, exit code {error.returncode}); "
+            f"full output: {log_path}\n"
+            f"Last {len(tail)} log lines:\n" + "\n".join(tail),
+            file=sys.stderr,
+        )
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--func", default=str(ROOT / ".tools" / "core-tools" / "func"))
@@ -170,11 +189,13 @@ def main():
     scratch = ROOT / ".tools" / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
     env.update({"TMPDIR": str(scratch), "TMP": str(scratch), "TEMP": str(scratch)})
-    with (evidence / "build.log").open("w") as log:
-        subprocess.run(["cargo", "build", "--bin", "fhs-runtime"], cwd=ROOT,
-                       env=env, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
-        subprocess.run(["dotnet", "build", "--nologo", "--verbosity", "minimal"], cwd=APP,
-                       env=env, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
+    build_log = evidence / "build.log"
+    with build_log.open("w") as log:
+        run_logged(["cargo", "build", "--bin", "fhs-runtime"], ROOT, env, log, build_log, 180)
+        run_logged(
+            ["dotnet", "build", "--nologo", "--verbosity", "minimal"],
+            APP, env, log, build_log, 180,
+        )
     output = APP / "bin" / "Debug" / "net10.0"
     metadata = json.loads((output / "functions.metadata").read_text())
     shipping_function = next(function for function in metadata if function["name"] == "ShippingQuote")

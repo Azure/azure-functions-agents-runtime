@@ -139,6 +139,19 @@ the tool-error channel. Request/response streams and the DI scope are disposed.
 - Initial NuGet/Cargo restore needs network access. Worker **2.52.0**, Worker.Sdk
   **2.1.0**, HTTP extension **3.3.0** are pinned in the project.
 
+On Ubuntu/WSL, install the native Rust build prerequisites before building or
+running the smoke test. The Rust dependency graph links OpenSSL through
+`native-tls`, so Cargo needs both the OpenSSL development files and `pkg-config`
+to locate them:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev
+```
+
+Also ensure the Rust toolchain is installed and `cargo` is on `PATH` in the
+shell that runs `smoke_host.py`.
+
 Reuse an existing `func` installation with `--func "$(command -v func)"`.
 Alternatively extract the official Linux x64 package into the ignored
 `spikes/rust-runtime/.tools/core-tools/` directory:
