@@ -1,6 +1,6 @@
 # Vally executor for Azure Functions Agents Runtime
 
-Vally 0.16.0 executor for an Azure Functions Agents Runtime synchronous chat
+Vally 0.16.0 or later executor for an Azure Functions Agents Runtime synchronous chat
 endpoint. It converts generic runtime response and tool evidence into a Vally trajectory; it does not
 start, deploy, or reconfigure the Function App.
 
@@ -22,17 +22,23 @@ npm run test:cli
 ```
 
 `test:cli` runs positive and negative `--require-pass` evaluations against a temporary local HTTP
-server. Vally and its CLI are pinned to 0.16.0; review compatibility before changing either version.
+server. Runtime and development dependencies allow newer minor and patch versions within the
+existing major version, retaining their current minimums. Vally and its CLI use `>=0.16.0 <1.0.0`,
+including newer `0.x` minor releases. The lockfile retains exact versions for reproducible repository
+builds; review compatibility and rerun these checks when upgrading, especially for pre-1.0 releases.
 
 ### Security overrides
 
-Azure Identity depends on MSAL Node 6, which is affected by
+Azure Identity currently depends on MSAL Node 6, which is affected by
 [GHSA-xcx6-jx8p-x3h5](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5).
-This package overrides that dependency to `>=7.1.0 <8.0.0`, which includes the fix.
-Remove the override when Azure Identity uses a fixed MSAL version.
+The repository overrides that dependency to `>=7.1.0 <8.0.0`, the patched major, rather than
+downgrading Azure Identity below its declared minimum. Remove the override when Azure Identity
+adopts a patched MSAL dependency.
 
-npm applies overrides only from the root project. If you install this evaluator as a
-dependency, add this override to your root package manifest and update your lockfile:
+npm only applies overrides from the root project; this override does not propagate when the
+evaluator is installed as a dependency. Until Azure Identity updates its MSAL requirement,
+consuming npm projects must add the following to their root package manifest and refresh their
+lockfile:
 
 ```json
 {
@@ -44,18 +50,17 @@ dependency, add this override to your root package manifest and update your lock
 }
 ```
 
-Run the authentication and evaluation checks after you apply the override.
-The lockfile also uses a fixed Zod version. Update downstream lockfiles and run
-`npm audit --audit-level=moderate`.
+Run the authentication and evaluation checks after applying it. The lockfile also includes patched
+Zod and Hono versions; downstream projects should refresh their own lockfiles and run `npm audit`.
 
 ## Configure
 
-The registered executor name is `azure-functions-agent`:
+The registered executor name is `azure-functions-hosted-skill`:
 
 ```yaml
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrlEnv: AGENT_EVAL_TARGET_URL
       auth:

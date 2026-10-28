@@ -56,7 +56,7 @@ def test_agent_evaluation_sample_uses_native_vally_spec() -> None:
 
     assert document["defaults"] == {
         "executor": {
-            "name": "azure-functions-agent",
+            "name": "azure-functions-hosted-skill",
             "config": {
                 "endpointUrlEnv": "AGENT_EVAL_TARGET_URL",
                 "auth": {"type": "anonymous"},

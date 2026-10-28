@@ -70,7 +70,7 @@ describe("AzureFunctionsAgentExecutor", () => {
     const registry = createExecutorRegistry();
     registerExecutors(registry);
     assert.equal(
-      registry.get("azure-functions-agent")?.supportsMultiTurn,
+      registry.get("azure-functions-hosted-skill")?.supportsMultiTurn,
       true,
     );
   });

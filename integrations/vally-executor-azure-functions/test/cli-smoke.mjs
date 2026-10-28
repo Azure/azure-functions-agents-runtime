@@ -116,7 +116,7 @@ try {
   const yaml = `name: executor-smoke
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrl: "${endpoint}"
   runs: 1
@@ -154,7 +154,7 @@ stimuli:
     `name: multi-turn-smoke
 defaults:
   executor:
-    name: azure-functions-agent
+    name: azure-functions-hosted-skill
     config:
       endpointUrl: "${endpoint}"
   runs: 1

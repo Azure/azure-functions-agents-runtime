@@ -156,7 +156,7 @@ function validateUnsupportedOptions(options: ExecutorOptions): void {
   if (unsupported.length) {
     throw new AzureFunctionsAgentExecutorError(
       "unsupported",
-      `azure-functions-agent does not support: ${unsupported.join(", ")}`,
+      `azure-functions-hosted-skill does not support: ${unsupported.join(", ")}`,
     );
   }
 }
@@ -256,7 +256,7 @@ function appendTurnEvents(
 }
 
 export class AzureFunctionsAgentExecutor implements Executor {
-  readonly name = "azure-functions-agent";
+  readonly name = "azure-functions-hosted-skill";
   readonly supportsMultiTurn = true;
 
   readonly #fetch: typeof globalThis.fetch;
