@@ -683,6 +683,10 @@ The Entity also owns the dispatch-claim transition. A replayed or duplicate
 activity cannot claim an operation already claimed by another generation or
 already terminal.
 
+The Entity does not expose its persisted state through a generic read operation.
+Future runtime callers use purpose-specific, typed query results so storage
+schema changes do not become caller-facing contracts.
+
 Continuation cleanup follows authoritative state:
 
 - During an active turn, the prior terminal session seed and every checkpoint
@@ -821,10 +825,15 @@ Cancellation is acknowledged intent, not rollback.
 - The absolute deadline starts when start acknowledgement is committed, not
   during admission. Replay, retries, connector resumes and `ContinueAsNew`
   preserve it unchanged.
+- The Entity rejects every terminal commit until start acknowledgement has
+  atomically bound the turn start and absolute deadline.
 - A generation-tagged Entity timeout signal independently enforces the deadline
   if the turn orchestration is lost. Duplicate acknowledgement and human input
   never extend it.
 - The Entity records terminal intent and fences later state commits.
+- Completed turns require a result reference, failed turns require a bounded
+  machine-readable error code, and cancelled or timed-out turns use their
+  terminal status as the reason without a separate error code.
 - The orchestrator stops scheduling new checkpoints or external work.
 - Activities receive the absolute deadline and enforce it locally.
 - The worker owning an active operation observes cancellation through a
@@ -859,6 +868,9 @@ starts a new turn, resets history or changes harness.
   fences stale work and begins cleanup of runtime-owned continuation snapshots,
   referenced content and workspace.
 - Repeated deletion returns the same stable deletion receipt and progress.
+- The first deletion tombstone remains authoritative. Every later authorized
+  deletion request returns that original receipt, even when it uses a different
+  deletion idempotency key.
 - Non-content request/deletion tombstones remain through the documented retry
   horizon.
 
@@ -1025,6 +1037,10 @@ The feature contract is satisfied when:
 | 33 | Architecture approval | Continue architecture review / finalize the feature contract | Finalize the harness-neutral Durable Agent Loop contract for implementation | Human | 2026-10-20 |
 | 34 | Explicit persisted meaning | Positional/convention-only batches and parallel fields / named identities, ordered batches and discriminated variants | Persist sequence explicitly, validate batch uniqueness/order, name command identity, split continuation read roles and close stable evidence/failure vocabularies | Human; review recommendation | 2026-10-26 |
 | 35 | Retry, resume and wire-version safety | Connector convention / independent continuation and results / one validated resume request with explicit versions and retry eligibility | Require explicit wire versions, bind continuation plus pending operations plus ordered results in one resume request, permit retry only for proven retryable transport failures, represent confirmed cancellation explicitly and fail closed on public Blob containers | Human; review recommendation | 2026-10-26 |
+| 36 | Terminal lifecycle sequencing | Permit terminal commit after admission / require start acknowledgement | Reject terminal commit until the Entity has bound the turn start and absolute deadline | Human | 2026-10-27 |
+| 37 | Deletion idempotency | Conflict on a different deletion key / converge on the first tombstone | Keep the first tombstone authoritative and return its stable receipt for every later authorized deletion request regardless of key | Human | 2026-10-27 |
+| 38 | Entity state queries | Generic full-state read / purpose-specific typed queries | Do not expose the persistence model; add typed query results only when a runtime caller requires them | Human | 2026-10-27 |
+| 39 | Terminal error metadata | Optional error codes for every non-completed status / status-specific metadata | Require a bounded error code for failed turns; use cancelled and timed-out status values as their complete reason | Human | 2026-10-27 |
 
 ## 6. Test plan
 
