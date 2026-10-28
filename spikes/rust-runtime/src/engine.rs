@@ -25,7 +25,7 @@ use crate::protocol::{
     InitializeResult, RegisterToolsParams, RegisterToolsResult, SessionInspectParams,
     SessionInspectResult, StdioRpcPeer, ToolCallParams, ToolCallResult, WorkerToolDescriptor,
 };
-use crate::providers::ResolvedProvider;
+use crate::providers::{InferenceMode, ResolvedProvider, resolve_inference};
 use crate::session_fs::{CopilotSessionFs, SESSION_STATE_ROOT, StorageRoute, WORKSPACE_ROOT};
 use crate::skills::{SkillDescriptor, discover_skills, filter_skills_for_agent};
 
@@ -115,9 +115,10 @@ struct InitializedAppState {
     agents: BTreeMap<String, ResolvedAgent>,
     skills: Vec<SkillDescriptor>,
     tools: BTreeMap<String, WorkerToolDescriptor>,
-    provider: ResolvedProvider,
+    provider: Option<ResolvedProvider>,
+    models: BTreeMap<String, String>,
     storage_route: StorageRoute,
-    mock_llm: bool,
+    inference_mode: InferenceMode,
     copilot_client: Mutex<Option<Client>>,
 }
 
@@ -177,15 +178,10 @@ impl RuntimeEngine {
         let env = EnvMap::from_process().with_overrides(params.env);
         let agents = discover_agents(&params.app_root, &env).map_err(|e| (-32001, e.to_string()))?;
         let skills = discover_skills(&params.app_root);
-        let provider =
-            ResolvedProvider::from_env(&env).map_err(|e| (-32002, e.to_string()))?;
+        let (inference_mode, provider) =
+            resolve_inference(&env, params.mock_llm).map_err(|e| (-32002, e.to_string()))?;
         let storage_route = StorageRoute::from_env(&params.app_root, &env)
             .map_err(|e| (-32003, e.to_string()))?;
-
-        let mock_llm = params.mock_llm.unwrap_or_else(|| {
-            env.get_trimmed("FHS_MOCK_LLM")
-                .is_some_and(|v| matches!(v, "1" | "true" | "yes"))
-        });
 
         let mut tools_map = BTreeMap::new();
         for tool in params.tools {
@@ -193,10 +189,23 @@ impl RuntimeEngine {
         }
 
         let mut agent_summaries = Vec::new();
+        let mut models = BTreeMap::new();
         for agent in agents.values() {
-            let model = provider
-                .effective_model(agent.model.as_deref())
-                .map_err(|e| (-32002, e.to_string()))?;
+            let model = if let Some(provider) = &provider {
+                provider
+                    .effective_model(agent.model.as_deref())
+                    .map_err(|e| (-32002, e.to_string()))?
+            } else {
+                agent
+                    .model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty())
+                    .or_else(|| env.get_trimmed("AZURE_FUNCTIONS_AGENTS_MODEL"))
+                    .or_else(|| env.get_trimmed("FOUNDRY_MODEL"))
+                    .unwrap_or("mock-model")
+                    .to_string()
+            };
+            models.insert(agent.slug.clone(), model.clone());
             let skill_plan = filter_skills_for_agent(&skills, &agent.skills);
             let enabled_tools: Vec<String> = tools_map
                 .keys()
@@ -218,7 +227,8 @@ impl RuntimeEngine {
             runtime_version: env!("CARGO_PKG_VERSION").to_string(),
             agents: agent_summaries,
             skills: skills.clone(),
-            provider: provider.summary(),
+            provider: provider.as_ref().map(ResolvedProvider::summary),
+            inference_mode,
             storage_mode: storage_route.mode(),
         };
 
@@ -229,8 +239,9 @@ impl RuntimeEngine {
             skills,
             tools: tools_map,
             provider,
+            models,
             storage_route,
-            mock_llm,
+            inference_mode,
             copilot_client: Mutex::new(None),
         }));
 
@@ -256,8 +267,9 @@ impl RuntimeEngine {
             skills: existing.skills.clone(),
             tools,
             provider: existing.provider.clone(),
+            models: existing.models.clone(),
             storage_route: existing.storage_route.clone(),
-            mock_llm: existing.mock_llm,
+            inference_mode: existing.inference_mode,
             copilot_client: Mutex::new(None),
         }));
         Ok(RegisterToolsResult {
@@ -289,10 +301,12 @@ impl RuntimeEngine {
             .cloned()
             .ok_or_else(|| (-32004, format!("Unknown agent '{}'.", params.agent_name)))?;
 
-        let model = app_state
-            .provider
-            .effective_model(agent.model.as_deref())
-            .map_err(|e| (-32002, e.to_string()))?;
+        let model = app_state.models.get(&agent.slug).cloned().ok_or_else(|| {
+            (
+                -32002,
+                format!("No resolved model for agent '{}'.", agent.slug),
+            )
+        })?;
 
         let session_id = params
             .session_id
@@ -325,7 +339,7 @@ impl RuntimeEngine {
             .cloned()
             .collect();
 
-        if app_state.mock_llm {
+        if app_state.inference_mode == InferenceMode::Mock {
             return self
                 .run_mock_turn(
                     peer,
@@ -413,7 +427,13 @@ impl RuntimeEngine {
         }
 
         let copilot_session_id = SessionId::from(format!("{}-{session_id}", agent.slug));
-        let provider_cfg = app_state.provider.to_sdk_provider_config(model);
+        let provider = app_state.provider.as_ref().ok_or_else(|| {
+            (
+                -32002,
+                "Foundry inference was selected without a resolved provider.".to_string(),
+            )
+        })?;
+        let provider_cfg = provider.to_sdk_provider_config(model);
         let skill_dirs: Vec<PathBuf> = enabled_skills.iter().map(|s| s.path.clone()).collect();
         let sys_msg = SystemMessageConfig::new()
             .with_mode("replace")

@@ -26,6 +26,7 @@ try
 
     await using (var client = await StartAsync("normal"))
     {
+        Assert(client.InferenceMode == "mock", "initialization reports mock inference mode");
         foreach (var session in new[] { "first", "second" })
         {
             var events = new List<AgentStreamEvent>();
@@ -37,6 +38,10 @@ try
         }
     }
     Pass("stream listeners are session-scoped and removed on completion");
+
+    await using (var client = await StartAsync("foundry"))
+        Assert(client.InferenceMode == "foundry", "initialization reports Foundry inference mode");
+    Pass("Foundry inference mode is forwarded from Rust initialization");
 
     await using (var client = await StartAsync("stall"))
     {

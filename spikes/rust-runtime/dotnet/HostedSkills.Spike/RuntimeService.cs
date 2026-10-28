@@ -20,17 +20,20 @@ public sealed class RuntimeService(
         var binary = configuration["FHS_RUNTIME_PATH"];
         if (string.IsNullOrWhiteSpace(binary) || !Path.IsPathFullyQualified(binary) || !File.Exists(binary))
             throw new InvalidOperationException("FHS_RUNTIME_PATH must be the absolute path to the built fhs-runtime binary.");
-        if (!string.Equals(configuration["FHS_MOCK_LLM"], "true", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("This host sample requires FHS_MOCK_LLM=true; no live inference is validated.");
 
         var (client, init) = await HostedSkillRuntimeClient.StartAsync(
-            binary, appRoot, registry, mockLlm: true, cancellationToken: cancellationToken);
+            binary, appRoot, registry,
+            mockLlm: string.Equals(configuration["FHS_MOCK_LLM"], "true", StringComparison.OrdinalIgnoreCase)
+                ? true
+                : null,
+            cancellationToken: cancellationToken);
         _client = client;
-        logger.LogInformation("Rust stdio ready: MOCK inference, storage={Storage}, agents={Agents}, skills={Skills}",
+        logger.LogInformation("Rust stdio ready: {InferenceMode} inference, storage={Storage}, agents={Agents}, skills={Skills}",
+            init.InferenceMode.ToUpperInvariant(),
             init.StorageMode, string.Join(",", init.Agents.Select(a => a.Slug)),
             string.Join(",", init.Skills.Select(s => s.Name)));
         // Core Tools may filter ILogger messages emitted before an invocation.
-        Console.WriteLine($"Rust stdio ready: MOCK inference, storage={init.StorageMode}");
+        Console.WriteLine($"Rust stdio ready: {init.InferenceMode.ToUpperInvariant()} inference, storage={init.StorageMode}");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken) => await DisposeAsync();

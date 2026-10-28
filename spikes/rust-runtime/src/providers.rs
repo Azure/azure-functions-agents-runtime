@@ -35,6 +35,13 @@ pub enum ProviderKind {
     Foundry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceMode {
+    Mock,
+    Foundry,
+}
+
 impl ProviderKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -246,6 +253,13 @@ impl ResolvedProvider {
         }
     }
 
+    pub fn from_foundry_env(env: &EnvMap) -> Result<Self, ProviderError> {
+        Self::from_env(
+            &env.clone()
+                .with_overrides([("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")]),
+        )
+    }
+
     pub fn kind(&self) -> ProviderKind {
         match self {
             Self::OpenAi { .. } => ProviderKind::OpenAi,
@@ -367,6 +381,32 @@ impl ResolvedProvider {
     }
 }
 
+pub fn has_foundry_intent(env: &EnvMap) -> bool {
+    env.get_trimmed("AZURE_FUNCTIONS_AGENTS_PROVIDER")
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("foundry"))
+        || env.get_trimmed("FOUNDRY_PROJECT_ENDPOINT").is_some()
+        || env.get_trimmed("FOUNDRY_MODEL").is_some()
+}
+
+pub fn mock_inference_requested(env: &EnvMap, explicit_override: Option<bool>) -> bool {
+    explicit_override == Some(true)
+        || env.get_trimmed("FHS_MOCK_LLM").is_some_and(|value| {
+            matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+        })
+}
+
+pub fn resolve_inference(
+    env: &EnvMap,
+    explicit_mock: Option<bool>,
+) -> Result<(InferenceMode, Option<ResolvedProvider>), ProviderError> {
+    if mock_inference_requested(env, explicit_mock) || !has_foundry_intent(env) {
+        return Ok((InferenceMode::Mock, None));
+    }
+
+    let provider = ResolvedProvider::from_foundry_env(env)?;
+    Ok((InferenceMode::Foundry, Some(provider)))
+}
+
 fn validate_azure_openai_endpoint(env: &EnvMap) -> Result<String, ProviderError> {
     let diag = "Copilot Azure OpenAI requires a valid host-only AZURE_OPENAI_ENDPOINT.";
     let raw = env
@@ -486,5 +526,145 @@ mod tests {
         )]);
         let err = ResolvedProvider::from_env(&env).unwrap_err();
         assert!(err.to_string().contains("FOUNDRY_PROJECT_ENDPOINT"));
+    }
+
+    #[test]
+    fn foundry_intent_is_limited_to_nonblank_foundry_settings() {
+        assert!(!has_foundry_intent(&EnvMap::default()));
+        assert!(!has_foundry_intent(&EnvMap::from_iter([
+            ("AZURE_FUNCTIONS_AGENTS_MODEL", "model"),
+            ("DEFAULT_AGENT_MODEL", "model"),
+            ("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com"),
+        ])));
+        assert!(has_foundry_intent(&EnvMap::from_iter([(
+            "AZURE_FUNCTIONS_AGENTS_PROVIDER",
+            " FoUnDrY ",
+        )])));
+        assert!(has_foundry_intent(&EnvMap::from_iter([(
+            "FOUNDRY_PROJECT_ENDPOINT",
+            "endpoint",
+        )])));
+        assert!(has_foundry_intent(&EnvMap::from_iter([(
+            "FOUNDRY_MODEL",
+            "model"
+        )])));
+        assert!(!has_foundry_intent(&EnvMap::from_iter([(
+            "FOUNDRY_MODEL",
+            "  "
+        )])));
+    }
+
+    #[test]
+    fn explicit_mock_override_takes_precedence_over_foundry_intent() {
+        let env = EnvMap::from_iter([
+            ("FOUNDRY_PROJECT_ENDPOINT", "not-a-live-endpoint"),
+            ("FHS_MOCK_LLM", "false"),
+        ]);
+        assert!(mock_inference_requested(&env, Some(true)));
+        assert!(!mock_inference_requested(&env, Some(false)));
+        assert!(!mock_inference_requested(&env, None));
+        assert!(mock_inference_requested(
+            &EnvMap::from_iter([("FHS_MOCK_LLM", "yes")]),
+            None
+        ));
+    }
+
+    #[test]
+    fn foundry_mode_uses_precedence_and_accepts_opaque_deployment_names() {
+        let env = EnvMap::from_iter([
+            (
+                "FOUNDRY_PROJECT_ENDPOINT",
+                "https://my-res.services.ai.azure.com/api/projects/proj_1",
+            ),
+            ("AZURE_FUNCTIONS_AGENTS_MODEL", "global-model"),
+            ("FOUNDRY_MODEL", "foundry-model"),
+        ]);
+        let provider = ResolvedProvider::from_foundry_env(&env).unwrap();
+        assert_eq!(
+            provider
+                .effective_model(Some("resolved-agent-model"))
+                .unwrap(),
+            "resolved-agent-model"
+        );
+        assert_eq!(provider.effective_model(None).unwrap(), "global-model");
+
+        let foundry_model_only = EnvMap::from_iter([
+            (
+                "FOUNDRY_PROJECT_ENDPOINT",
+                "https://my-res.services.ai.azure.com/api/projects/proj_1",
+            ),
+            ("FOUNDRY_MODEL", "mock-model"),
+        ]);
+        let provider = ResolvedProvider::from_foundry_env(&foundry_model_only).unwrap();
+        assert_eq!(provider.effective_model(None).unwrap(), "mock-model");
+    }
+
+    #[test]
+    fn foundry_model_without_endpoint_fails_live_configuration() {
+        let env = EnvMap::from_iter([("FOUNDRY_MODEL", "deployment")]);
+        let err = ResolvedProvider::from_foundry_env(&env).unwrap_err();
+        assert!(err.to_string().contains("FOUNDRY_PROJECT_ENDPOINT"));
+    }
+
+    #[test]
+    fn foundry_provider_setting_without_endpoint_fails_live_configuration() {
+        let env = EnvMap::from_iter([("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")]);
+        let err = ResolvedProvider::from_foundry_env(&env).unwrap_err();
+        assert!(err.to_string().contains("FOUNDRY_PROJECT_ENDPOINT"));
+    }
+
+    #[test]
+    fn inference_mode_defaults_to_mock_and_selects_foundry_only_on_intent() {
+        let env = EnvMap::from_iter([
+            ("DEFAULT_AGENT_MODEL", "configured-model"),
+            ("AZURE_FUNCTIONS_AGENTS_MODEL", "global-model"),
+        ]);
+        let (mode, provider) = resolve_inference(&env, None).unwrap();
+        assert_eq!(mode, InferenceMode::Mock);
+        assert!(provider.is_none());
+
+        let foundry_env = EnvMap::from_iter([
+            (
+                "FOUNDRY_PROJECT_ENDPOINT",
+                "https://my-res.services.ai.azure.com/api/projects/proj_1",
+            ),
+            ("FOUNDRY_MODEL", "deployment"),
+        ]);
+        let (mode, provider) = resolve_inference(&foundry_env, None).unwrap();
+        assert_eq!(mode, InferenceMode::Foundry);
+        assert_eq!(
+            provider.unwrap().effective_model(None).unwrap(),
+            "deployment"
+        );
+    }
+
+    #[test]
+    fn explicit_mock_prevents_validation_or_contact_of_placeholder_foundry_settings() {
+        let env = EnvMap::from_iter([
+            ("FOUNDRY_PROJECT_ENDPOINT", "not-a-valid-endpoint"),
+            ("FOUNDRY_MODEL", "deployment"),
+        ]);
+        let (mode, provider) = resolve_inference(&env, Some(true)).unwrap();
+        assert_eq!(mode, InferenceMode::Mock);
+        assert!(provider.is_none());
+    }
+
+    #[test]
+    fn partial_foundry_intent_fails_instead_of_falling_back_to_mock() {
+        let env = EnvMap::from_iter([("FOUNDRY_MODEL", "deployment")]);
+        let err = resolve_inference(&env, None).unwrap_err();
+        assert!(err.to_string().contains("FOUNDRY_PROJECT_ENDPOINT"));
+    }
+
+    #[test]
+    fn foundry_endpoint_without_any_model_fails_live_configuration() {
+        let env = EnvMap::from_iter([(
+            "FOUNDRY_PROJECT_ENDPOINT",
+            "https://my-res.services.ai.azure.com/api/projects/proj_1",
+        )]);
+        let (mode, provider) = resolve_inference(&env, None).unwrap();
+        assert_eq!(mode, InferenceMode::Foundry);
+        let err = provider.unwrap().effective_model(None).unwrap_err();
+        assert!(err.to_string().contains("explicit model"));
     }
 }

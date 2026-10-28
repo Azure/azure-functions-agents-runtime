@@ -2,6 +2,8 @@
 
 **Working local prototype:** an existing C# HTTP function also serves as an
 agent tool, without a second business implementation or app-authored adapter.
+Inference uses deterministic MOCK by default and can attempt configured Foundry
+inference; live service validation is separate from the mock evidence below.
 
 ## What we built
 
@@ -56,8 +58,13 @@ PASS  Real Functions trigger indexing and HTTP requests
 PASS  Rust → C# callbacks for order lookup and shipping
 PASS  HTTP status + text-body tool results, including errors
 PASS  Second conversation turn and third turn after full restart
-PASS  All 21 C# lifecycle / validation / adapter check groups
+PASS  All 22 C# lifecycle / validation / adapter check groups
 ```
+
+On October 28, 22 C# checks and 20 Rust tests passed. Mode-selection tests
+confirmed mock-by-default behavior, Foundry-intent detection, and reporting the
+initialized mode to the C# host. Local and Azurite HTTP smoke runs also passed
+with explicit MOCK selection. The live service path was not exercised.
 
 Fresh logs, responses, and `summary.json` are retained locally under
 `.tools/leadership-validation-20261027-1912/` (ignored, not committed).
@@ -65,9 +72,10 @@ Earlier verification also passed the real-host scenario with Azurite storage.
 
 ## Scope, not a production claim
 
-**Real host, real worker, real Rust process; deterministic mock inference.**
-This does not validate live Foundry inference or a live model's tool selection.
-The order/shipping data are fixed sample values.
+**Real host, real worker, real Rust process; deterministic mock inference
+verified.** Configured Foundry inference is available, but this evidence does
+not validate live authentication, model invocation, or a live model's tool
+selection. The order/shipping data are fixed sample values.
 
 Agent callbacks invoke the handler directly; they **do not** run Functions
 middleware, HTTP ingress authorization, or binding orchestration.

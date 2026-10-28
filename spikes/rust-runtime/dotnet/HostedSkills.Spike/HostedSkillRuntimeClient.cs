@@ -30,7 +30,8 @@ public sealed record InitializeResult(
     [property: JsonPropertyName("runtime_version")] string RuntimeVersion,
     [property: JsonPropertyName("agents")] IReadOnlyList<AgentSummary> Agents,
     [property: JsonPropertyName("skills")] IReadOnlyList<SkillDescriptor> Skills,
-    [property: JsonPropertyName("provider")] ProviderSummary Provider,
+    [property: JsonPropertyName("provider")] ProviderSummary? Provider,
+    [property: JsonPropertyName("inference_mode")] string InferenceMode,
     [property: JsonPropertyName("storage_mode")] string StorageMode);
 
 public sealed record AgentRunResult(
@@ -132,6 +133,7 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
     private int _disposed;
     private long _nextId;
     private long _nextCallbackId;
+    public string InferenceMode { get; private set; } = "unknown";
 
     private HostedSkillRuntimeClient(Process process, AgentToolRegistry toolRegistry)
     {
@@ -150,7 +152,7 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
         string appRoot,
         AgentToolRegistry toolRegistry,
         IReadOnlyDictionary<string, string>? envOverrides = null,
-        bool mockLlm = false,
+        bool? mockLlm = null,
         CancellationToken cancellationToken = default)
     {
         var psi = new ProcessStartInfo
@@ -181,6 +183,7 @@ public sealed class HostedSkillRuntimeClient : IAsyncDisposable
                     mock_llm = mockLlm
                 },
                 cancellationToken).ConfigureAwait(false);
+            client.InferenceMode = initResult.InferenceMode;
 
             return (client, initResult);
         }

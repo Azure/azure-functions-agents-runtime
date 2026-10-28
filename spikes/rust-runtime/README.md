@@ -3,11 +3,21 @@
 This spike runs a **real Azure Functions v4 host and .NET 10 isolated worker**.
 An HTTP function uses an ordinary DI-injected `HostedSkill` service to talk to
 one managed Rust `fhs-runtime` subprocess over bidirectional JSON-lines stdio.
-**Inference is deterministic MOCK, not a live model or Copilot session.**
+Inference defaults to deterministic MOCK when Foundry is not configured. With
+Foundry settings, the runtime attempts live Foundry inference unless
+`FHS_MOCK_LLM=true` explicitly forces mock mode.
 This does not change the production Python runtime or add a production binding.
 
 For the visual overview and demonstrated outcomes, see the
 [leadership README](LEADERSHIP-README.md).
+
+> [!IMPORTANT]
+> Live Foundry mode is available when a valid project endpoint and model are
+> configured. It attempts authentication and inference; invalid configuration,
+> authentication failure, or model errors fail the run without mock fallback.
+> The existing local/Azurite smoke tests explicitly force MOCK and do not
+> contact Foundry. Live authentication and service invocation have not been
+> verified unless separately reported with real Foundry resources.
 
 ## What is real, and what is not
 
@@ -19,8 +29,9 @@ For the visual overview and demonstrated outcomes, see the
 | `lookup_order` | Rust reverse `tool.call` executes a plain C# `[AgentTool]` method in the worker |
 | `calculate_shipping_http` | Rust reverse `tool.call` executes **the same `ShippingQuoteAsync` handler** using runtime-owned synthetic HTTP objects; no app-authored adapter or HTTP loopback |
 | Trigger metadata | Describes the attributed function, method and route. It is not an instruction to the Functions binding system |
-| Session persistence | Rust SessionFs writes actual local files or actual Azurite Blobs; mock conversation turns, not a live SDK transcript |
-| Provider | Configuration is resolved, but no model/token endpoint is contacted by the smoke test |
+| Session persistence | Rust SessionFs writes actual local files or actual Azurite Blobs; MOCK turns are deterministic, while Foundry turns use the SDK |
+| Inference | No Foundry intent selects MOCK; Foundry intent selects live mode unless the explicit mock override is true |
+| Provider | Only a live Foundry run acquires a token or contacts the model endpoint; mock smoke tests do neither |
 
 The shipping tool **directly invokes the handler in the same .NET worker**, in a
 fresh DI scope, but **does not enter the Functions invocation pipeline**. Its
@@ -216,21 +227,31 @@ serialization, cleanup, and unsupported signatures without a live host or model.
 The checks use the same pinned worker/HTTP libraries as the sample. The executable fixture
 needs its checked-in executable bit on Linux.
 
-Verified with Core Tools 4.16.0 and .NET SDK 10.0.402: all 21 C# checks and
-11 Rust tests pass. Both local and Azurite real-host smoke modes pass, including
+Verified with Core Tools 4.16.0 and .NET SDK 10.0.402: all 22 C# checks and
+20 Rust tests (18 unit, 2 integration) pass. Both local and Azurite real-host smoke modes pass, including
 dual-attribute metadata, the handler's success/error responses on both entry
 paths, and whole-host restart persistence. These checks use mock inference only.
 
 ## Manual host and HTTP requests
 
-After `cargo build --bin fhs-runtime` and
-`dotnet build dotnet/HostedSkills.Spike`, export the following from the spike:
+This runs the deterministic mock only. Activate the local toolchain from the
+repository root if needed (`source spikes/rust-runtime/.tools/activate.sh`), then
+from the spike directory build and start the host:
 
 ```bash
+cd spikes/rust-runtime
+mkdir -p .tools/scratch
+export TMPDIR="$PWD/.tools/scratch" TMP="$PWD/.tools/scratch" TEMP="$PWD/.tools/scratch"
+cargo build --bin fhs-runtime
+dotnet build dotnet/HostedSkills.Spike
+
 export FUNCTIONS_WORKER_RUNTIME=dotnet-isolated AzureWebJobsSecretStorageType=files
+# Explicitly force deterministic mock mode even with placeholder Foundry settings below.
 export AzureWebJobsStorage='' FHS_MOCK_LLM=true
 export FHS_RUNTIME_PATH="$PWD/target/debug/fhs-runtime"
 export DEFAULT_AGENT_MODEL=mock-model ENVIRONMENT_NAME=dotnet-isolated TENANT_NAME=ContosoRetail
+# These valid-shaped values satisfy provider configuration. In mock mode they
+# are not contacted and no Entra token is acquired.
 export AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry
 export FOUNDRY_PROJECT_ENDPOINT=https://contoso-foundry.services.ai.azure.com/api/projects/retail
 export AZURE_FUNCTIONS_AGENTS_LOCAL_STORAGE_DIR="$PWD/.tools/manual-sessions"
@@ -268,6 +289,54 @@ tool output contains `status_code=400` and the handler's error body. The mock
 prints tool results deterministically; it does not demonstrate a live model's
 ability to interpret or react to HTTP statuses.
 
+### Live Foundry configuration
+
+The worker selects inference mode during Rust initialization. A nonblank
+`AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, or
+`FOUNDRY_MODEL` expresses Foundry intent and selects live mode. Without any of
+these settings the runtime uses MOCK; `DEFAULT_AGENT_MODEL` or
+`AZURE_FUNCTIONS_AGENTS_MODEL` alone does not enable a live provider.
+`FHS_MOCK_LLM=true` explicitly forces MOCK even when Foundry-shaped values are
+present. The mode is returned by Rust initialization and shown in worker logs
+and `/api/support` responses.
+
+To attempt live inference, configure a Foundry project endpoint and a model:
+
+```bash
+export AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry
+export FOUNDRY_PROJECT_ENDPOINT='https://<resource>.services.ai.azure.com/api/projects/<project>'
+export DEFAULT_AGENT_MODEL='<model-deployment-name>'
+unset FHS_MOCK_LLM
+```
+
+The endpoint must be the **Foundry project endpoint**, not the resource root or
+a deployment URL. The sample agent resolves its model from
+`DEFAULT_AGENT_MODEL`; live model precedence is the selected agent's resolved
+model, `AZURE_FUNCTIONS_AGENTS_MODEL`, then `FOUNDRY_MODEL`. Model deployment
+names are passed through as opaque values. A partial or malformed requested
+live configuration fails initialization rather than falling back to MOCK.
+
+The Rust provider requests an Entra token for `https://ai.azure.com/.default`.
+For local development it invokes Azure CLI token acquisition; in the supported
+Functions host environment it can use the Managed Identity endpoint. Ensure the
+appropriate identity is already authorized for the project and model. Never
+copy token output into configuration, source, or logs. Do not put secrets in
+`local.settings.json` or shared logs.
+
+The Rust SDK dependency disables its default bundled-runtime feature and enables
+its managed `runtime` feature. A local `cargo build` acquires the compatible
+Copilot runtime into the build machine's cache; the produced `fhs-runtime`
+binary does not embed that runtime. Run the binary on the same machine where it
+was built, or provision the version-matched SDK runtime package and point
+`COPILOT_CLI_PATH` at its compatible entry point. The Rust and .NET builds
+passing does not validate SDK runtime startup or Foundry service access.
+
+Run the manual host procedure above with those settings to make a live request.
+The response and startup log should report `FOUNDRY`. Authentication or model
+errors are surfaced; there is no mock fallback. The checked-in smoke tests are
+deliberately mock-only and are **not** evidence of successful live inference.
+No live Foundry contact is claimed by this spike's existing mock validation.
+
 These anonymous endpoints expose mock customer/session data and are **local
 test endpoints only**. Do not publish this sample unchanged to the internet.
 
@@ -276,15 +345,17 @@ test endpoints only**. Do not publish this sample unchanged to the internet.
 - `src/config.rs`, `env.rs`, `skills.rs`: Rust config/markdown discovery,
   substitution, skill filtering. These are a separate experimental
   implementation, **not full parity** with Python validation/authoring.
-- `src/engine.rs`, `protocol.rs`: bidirectional stdio, mock and unverified live
-  SDK execution branches, stream notifications and session inspection.
+- `src/engine.rs`, `protocol.rs`: bidirectional stdio, mock/live mode selection,
+  SDK execution, stream notifications and session inspection. Actual live
+  authentication and Foundry model invocation remain opt-in validation.
 - `src/session_fs.rs`: local filesystem or SharedKey Blob SessionFs. Azurite
   smoke uses the public emulator account/key on a private, unused loopback
   port. **Blob identity/Bearer auth is incomplete** (the authorization header
   is a placeholder); do not claim Managed Identity storage support.
-- `src/providers.rs`: provider resolution and token-provider code. Real
-  Foundry/Azure OpenAI/OpenAI authentication and inference are **not tested**
-  by this integration. `mock-model` is only a diagnostic label.
+- `src/providers.rs`: Foundry provider resolution and token-provider code.
+  Foundry inference is attempted only when configured; Azure OpenAI and OpenAI
+  live providers are not enabled through this host. `mock-model` is an opaque
+  mock diagnostic label, not a reserved deployment name.
 - `dotnet/HostedSkills.Spike`: genuine Functions SDK metadata and HTTP bindings;
   sample-only DI facade, dual-attribute function discovery, and runtime-owned
   direct HTTP adapter. See [FRD 0012](../../docs/frds/0012-dotnet-function-tools-spike.md).

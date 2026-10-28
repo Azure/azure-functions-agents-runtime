@@ -21,6 +21,7 @@ for line in sys.stdin:
             "runtime_version": "fixture", "agents": [], "skills": [],
             "provider": {"kind": "fixture", "base_url": "", "auth_mode": "none",
                          "default_model": "mock"},
+            "inference_mode": "foundry" if mode == "foundry" else "mock",
             "storage_mode": "fixture",
         }
     elif method == "agent.run":

@@ -15,6 +15,7 @@ use fhs_runtime::protocol::{
     SessionInspectParams, SessionInspectResult, ToolCallParams, ToolCallResult,
     TriggerToolMetadata, WorkerToolDescriptor, serve_jsonrpc_stream,
 };
+use fhs_runtime::providers::InferenceMode;
 use fhs_runtime::session_fs::StorageMode;
 use serde_json::json;
 use tempfile::TempDir;
@@ -149,6 +150,8 @@ Follow the order-policy skill when answering.
         serde_json::from_value(init_frame.result.unwrap()).unwrap();
 
     assert_eq!(init_result.storage_mode, StorageMode::Local);
+    assert_eq!(init_result.inference_mode, InferenceMode::Mock);
+    assert!(init_result.provider.is_none());
     assert_eq!(init_result.agents.len(), 1);
     assert_eq!(init_result.agents[0].slug, "order_assistant");
     assert_eq!(init_result.agents[0].name, "Order Assistant (staging)");

@@ -18,8 +18,9 @@ production pipeline. Its C# HTTP handler can carry both `[Function]` and
 HTTP objects and invoke the handler in-process in a fresh DI scope (FRD 0012).
 That path bypasses Functions middleware, ingress authorization, and binding
 orchestration; ordinary HTTP calls still use the real host. This HTTP-only
-experiment uses mock inference and does not establish a production binding or
-general trigger support.
+experiment defaults to mock inference and can attempt live Foundry inference
+when configured; live service validation is separate. It does not establish a
+production binding or general trigger support.
 
 ## 2. High-level data flow
 

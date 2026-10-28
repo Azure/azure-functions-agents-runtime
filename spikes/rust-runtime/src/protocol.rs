@@ -16,7 +16,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::config::TriggerSpec;
-use crate::providers::ProviderSummary;
+use crate::providers::{InferenceMode, ProviderSummary};
 use crate::session_fs::StorageMode;
 use crate::skills::SkillDescriptor;
 
@@ -151,7 +151,7 @@ pub struct InitializeParams {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub tools: Vec<WorkerToolDescriptor>,
-    /// Enable deterministic loopback LLM mode for testing without external LLM credentials.
+    /// Explicitly force deterministic mock inference for tests.
     #[serde(default)]
     pub mock_llm: Option<bool>,
 }
@@ -173,7 +173,8 @@ pub struct InitializeResult {
     pub runtime_version: String,
     pub agents: Vec<AgentSummary>,
     pub skills: Vec<SkillDescriptor>,
-    pub provider: ProviderSummary,
+    pub provider: Option<ProviderSummary>,
+    pub inference_mode: InferenceMode,
     pub storage_mode: StorageMode,
 }
 

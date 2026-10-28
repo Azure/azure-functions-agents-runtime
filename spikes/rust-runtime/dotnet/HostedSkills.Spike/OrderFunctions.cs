@@ -54,7 +54,9 @@ public sealed class OrderFunctions(HostedSkill skill, RuntimeService runtime)
         var session = await runtime.Client.InspectSessionAsync(
             skill.AgentName, result.SessionId, cancellationToken);
         var response = request.CreateResponse(HttpStatusCode.OK);
-        await response.WriteAsJsonAsync(new { inference = "MOCK", result, session }, cancellationToken);
+        await response.WriteAsJsonAsync(
+            new { inference = runtime.Client.InferenceMode.ToUpperInvariant(), result, session },
+            cancellationToken);
         return response;
     }
 
