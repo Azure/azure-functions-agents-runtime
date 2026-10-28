@@ -40,5 +40,10 @@
     "@types/node": "24.13.4",
     "prettier": "3.9.6",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@azure/identity": {
+      "@azure/msal-node": ">=7.1.0 <8.0.0"
+    }
   }
 }

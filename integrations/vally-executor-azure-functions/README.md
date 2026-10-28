@@ -24,6 +24,30 @@ npm run test:cli
 `test:cli` runs positive and negative `--require-pass` evaluations against a temporary local HTTP
 server. Vally and its CLI are pinned to 0.16.0; review compatibility before changing either version.
 
+### Security overrides
+
+Azure Identity depends on MSAL Node 6, which is affected by
+[GHSA-xcx6-jx8p-x3h5](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5).
+This package overrides that dependency to `>=7.1.0 <8.0.0`, which includes the fix.
+Remove the override when Azure Identity uses a fixed MSAL version.
+
+npm applies overrides only from the root project. If you install this evaluator as a
+dependency, add this override to your root package manifest and update your lockfile:
+
+```json
+{
+  "overrides": {
+    "@azure/identity": {
+      "@azure/msal-node": ">=7.1.0 <8.0.0"
+    }
+  }
+}
+```
+
+Run the authentication and evaluation checks after you apply the override.
+The lockfile also uses a fixed Zod version. Update downstream lockfiles and run
+`npm audit --audit-level=moderate`.
+
 ## Configure
 
 The registered executor name is `azure-functions-agent`:
