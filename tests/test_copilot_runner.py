@@ -173,7 +173,8 @@ async def test_sse_semantic_invocation_tracks_actual_execution_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native, monkeypatch):
+@pytest.mark.parametrize("role", ["delegate", "workflow_subagent"])
+async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native, monkeypatch, role):
     from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
         StorageMode,
         resolve_route,
@@ -183,6 +184,7 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
     active = 0
     providers = []
     sessions = [_fake_client().create_session.return_value for _ in range(2)]
+    native.delete_session.side_effect = RuntimeError("Session file not found")
 
     async def create(**options):
         nonlocal active
@@ -212,13 +214,13 @@ async def test_concurrent_leaves_are_isolated_local_and_deleted(preview, native,
         results = await asyncio.gather(*[
             runner.run_leaf_agent_task(
                 _specialist(), AgentCapabilities(_harness=primary), f"task-{index}",
-                timeout=3, execution_role="workflow_subagent",
+                timeout=3, execution_role=role,
             ) for index in range(2)
         ])
         assert results == ["synthetic reply"] * 2
         ids = [call.kwargs["session_id"] for call in native.create_session.call_args_list]
         assert ids[0] != ids[1]
-        assert {call.args[0] for call in native.delete_session.call_args_list} == set(ids)
+        native.delete_session.assert_not_awaited()
         assert locks == _harness_execution._SESSION_LOCKS
         assert not (copilot_state(primary).session_storage.local_dir / "copilot-native").exists()
         for provider in providers:
@@ -235,8 +237,11 @@ async def test_leaf_delete_failure_preserves_body_outcome(
     preview, native, monkeypatch, failure, delete_fails,
 ):
     session = native.create_session.return_value
-    if delete_fails:
-        native.delete_session.side_effect = RuntimeError("private deletion detail")
+    deletion_error = RuntimeError("private deletion detail")
+    delete_leaf = AsyncMock(
+        side_effect=deletion_error if delete_fails else _copilot_execution._delete_leaf
+    )
+    monkeypatch.setattr(_copilot_execution, "_delete_leaf", delete_leaf)
     started = asyncio.Event()
     timeouts: list[asyncio.Timeout] = []
     original_timeout_at = asyncio.timeout_at
@@ -275,10 +280,11 @@ async def test_leaf_delete_failure_preserves_body_outcome(
         elif delete_fails:
             with pytest.raises(RuntimeError, match="private deletion detail") as caught:
                 await task
-            assert caught.value is native.delete_session.side_effect
+            assert caught.value is deletion_error
         else:
             assert await task == "synthetic reply"
-        native.delete_session.assert_awaited_once()
+        delete_leaf.assert_awaited_once()
+        native.delete_session.assert_not_awaited()
         session.disconnect.assert_awaited_once()
         if failure != "success":
             session.abort.assert_awaited_once()

@@ -518,7 +518,7 @@ async def test_tools_override_native_callback_context_and_preserve_leaf_hierarch
         assert child.parent.span_id == outer.context.span_id
         assert child.attributes["gen_ai.agent.name"].endswith("specialist")
         assert len([span for span in spans if span.name.startswith("invoke_agent ")]) == 2
-        client.delete_session.assert_awaited_once()
+        client.delete_session.assert_not_awaited()
     for session in sessions:
         session.on.assert_called_once()
         session.unsubscribe.assert_called_once()

@@ -177,12 +177,12 @@ class _ExecutionLifecycle:
         )
 
     def leaf_cleanup(
-        self, owner: CopilotRuntime, route: StorageRoute, agent_slug: str
+        self, route: StorageRoute, agent_slug: str
     ) -> AbstractAsyncContextManager[None]:
         if not self.leaf:
             return nullcontext()
         return _bounded_cleanup(
-            lambda: _delete_leaf(owner, self.copilot_id, route, agent_slug),
+            lambda: _delete_leaf(self.copilot_id, route, agent_slug),
             "Copilot could not delete ephemeral specialist state.",
         )
 
@@ -285,14 +285,11 @@ async def _close_storage(storage: CopilotSessionFs) -> None:
 
 
 async def _delete_leaf(
-    owner: CopilotRuntime, session_id: str, route: StorageRoute, agent_slug: str
+    session_id: str, route: StorageRoute, agent_slug: str
 ) -> None:
-    try:
-        if owner._client is not None:
-            await owner._client.delete_session(session_id)
-    finally:
-        parent = LocalSessionFileBackend(route.local_dir)
-        await parent.rm(session_prefix(route, agent_slug, session_id), recursive=True, force=True)
+    # SDK session.delete does not use the SessionFs callback route.
+    parent = LocalSessionFileBackend(route.local_dir)
+    await parent.rm(session_prefix(route, agent_slug, session_id), recursive=True, force=True)
 
 
 @asynccontextmanager
@@ -600,7 +597,7 @@ async def _run(
                 lambda: _close_storage(storage),
                 "Copilot session storage could not be closed.",
             )
-            leaf_cleanup = lifecycle.leaf_cleanup(owner, route, request.agent_slug)
+            leaf_cleanup = lifecycle.leaf_cleanup(route, request.agent_slug)
             async with storage_cleanup, leaf_cleanup:
                 mcp_servers = await mcp_configuration(
                     request.mcp_servers, protect_headers=calls.protect_headers
