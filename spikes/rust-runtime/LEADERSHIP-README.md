@@ -65,6 +65,28 @@ JSON-RPC runs over shared bidirectional **stdin/stdout** pipes. Rust can call a
 C# tool mid-run; C# invokes the handler in the same worker and returns its
 status and body. Sessions persist across worker restarts.
 
+## Authoring
+
+```csharp
+[Function("ShippingQuote")]
+[AgentTool("calculate_shipping_http", "Calculate shipping.",
+    InputType = typeof(ShippingRequest))]
+public Task<HttpResponseData> ShippingQuoteAsync(...)
+```
+
+Register the function type once. The runtime generates the tool schema from
+the DTO and invokes the same handler.
+
+## What the demo demonstrates
+
+The agent callback invokes the registered C# HTTP handler in-process with
+synthetic request/response objects; external HTTP uses the real Functions host.
+Configured Foundry support is implemented; live authentication and inference
+are the next validation step.
+
+**Run:** `python3 smoke_host.py --storage local` after setup. See the
+[technical README](README.md) for prerequisites and Foundry configuration.
+
 ## Why Rust for the shared runtime?
 
 One Rust runtime can provide shared orchestration to language workers over
@@ -103,8 +125,6 @@ flowchart LR
 
 | Investment area | What needs to be built or decided |
 | --- | --- |
-| Investment | Production work |
-| --- | --- |
 | **Runtime + adapters** | Versioned binaries, packaging, and a thin process/tool adapter per language. |
 | **Protocol + Functions** | Versioned messages, compatibility, trigger coverage, authorization, and result mapping. |
 | **Quality + security** | Cross-language conformance tests, CI, identity, least privilege, and secret handling. |
@@ -113,39 +133,3 @@ flowchart LR
 The opportunity: implement orchestration once and keep language adapters
 focused. A rollout estimate needs agreed language/trigger scope and support
 requirements.
-
-## Authoring
-
-```csharp
-[Function("ShippingQuote")]
-[AgentTool("calculate_shipping_http", "Calculate shipping.",
-    InputType = typeof(ShippingRequest))]
-public Task<HttpResponseData> ShippingQuoteAsync(...)
-```
-
-Register the function type once. The runtime generates the tool schema from
-the DTO and invokes the same handler.
-
-## Evidence: same handler, both paths
-
-**Local verification (Oct 27–28, 2026):** real Functions host, .NET 10 worker,
-Rust process, local and Azurite storage.
-
-| Scenario | HTTP entry | Agent-tool entry |
-| --- | --- | --- |
-| Order `ORD-900`, ZIP `98052` | **200** · PriorityExpress · **$14.25** | **200** envelope · same carrier and rate |
-| Empty ZIP | **400** · validation error | **400** envelope · same handler error |
-| Execution evidence | `http-trigger` | `stdio-function-handler` |
-
-**22 C# checks and 20 Rust tests passed.** HTTP and tool paths returned matching
-success and validation-error results; sessions resumed after restart.
-
-## What the demo demonstrates
-
-The agent callback invokes the registered C# HTTP handler in-process with
-synthetic request/response objects; external HTTP uses the real Functions host.
-Configured Foundry support is implemented; live authentication and inference
-are the next validation step.
-
-**Run:** `python3 smoke_host.py --storage local` after setup. See the
-[technical README](README.md) for prerequisites and Foundry configuration.
