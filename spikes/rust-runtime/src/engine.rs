@@ -797,3 +797,59 @@ fn extract_json_args_from_prompt(prompt: &str) -> Option<Value> {
     }
     serde_json::from_str(&prompt[start..=end]).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn foundry_mode_starts_managed_sdk_runtime_without_model_contact() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("startup.agent.md"),
+            "---\nname: Startup\nmodel: deployment\n---\nYou are a test agent.",
+        )
+        .unwrap();
+        let engine = RuntimeEngine::new();
+        let initialized = engine
+            .handle_initialize(InitializeParams {
+                app_root: dir.path().to_path_buf(),
+                env: [
+                    ("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry"),
+                    (
+                        "FOUNDRY_PROJECT_ENDPOINT",
+                        "https://startup.services.ai.azure.com/api/projects/test",
+                    ),
+                    ("FHS_MOCK_LLM", "false"),
+                    ("AzureWebJobsStorage", ""),
+                    (
+                        "AZURE_FUNCTIONS_AGENTS_LOCAL_STORAGE_DIR",
+                        dir.path().to_str().unwrap(),
+                    ),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+                tools: vec![],
+                mock_llm: Some(false),
+            })
+            .await
+            .unwrap();
+        assert_eq!(initialized.inference_mode, InferenceMode::Foundry);
+        assert_eq!(
+            initialized.provider.unwrap().kind,
+            crate::providers::ProviderKind::Foundry
+        );
+        let state = engine.state.read().await.clone().unwrap();
+        let client = tokio::time::timeout(
+            Duration::from_secs(60),
+            engine.ensure_copilot_client(&state),
+        )
+        .await
+        .expect("SDK runtime startup timed out")
+        .expect("Foundry's SDK runtime must be available after cargo build");
+        let ping = client.ping(Some("foundry-startup")).await;
+        client.stop().await.unwrap();
+        assert!(ping.is_ok(), "SDK runtime ping failed: {ping:?}");
+    }
+}

@@ -241,9 +241,11 @@ The checks use the same pinned worker/HTTP libraries as the sample. The executab
 needs its checked-in executable bit on Linux.
 
 Verified with Core Tools 4.16.0 and .NET SDK 10.0.402: all 22 C# checks and
-20 Rust tests (18 unit, 2 integration) pass. Both local and Azurite real-host smoke modes pass, including
+21 Rust tests (19 unit, 2 integration) pass. Both local and Azurite real-host smoke modes pass, including
 dual-attribute metadata, the handler's success/error responses on both entry
-paths, and whole-host restart persistence. These checks use mock inference only.
+paths, and whole-host restart persistence. Host smoke checks use mock inference
+only; the SDK startup regression separately launches the real runtime without
+performing model inference.
 
 ## Manual host and HTTP requests
 
@@ -343,6 +345,27 @@ binary does not embed that runtime. Run the binary on the same machine where it
 was built, or provision the version-matched SDK runtime package and point
 `COPILOT_CLI_PATH` at its compatible entry point. The Rust and .NET builds
 passing does not validate SDK runtime startup or Foundry service access.
+
+Do not set `COPILOT_SKIP_CLI_DOWNLOAD` for normal builds: even a value of `0`
+disables the SDK's runtime acquisition. The spike previously set it in
+`.cargo/config.toml`, so builds succeeded but the first live turn failed with
+`binary not found: copilot-runtime`. After updating, unset that variable and
+rebuild Rust before restarting the host:
+
+```bash
+unset COPILOT_SKIP_CLI_DOWNLOAD
+cargo build --bin fhs-runtime
+```
+
+`FOUNDRY` identifies the **model provider**, not a different agent harness.
+The existing live branch deliberately runs the Copilot SDK agent loop with a
+Foundry provider configuration and Entra authentication; it does not use GitHub
+Copilot inference or require a separately installed interactive Copilot CLI.
+The SDK-managed `copilot-runtime` and adjacent `runtime.node` are still required
+for skills, tool callbacks and SessionFs. A missing runtime fails before any
+Foundry token or model request; it does not indicate provider misselection.
+The Rust startup regression test launches and pings this actual managed runtime
+in Foundry mode without acquiring a token or contacting a model endpoint.
 
 Run the manual host procedure above with those settings to make a live request.
 The response and startup log should report `FOUNDRY`. Authentication or model

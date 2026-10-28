@@ -19,7 +19,9 @@ HTTP objects and invoke the handler in-process in a fresh DI scope (FRD 0012).
 That path bypasses Functions middleware, ingress authorization, and binding
 orchestration; ordinary HTTP calls still use the real host. This HTTP-only
 experiment defaults to mock inference and can attempt live Foundry inference
-when configured; live service validation is separate. It does not establish a
+through the Copilot SDK agent loop when configured. Cargo acquires the SDK's
+version-matched native runtime; Foundry selects the model provider, not a
+separate harness. Live service validation is separate. It does not establish a
 production binding or general trigger support.
 
 ## 2. High-level data flow
