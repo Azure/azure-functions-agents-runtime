@@ -4,7 +4,7 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-09-15
+updated: 2026-10-29
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
@@ -377,23 +377,34 @@ for together. The current scheduler raises Durable exceptions during that wait.
 It processes returned terminal failure outcomes only after the wave completes.
 These are different failure paths; do not change both to immediate failure.
 
-[Workflow fan-out groups](0012-workflow-fan-out-groups.md) changes the ordinary-wave
-contract for new instances whose stored input selects the all-task wait mode.
-Those instances wait for all children before reporting a Durable task failure.
-The earlier timing below remains the contract for instances without that mode.
-Continuation waves keep the per-instance behavior below under either input format.
+**DTS fan-out groups.** New ordinary waves in both schedulers use
+`when_any([cancel_task, when_all(wave_tasks)])`. This lets DTS show a standard
+Fan-out group without changes to task plans, Activity names, or display labels.
+The runtime adds the internal `wave_wait_mode: "all"` field to the orchestration
+input that Durable stores in its execution history. This is the default for new
+instances, not a user or model option. An absent field keeps the earlier wait
+for existing instances; unsupported values fail before dispatch.
 
-If no instance in a wave has persisted `continue_on_error: true`, keep the
-existing wait and result-processing path. This includes old histories,
-timeout-only policies, and explicit `continue_on_error: false`. Preserve the
-failure cause, result-application order, and cancellation order.
+A grouped wave waits for every child, including retries and timers, before it
+reports a Durable task failure. Cancellation can win before the group finishes,
+even after a child fails. Returned terminal failure results are processed only
+after a successful group wait. Preserve result order and commit no partial wave
+results. When cancellation wins, cancel pending timers and restore the pending
+wave while keeping results from earlier waves. Do not force-stop running Activities.
+Empty plans and skipped collections must finish without waiting on an empty group.
+
+For an ordinary wave without the stored mode, keep the earlier wait,
+failure cause, result-application order, and cancellation order. Do not add the
+field to an existing instance during replay. The SDK upgrade also affects replay;
+the field does not isolate those SDK changes.
 
 Only a wave with at least one persisted `continue_on_error: true` uses the new
 per-instance processing path. In that path, record a failure and keep waiting
 only if the failed instance permits continuation and its failure kind permits
 it. Raise all other failures immediately, without waiting for unrelated tasks or
 timers. Share this decision logic between the static and dynamic schedulers.
-Select the path from persisted input, not current tool declarations.
+This path takes priority over the grouped wait and keeps its earlier DTS display.
+Select it from persisted input, not current tool declarations.
 If cancellation is selected, restore the wave and discard its recorded outcomes,
 as in the current cancellation path.
 
@@ -1378,6 +1389,7 @@ results remain unchanged.
 | 102 | Completion after continued failures | New scheduler state / separate result display | Keep existing execution states. Require the later status/UI slice to distinguish completion with continued failures, including when all tasks fail. Use runtime-owned continuation records, not user result keys. Document the interim UI limitation | Human (TsuyoshiUshio), Agent; review by Victoria Hall | 2026-09-15 |
 | 103 | Timeout sample delivery | Add a separate timeout sample / extend the retry sample | Extend `workflow-retry-policy` with a carrier task whose decorator timeout overrides a longer plan timeout while the plan retry remains active. This gives one runnable app for retry success, timeout retry, and timeout exhaustion without duplicate Functions setup | Agent | 2026-09-16 |
 | 104 | Final review delivery | Keep two stacked review PRs / combine completed slices in one final review PR | Combine the completed timeout and continuation slices in one final review PR. The implementation stayed in two commits during development and passed separate implementation and testing reviews. This replaces the review boundary in Decision 97; the product scope and separate status/UI slice do not change | Human (TsuyoshiUshio), Agent | 2026-09-16 |
+| 105 | Ordinary-wave fan-out groups | Replace all waits / select from stored input | Use nested all-task waits for new ordinary waves and store the internal `wave_wait_mode: "all"` field. An absent field keeps the earlier wait. Grouped Durable failures wait for all children; cancellation can win during that wait. Keep per-task continuation processing | Human (TsuyoshiUshio) | 2026-10-28 |
 
 ## 6. Test plan
 
@@ -1602,12 +1614,24 @@ results remain unchanged.
     instance and a pending timer still raises immediately;
   - cancellation racing a continuable failure restores the wave and discards the
     recorded failure;
-  - a wave with no enabled continuation keeps immediate Durable exceptions and
-    deferred processing of returned terminal outcomes, including authorization
-    failures; preserve its failure cause and result-application order;
-  - old histories, timeout-only policies, and explicit false continuation keep
-    cancellation order when a terminal outcome arrives before a slow sibling;
+  - an ordinary wave without the stored grouped-wait mode keeps immediate Durable
+    exceptions and deferred processing of returned terminal outcomes, including
+    authorization failures; preserve its failure cause and result-application order;
+  - without that mode, old histories, timeout-only policies, and explicit false
+    continuation keep cancellation order when a terminal outcome arrives before
+    a slow sibling;
   - exercise the same rules in both schedulers.
+- [x] DTS fan-out groups
+  - new submissions store the internal mode without a new public tool argument;
+  - real pending SDK tasks and recorded executor histories cover ordering,
+    delayed Durable failures, cancellation, and reuse of the cancel event;
+  - both schedulers cover empty waves, skipped collections, bounded expansion,
+    continuation priority, native timer cancellation, and earlier-wave results;
+  - the release review sample covers parallel tasks, collections, failure,
+    cancellation, and continuation on Storage and DTS; check the real DTS Flow view.
+- [ ] SDK replay: old timer and native-retry histories keep their continuation
+  with the corrected SDK. Live sample runs do not prove this replay contract.
+- [ ] DTS: verify model-backed Workflow Sub Agent fan-out in the real Flow view.
 - [ ] Status/UI slice: completion with errors
   - distinguish clean completion, some continued failures, and all tasks failed
     with continuation enabled;
