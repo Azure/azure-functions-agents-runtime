@@ -43,7 +43,7 @@ flowchart LR
     MR -.->|"neutral HarnessRequest"| L
     L -.->|"MAF-owned history"| T["harness/agent_framework/<br/>_maf_blob_history.py / _maf_file_history.py<br/>JSONL transcripts"]
     R -.->|"CopilotRunner"| CR["harness/copilot_sdk/_copilot_runner.py"]
-    CR -.->|"neutral HarnessRequest: explicit preview"| P["harness/copilot_sdk/<br/>_copilot_execution.py + _copilot_runtime.py<br/>Copilot SDK + native stdio"]
+    CR -.->|"neutral HarnessRequest: default harness"| P["harness/copilot_sdk/<br/>_copilot_execution.py + _copilot_runtime.py<br/>Copilot SDK + native stdio"]
     P -.->|"SDK SessionFs callbacks"| S["harness/copilot_sdk/_copilot_session_fs.py<br/>opaque SDK files<br/>local files or one Blob per file"]
 ```
 
@@ -256,13 +256,13 @@ The `_compose_function_app()` docstring in `src/azure_functions_agents/app.py:_c
 
 ### Where the registration stage hands off to execution
 
-Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Event calls carry approved skills, the full ownership catalog, display and execution-surface telemetry, and omitted-versus-explicit session state. `run_agent_events()` converts the shared SSE vocabulary to typed events for hosted skills. Explicit close or cancellation propagates through each adapter via `aclosing`; callers that break public async iteration early must close it for deterministic release. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
+Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`; explicit MAF opt-out flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`. Event calls carry approved skills, the full ownership catalog, display and execution-surface telemetry, and omitted-versus-explicit session state. `run_agent_events()` converts the shared SSE vocabulary to typed events for hosted skills. Explicit close or cancellation propagates through each adapter via `aclosing`; callers that break public async iteration early must close it for deterministic release. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
 
 `config/merge.py` recursively combines global and per-agent portable
 `agent_configuration` fields, using authored `null` values to clear inherited
 leaves or subtrees, then validates the effective output-token limit.
 `ResolvedAgent.agent_configuration` is always a concrete
-configuration object. With the default MAF harness, the MAF adapter constructs every role with MAF's
+configuration object. On the explicit MAF opt-out path, the MAF adapter constructs every role with MAF's
 `create_harness_agent`. The shared builder uses the unchanged site-qualified
 `agent_id(slug)` for MAF `id` and `<Function App name>/<canonical slug>` for MAF
 `name` when the trimmed `WEBSITE_SITE_NAME` is non-blank, preserving site-name
@@ -297,13 +297,22 @@ configuration warns and is ignored. Agent instructions remain part of every call
 ### Bounded Copilot migration preview
 
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only harness selector. Unset,
-`false`, or `0` keeps the current MAF path; `true` or `1` selects the internal
-Copilot preview; any other present value is an explicit configuration error.
+`true`, or `1` selects the internal Copilot preview; `false` or `0` selects the
+MAF opt-out path; any other present value is an explicit configuration error.
 The selected harness is resolved once per app construction into an immutable
 `AppHarness` binding and carried through handler, delegate, and workflow
 closures. There is no per-agent harness selection, no reread at execution time,
 and no fallback from Copilot back to MAF after selection. Legacy `runtime:`
 front matter remains ignored.
+
+Copilot selection requires a valid explicit or auto-detected provider during
+app startup and resolves the effective model then. An explicit model is not
+required because model resolution falls back to `gpt-4o-mini`. Upgraded apps
+that relied on an unset selector for MAF must set
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=false`; MAF history is not migrated into
+Copilot's separate native-session namespace. Making Copilot the default does
+not qualify the host, provider-auth, storage, restart, native-helper, or
+cross-worker scenarios that remain unqualified in the operations guide.
 
 The runtime keeps discovery, merge, validation, and registration SDK-neutral.
 `HarnessRequest` carries runtime tool, MCP, and approved-skill descriptors;
@@ -789,8 +798,10 @@ This split keeps parsing, policy, Azure binding registration, and runtime execut
 The runtime retains portable model, provider, endpoint, and authentication
 settings. `harness/_provider_config.py` resolves the selected provider and model
 without importing or constructing an SDK client; each selected harness owns its
-client construction and credential acquisition. Custom chat-client injection
-is not a supported public extension point.
+client construction and credential acquisition. Provider selection must be
+explicit or detectable from provider-specific settings; model selection falls
+back to `gpt-4o-mini` when no explicit or provider-specific model is configured.
+Custom chat-client injection is not a supported public extension point.
 
 ### Custom tools
 

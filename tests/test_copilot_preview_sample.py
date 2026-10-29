@@ -30,7 +30,7 @@ def test_restart_verifier_uses_sdk_default_native_resolution(
 ) -> None:
     module = _load_verifier()
 
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "true")
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", raising=False)
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
     monkeypatch.setenv(

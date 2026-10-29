@@ -162,7 +162,7 @@ _SELECTION_LOCK = threading.Lock()
 
 def _flag_enabled(value: str | None) -> bool:
     if value is None:
-        return False
+        return True
     normalized = value.strip().lower()
     if normalized in {"false", "0"}:
         return False

@@ -178,7 +178,7 @@ def overlay_provider_settings(app_dir: Path) -> dict[str, str]:
 
 
 def configured_provider(app_dir: Path) -> str | None:
-    """Return the app's configured MAF provider label, or ``None`` if none is set.
+    """Return the app's configured model-provider label, or ``None`` if none is set.
 
     Reads the app's resolved ``local.settings.json`` (call
     :func:`overlay_provider_settings` first so pipeline env vars are reflected),
@@ -218,7 +218,7 @@ def _is_agent_app(app_dir: Path) -> bool:
 
 def _expected_harness(env: Mapping[str, str] | None) -> str:
     selector = (env or {}).get(HARNESS_SELECTOR, os.environ.get(HARNESS_SELECTOR, ""))
-    return "copilot" if selector.strip().lower() in {"1", "true"} else "maf"
+    return "maf" if selector.strip().lower() in {"0", "false"} else "copilot"
 
 
 def _harness_selection_failure(

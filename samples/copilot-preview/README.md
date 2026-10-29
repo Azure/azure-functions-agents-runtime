@@ -1,6 +1,6 @@
 # Local Copilot preview
 
-This **default-off** Functions sample exercises Copilot HTTP chat and
+This Functions sample exercises the **default Copilot harness** through HTTP chat and
 the authored `/preview` HTTP route with `make_receipt` and `web_request`
 (limited to `example.com`). The SDK owns sessions and their opaque files;
 the host supplies filesystem callbacks backed by local files or Blob.
@@ -14,8 +14,8 @@ and deployment, or a Foundry project and deployment. Azure Entra callers need
 the target data-plane role (for example, Cognitive Services OpenAI User for
 Azure OpenAI or the project role approved by your Foundry administrator).
 
-`requirements.txt` installs this checkout with `[copilot]`. The SDK downloads
-its native runtime on first use if uncached.
+`requirements.txt` installs this checkout; the standard runtime dependency set
+includes the SDK. The SDK downloads its native runtime on first use if uncached.
 
 For the local-file walkthrough, use a terminal without `AzureWebJobsStorage`
 or `AzureWebJobsStorage__blobServiceUri` configured and leave those settings
@@ -31,7 +31,7 @@ uv pip install --python ..\..\..\.venv\Scripts\python.exe -r requirements.txt
 Pop-Location
 $env:VIRTUAL_ENV = "$PWD\.venv"
 $env:PATH = "$env:VIRTUAL_ENV\Scripts;$env:PATH"
-$env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT = "true"
+Remove-Item Env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT -ErrorAction SilentlyContinue
 $run = [Guid]::NewGuid().ToString("N")
 $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR = "$PWD\.preview-state\$run"
 if (Test-Path samples\copilot-preview\src\local.settings.json) {
@@ -172,9 +172,9 @@ the selected harness adapter. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.
 
-## Flag off and cleanup
+## MAF opt-out and cleanup
 
-The flag is read once per app, so stop the host, set the flag to `false` and
+The selector is read once per app, so stop the host, set it to `false` and
 restart to use MAF and its own history provider. When finished with the sample,
 keep the host stopped. In the original host terminal, return to the repository
 root and inspect only this run's files before cleanup:

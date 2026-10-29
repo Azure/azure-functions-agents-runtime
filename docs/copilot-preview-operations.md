@@ -1,14 +1,14 @@
 # Copilot preview operations
 
-Operational reference for the **default-off internal** Copilot harness preview and its
+Operational reference for the **default internal** Copilot harness preview and its
 MCP, scoped skills, and native session persistence. Design rationale lives in
 [`architecture.md`](architecture.md#bounded-copilot-migration-preview); the
 runnable local walkthrough lives in the
 [preview sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/copilot-preview).
 
-> **Status.** This preview is not production-activated. Nothing here authorizes
-> enabling the flag on a customer-facing app. Microsoft Agent Framework (MAF)
-> remains the default and is unchanged while the flag is off.
+> **Status.** Copilot is selected by default, but this does not expand its
+> qualification. The host and native scenarios listed below remain unqualified.
+> Set `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=false` to use the MAF opt-out path.
 
 ## Qualification scope
 
@@ -27,7 +27,7 @@ production qualification.
 The SDK owns continuation, recovery and compaction. The host does not promise
 transactional turns or exactly-once tool effects.
 
-## Opt in and opt out
+## Default selection and MAF opt-out
 
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only harness selector and is read
 once per app construction. Standalone runners retain a separate first-use
@@ -35,8 +35,8 @@ default per resolved app root.
 
 | Value | Result |
 | --- | --- |
-| Unset, `false`, `0` | MAF (default). No Copilot SDK import, native process, download, auth or telemetry. |
-| `true`, `1` | Internal Copilot preview for qualification of every role served by that app. |
+| Unset, `true`, `1` | Internal Copilot preview for every role served by that app. A valid explicit or auto-detected provider is required at startup; model resolution uses the configured/provider-specific model or falls back to `gpt-4o-mini`. |
+| `false`, `0` | MAF opt-out. No Copilot SDK import, native process, download, auth or telemetry. |
 | Present but empty, whitespace-only, or any other text | Explicit configuration error; the app does not start. |
 
 Values are trimmed and case-insensitive. Changing the variable does **not**
@@ -45,9 +45,10 @@ affect an app or standalone default that has already been constructed:
 per-agent selector, no mixed-harness app, and no automatic fallback to MAF once
 Copilot is selected. The legacy `runtime:` front-matter field remains ignored.
 
-Restarting with the flag off selects MAF and its existing history provider.
+Restarting with the flag set to `false` or `0` selects MAF and its existing history provider.
 Only the selected harness constructs, uses and closes its persistence adapter;
 shared configuration does not initialize or probe the other implementation.
+MAF history is not migrated into Copilot sessions when the selection changes.
 
 Runtime-owned telemetry keeps the same invocation surface under either
 harness. Direct, streaming, built-in chat, inbound MCP, non-HTTP, delegate, and

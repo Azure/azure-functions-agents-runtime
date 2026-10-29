@@ -2,7 +2,7 @@
 
 > **Public preview.** The features described here are available for preview use and may change before general availability.
 
-A markdown-first programming model for building AI agents on Azure Functions, powered by the [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework).
+A markdown-first programming model for building AI agents on Azure Functions, using the GitHub Copilot SDK by default with [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework) available as an explicit opt-out.
 
 - **Build agents with markdown** — write instructions, configure triggers, and bind tools in `.agent.md` files
 - **Run on any Azure Functions trigger** — trigger agents on timer, queue, blob, HTTP, Event Hub, Service Bus, Cosmos DB, and more
@@ -38,7 +38,7 @@ azurefunctions-agents-runtime
 - [Front matter spec](front-matter-spec.md) — the `.agent.md` and `agents.config.yaml` field reference
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Observability](observability.md) — tracing and telemetry
-- [Copilot preview operations](copilot-preview-operations.md) — default-off preview with SDK-owned session files; MAF remains the default
+- [Copilot preview operations](copilot-preview-operations.md) — default harness, SDK-owned session files, qualification limits, and MAF opt-out
 - [Agent evaluations](evaluation.md) — preview Vally executor for local and staging targets
 - [Dynamic workflows](workflows.md) — experimental durable DAG execution
 

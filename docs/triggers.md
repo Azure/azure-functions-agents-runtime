@@ -62,8 +62,7 @@ runnable example.
 
 ### Copilot preview
 
-When the internal, default-off Copilot preview is selected
-(`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), registered non-HTTP triggers use the same
+With the default internal Copilot preview, registered non-HTTP triggers use the same
 registration, JSON-safe binding serialization, and shared runner as MAF. Each
 Functions invocation creates one fresh Copilot session, including a batch
 delivery. Auth, tool, and workflow policies are unchanged.

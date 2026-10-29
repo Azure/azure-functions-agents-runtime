@@ -4,12 +4,21 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import get_type_hints
 
 import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool, WorkflowToolMetadata, tool
+
+
+def test_copilot_sdk_is_core_dependency_with_empty_compatibility_extra() -> None:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+
+    assert "github-copilot-sdk==1.0.14" in project["dependencies"]
+    assert project["optional-dependencies"]["copilot"] == []
 
 
 def test_package_imports_resolve_to_real_init() -> None:

@@ -2,7 +2,13 @@
 
 ## Model provider configuration
 
-The runtime uses Microsoft Agent Framework by default, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
+The runtime uses the GitHub Copilot SDK by default and supports Microsoft
+Foundry, Azure OpenAI, and OpenAI as inference back-ends. The standard package
+includes the SDK. At app startup, Copilot requires a valid explicit or
+auto-detected provider and resolves the effective model; model resolution falls
+back to `gpt-4o-mini` when no model is explicitly configured.
+The public preview quickstart and samples use **Microsoft Foundry** as the
+primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
@@ -13,6 +19,12 @@ The runtime uses Microsoft Agent Framework by default, which supports Microsoft 
 If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
 
 Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > runtime fallback (`gpt-4o-mini`).
+
+An unset `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` selects Copilot. Set it to
+`false` or `0` to use the MAF opt-out path for the whole app. There is no
+per-agent selection or fallback, and changing harnesses does not migrate MAF
+history. The default change does not expand the Copilot preview's documented
+host qualification.
 
 ## Quick start
 
@@ -150,5 +162,5 @@ See the [hybrid HostedSkill sample](../samples/hybrid-hosted-skill/).
 - [Front matter reference](front-matter-reference.md) — auto-generated, plain field-by-field reference (handy for quick lookups)
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Architecture](architecture.md) — how the runtime discovers, translates, and registers agents
-- [Copilot preview operations](copilot-preview-operations.md) — separate default-off preview; this quickstart uses MAF and its existing history provider
+- [Copilot preview operations](copilot-preview-operations.md) — default harness setup, qualification limits, native session storage, and MAF opt-out
 - The repository [README](https://github.com/Azure/azure-functions-agents-runtime#readme) also covers custom Python tools, built-in endpoint routes, and multi-agent delegation in more depth

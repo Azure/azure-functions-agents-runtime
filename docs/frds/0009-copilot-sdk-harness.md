@@ -684,3 +684,36 @@ The amendment below was approved by larohra on 2026-10-16.
   simplification on 2026-10-14. The shared harness discriminator is
   `af.agent.harness`. Existing authorization, lazy acquisition, isolation,
   telemetry privacy, and cleanup guarantees remain required.
+
+## 9. Default-harness addendum
+
+**Addendum status: Finalized.** The 2026-10-29 issue request explicitly directed
+implementation of the Copilot SDK as the default harness and is the human
+sign-off for this amendment. This addendum supersedes only earlier statements
+that MAF is selected when the app-level selector is unset.
+
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` remains the only harness selector. An
+unset value selects Copilot, as do `true` and `1`. Explicit `false` or `0`
+selects MAF. Empty, whitespace-only, and other values remain configuration
+errors. Selection is still captured once per app; there is no per-agent
+selection, mixed-harness app, execution-time reread, or automatic fallback.
+
+The Copilot SDK is part of the standard runtime installation. Because Copilot
+qualification requires an explicit or auto-detected provider and resolves the
+effective model during app construction, every upgraded app that leaves the
+selector unset changes harness and may now fail startup until it has
+Copilot-compatible provider settings. An explicitly configured model is not
+required; model resolution falls back to `gpt-4o-mini`. Apps that must retain
+MAF set the selector to `false` or `0`.
+
+The harnesses retain separate persistence formats and namespaces. Existing MAF
+history is not migrated or projected into Copilot sessions. Changing the
+default also does not qualify any existing unqualified Functions-host,
+provider-auth, storage, restart, native helper, or cross-worker scenario.
+Those limits remain exactly as documented by this FRD and the operations guide.
+
+### Default-harness addendum decision
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| --- | --- | --- | --- | --- | --- |
+| 38 | Default harness and migration boundary | keep MAF default / make Copilot default with explicit MAF opt-out / remove MAF | Unset, `true`, and `1` select Copilot; `false` and `0` select MAF; include the SDK in the standard install; preserve once-per-app selection, no fallback, existing qualification limits, and separate non-migrated history | Human (explicit issue request) | 2026-10-29 |

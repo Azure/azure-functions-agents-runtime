@@ -282,7 +282,7 @@ def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview,
         raise runtime.PackageNotFoundError
 
     monkeypatch.setattr(runtime, "version", missing)
-    with pytest.raises(CopilotPreviewError, match=r"\[copilot\]"):
+    with pytest.raises(CopilotPreviewError, match="included with azurefunctions-agents-runtime"):
         _harness.get_harness()
     monkeypatch.setattr(runtime, "version", lambda _: "0.0.0")
     assert _harness.get_harness().name is HarnessKind.COPILOT
@@ -386,7 +386,10 @@ def test_host_owned_worker_and_hosting_settings_are_accepted(preview, monkeypatc
         (EnvVar.ENABLE_COPILOT, None, True, ""),
         (EnvVar.ENABLE_COPILOT, "", False, "must be true"),
         (EnvVar.ENABLE_COPILOT, "   ", False, "must be true"),
+        (EnvVar.ENABLE_COPILOT, "false", True, ""),
+        (EnvVar.ENABLE_COPILOT, "0", True, ""),
         (EnvVar.ENABLE_COPILOT, "true", True, ""),
+        (EnvVar.ENABLE_COPILOT, "1", True, ""),
         (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, None, True, ""),
         (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "", True, ""),
         (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "   ", True, ""),
@@ -409,16 +412,20 @@ def test_host_owned_worker_and_hosting_settings_are_accepted(preview, monkeypatc
     ],
 )
 def test_copilot_environment_edge_semantics(preview, monkeypatch, name, value, allowed, diagnostic):
-    monkeypatch.setenv(EnvVar.ENABLE_COPILOT, "true")
+    if name is not EnvVar.ENABLE_COPILOT:
+        monkeypatch.setenv(EnvVar.ENABLE_COPILOT, "true")
     if value is None:
         monkeypatch.delenv(name, raising=False)
     else:
         monkeypatch.setenv(name, value)
     if allowed:
         harness = _harness.get_harness(preview, new_app=True)
-        assert harness.name is (
-            HarnessKind.MAF if name is EnvVar.ENABLE_COPILOT and value is None else HarnessKind.COPILOT
+        expected = (
+            HarnessKind.MAF
+            if name is EnvVar.ENABLE_COPILOT and value in {"false", "0"}
+            else HarnessKind.COPILOT
         )
+        assert harness.name is expected
     else:
         error_type = ValueError if name is EnvVar.ENABLE_COPILOT else UnsupportedCapabilityError
         with pytest.raises(error_type, match=diagnostic):

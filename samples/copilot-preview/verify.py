@@ -86,8 +86,12 @@ def main() -> None:
     if args.restart_host:
         if args.phase != "all":
             parser.error("--restart-host runs all phases.")
-        if os.environ.get("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "").strip().lower() not in {"true", "1"}:
-            parser.error("--restart-host requires the explicit Copilot preview flag.")
+        selector = os.environ.get("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT")
+        normalized_selector = selector.strip().lower() if selector is not None else None
+        if normalized_selector in {"false", "0"}:
+            parser.error("--restart-host requires the default Copilot harness, not the MAF opt-out.")
+        if normalized_selector not in {None, "true", "1"}:
+            parser.error("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT has an invalid value.")
         app = Path(__file__).resolve().parent / "src"
         required = ["AZURE_FUNCTIONS_AGENTS_PROVIDER"]
         connection = os.environ.get("AzureWebJobsStorage", "").strip()
