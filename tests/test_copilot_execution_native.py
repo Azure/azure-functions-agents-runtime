@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(
     reason="Explicit native-runtime qualification only; never downloads or calls a real provider.",
 )
 
-SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
+SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "session-continuity" / "src"
 CACHE = Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.85"
 SENTINEL = "not-a-credential-native-persistence-sentinel"
 AUTH_FAILURE_SENTINEL = "sentinel-private-native-provider-403"

@@ -1,26 +1,16 @@
 """Install E2E dependencies into each Function app's customer dependency path.
 
-This script runs in Linux CI. It installs one shared package tree and symlinks it
+This script runs in Linux CI. It installs the base package, including the
+default Copilot SDK dependency, into one shared package tree and symlinks it
 into each app to avoid repeatedly installing the same dependencies.
 """
 
 from __future__ import annotations
 
-import os
-import runpy
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-
-def _load_copilot_env_var() -> str:
-    repo_root = Path(__file__).resolve().parents[2]
-    env_module = runpy.run_path(repo_root / "src" / "azure_functions_agents" / "config" / "env.py")
-    return str(env_module["EnvVar"].ENABLE_COPILOT)
-
-
-COPILOT_ENV_VAR = _load_copilot_env_var()
 
 
 def _link_app_dependencies(repo_root: Path, shared_packages: Path) -> None:
@@ -33,13 +23,6 @@ def _link_app_dependencies(repo_root: Path, shared_packages: Path) -> None:
             elif dependency_path.exists():
                 raise FileExistsError(f"dependency path already exists: {dependency_path}")
             dependency_path.symlink_to(shared_packages, target_is_directory=True)
-
-
-def _install_requirement(repo_root: Path) -> str:
-    enabled = os.environ.get(COPILOT_ENV_VAR, "").strip().lower() in {"1", "true"}
-    if enabled:
-        return f"{repo_root}[copilot]"
-    return str(repo_root)
 
 
 def _reset_shared_dependencies(shared_packages: Path) -> None:
@@ -59,7 +42,7 @@ def _install_shared_dependencies(repo_root: Path, shared_packages: Path) -> None
             "pip",
             "install",
             f"--target={shared_packages}",
-            _install_requirement(repo_root),
+            str(repo_root),
         ],
         check=True,
     )

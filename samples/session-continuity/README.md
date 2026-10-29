@@ -1,12 +1,10 @@
-# Local Copilot preview
+# Local session continuity
 
-This **default-off** Functions sample exercises Copilot HTTP chat and
-the authored `/preview` HTTP route with `make_receipt` and `web_request`
-(limited to `example.com`). The SDK owns sessions and their opaque files;
-the host supplies filesystem callbacks backed by local files or Blob.
-This checked-in walkthrough stays local for a reproducible demo; that does not
-by itself define the broader preview contract. ACA `fhs_execute_python` is
-disabled in the checked-in configuration.
+This Functions sample exercises HTTP chat and the authored `/receipt` HTTP route
+with `make_receipt` and `web_request` (limited to `example.com`). Its unique
+focus is continuing the same SDK-owned session after a real Functions-host
+restart. The host supplies filesystem callbacks backed by local files or Blob.
+ACA `fhs_execute_python` is disabled in the checked-in configuration.
 
 Requires Python 3.13/3.14, Azure Functions Core Tools 4, and `uv`. Model calls
 incur charges. You need one approved target: an OpenAI API key/model, an Azure OpenAI resource
@@ -14,31 +12,31 @@ and deployment, or a Foundry project and deployment. Azure Entra callers need
 the target data-plane role (for example, Cognitive Services OpenAI User for
 Azure OpenAI or the project role approved by your Foundry administrator).
 
-`requirements.txt` installs this checkout with `[copilot]`. The SDK downloads
-its native runtime on first use if uncached.
+`requirements.txt` installs this checkout; the standard runtime dependency set
+includes the SDK. The SDK downloads its native runtime on first use if uncached.
 
 For the local-file walkthrough, use a terminal without `AzureWebJobsStorage`
 or `AzureWebJobsStorage__blobServiceUri` configured and leave those settings
 unconfigured in the sample's `local.settings.json`. Either existing setting
 automatically selects Blob, even locally; failures do not fall back to disk.
-Optional approved Blob setup is in the
-[operations guide](../../docs/copilot-preview-operations.md#storage-selection).
+For an optional Blob run, configure an approved disposable storage target with
+`AzureWebJobsStorage` or `AzureWebJobsStorage__blobServiceUri`; see
+[storage selection](../../docs/runtime-operations.md#storage-selection).
 
 ```powershell
 uv venv .venv --python 3.13
-Push-Location samples\copilot-preview\src
+Push-Location samples\session-continuity\src
 uv pip install --python ..\..\..\.venv\Scripts\python.exe -r requirements.txt
 Pop-Location
 $env:VIRTUAL_ENV = "$PWD\.venv"
 $env:PATH = "$env:VIRTUAL_ENV\Scripts;$env:PATH"
-$env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT = "true"
 $run = [Guid]::NewGuid().ToString("N")
-$env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR = "$PWD\.preview-state\$run"
-if (Test-Path samples\copilot-preview\src\local.settings.json) {
+$env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR = "$PWD\.session-state\$run"
+if (Test-Path samples\session-continuity\src\local.settings.json) {
   throw "Do not overwrite local settings."
 }
-Copy-Item samples\copilot-preview\src\local.settings.template.json `
-  samples\copilot-preview\src\local.settings.json
+Copy-Item samples\session-continuity\src\local.settings.template.json `
+  samples\session-continuity\src\local.settings.json
 ```
 
 Choose exactly one provider block. Values entered with `Read-Host -MaskInput`
@@ -108,13 +106,12 @@ Remove-Item Env:OPENAI_API_KEY, Env:AZURE_OPENAI_ENDPOINT, `
 Start the host:
 
 ```powershell
-Push-Location samples\copilot-preview\src
+Push-Location samples\session-continuity\src
 func start --port 7071
 ```
 
-Startup logs `harness=copilot`. Invalid provider settings fail startup, and
-request-time credential failures return a sanitized `error` response; neither
-prints credentials.
+Invalid provider settings fail startup, and request-time credential failures
+return an `error` response; neither prints credentials.
 
 ## Verify
 
@@ -134,7 +131,7 @@ host terminal, preserving its provider settings and
 exercise the authored route with that session:
 
 ```powershell
-$again = Invoke-WebRequest http://127.0.0.1:7071/preview -UseBasicParsing -Method Post `
+$again = Invoke-WebRequest http://127.0.0.1:7071/receipt -UseBasicParsing -Method Post `
   -ContentType application/json -Headers @{"x-ms-session-id"=$first.session_id} `
   -Body '{"prompt":"Recall the previous receipt without calling any tool."}'
 $again.Content
@@ -154,10 +151,11 @@ $web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
 $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
-Optional outbound MCP servers and project skills use the existing authoring
-and per-agent filters; see the [MCP and scoped skills guide](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills)
-before enabling them. This walkthrough requires neither and keeps the receipt
-and `web_request` behavior unchanged.
+Optional outbound MCP servers and project skills use the existing authoring and
+per-agent filters. This walkthrough requires neither and keeps the receipt and
+`web_request` behavior unchanged. See
+[MCP and scoped skills](../../docs/runtime-operations.md#mcp-and-scoped-skills)
+before enabling them.
 
 The adapter also supports SSE chat, declared chat delegates, Workflow
 Sub Agents, and Dynamic Workflow management when authored in an agent app.
@@ -165,34 +163,26 @@ This sample remains a single-agent tool demonstration and does not configure
 those optional capabilities. This walkthrough does not live-qualify deployed
 startup, auth, storage, restart, or overlap behavior. The built-in debug chat
 UI and non-HTTP triggers are enabled but not live-qualified; the UI does not
-restore earlier transcript messages when you resume a session. Provider
-selection still comes from the shared
-`harness/_provider_config.py` rules, while SDK client construction stays inside
-the selected harness adapter. See
-[the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
-for the capability boundary.
+restore earlier transcript messages when you resume a session. Provider selection still comes from the shared runtime configuration rules.
 
-## Flag off and cleanup
+## Cleanup
 
-The flag is read once per app, so stop the host, set the flag to `false` and
-restart to use MAF and its own history provider. When finished with the sample,
-keep the host stopped. In the original host terminal, return to the repository
-root and inspect only this run's files before cleanup:
+When finished with the sample, keep the host stopped. In the original host
+terminal, return to the repository root and inspect only this run's files before
+cleanup:
 
 ```powershell
 # Stop the host.
 Pop-Location
-$env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT = "false"
 if (Test-Path -LiteralPath $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR) {
   Get-ChildItem -LiteralPath $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR -Recurse -File |
     Select-Object FullName, Length, LastWriteTimeUtc
 }
-Remove-Item -LiteralPath .\samples\copilot-preview\src\local.settings.json
+Remove-Item -LiteralPath .\samples\session-continuity\src\local.settings.json
 Remove-Item Env:OPENAI_API_KEY, Env:AZURE_OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
 Remove only the sample-owned files after reviewing the dedicated run directory;
-do not delete SDK caches, MAF history or shared Blob containers. Native files
-may contain conversation content, so do not publish them in diagnostics.
-For storage configuration, errors and targeted cleanup, see
-[`docs/copilot-preview-operations.md`](../../docs/copilot-preview-operations.md).
+do not delete SDK caches or shared Blob containers. Native files may contain
+conversation content, so do not publish them in diagnostics. See
+[retention and targeted cleanup](../../docs/runtime-operations.md#retention-and-targeted-cleanup).

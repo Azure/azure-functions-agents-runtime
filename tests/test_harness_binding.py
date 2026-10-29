@@ -45,12 +45,12 @@ def preview_module(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("value", [None, "false", "FALSE", "fAlSe", "0", " false "])
+@pytest.mark.parametrize("value", ["false", "FALSE", "fAlSe", "0", " false "])
 def test_flag_off(value):
     assert not binding._flag_enabled(value)
 
 
-@pytest.mark.parametrize("value", ["true", "TRUE", "tRuE", "1", " true "])
+@pytest.mark.parametrize("value", [None, "true", "TRUE", "tRuE", "1", " true "])
 def test_flag_on(value):
     assert binding._flag_enabled(value)
 
@@ -167,16 +167,26 @@ def test_request_retains_frozen_neutral_descriptors_and_standalone_skill_paths()
         request.model = "replacement"
 
 
-def test_maf_selection_does_not_call_preview(binding_root, preview_module):
+def test_default_selection_uses_copilot(binding_root, preview_module):
+    harness = binding.get_harness()
+
+    assert harness.name is binding.HarnessKind.COPILOT
+    assert harness.app_root == binding_root
+    preview_module.select_copilot_harness.assert_called_once_with(binding_root)
+
+
+@pytest.mark.parametrize("value", ["false", "0"])
+def test_explicit_false_selection_uses_maf(binding_root, preview_module, monkeypatch, value):
+    monkeypatch.setenv(binding.FLAG, value)
+
     harness = binding.get_harness()
 
     assert harness.name is binding.HarnessKind.MAF
     assert harness.app_root == binding_root
-    assert harness.default_model is None
     preview_module.select_copilot_harness.assert_not_called()
 
 
-def test_selection_canonicalizes_root_and_reuses_standalone(binding_root):
+def test_selection_canonicalizes_root_and_reuses_standalone(binding_root, preview_module):
     selected = binding.get_harness(binding_root / "nested" / "..")
 
     assert selected.app_root == binding_root
@@ -230,7 +240,6 @@ def test_invalid_flag_fails_without_caching_or_selecting(
 def test_preview_selection_failure_does_not_cache_or_fallback(
     binding_root, preview_module, monkeypatch
 ):
-    monkeypatch.setenv(binding.FLAG, "true")
     preview_module.select_copilot_harness.side_effect = binding.UnsupportedCapabilityError(
         "fixture qualification failure"
     )

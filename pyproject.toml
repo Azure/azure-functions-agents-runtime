@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "azurefunctions-agents-runtime"
 dynamic = ["version"]
-description = "A markdown-first programming model for building AI agents on Azure Functions, powered by the Microsoft Agent Framework."
+description = "A markdown-first programming model for building AI agents on Azure Functions with the GitHub Copilot SDK."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.13"
@@ -22,15 +22,12 @@ dependencies = [
     "aiohttp>=3.14.2,<4",
     "azure-identity>=1.25.3,<2",
     "azure-storage-blob>=12.28.0,<13",
+    "github-copilot-sdk==1.0.14",
     "jsonschema>=4.26.0,<5",
     "mcp>=1.28.1,<2",
 ]
 
 [project.optional-dependencies]
-# Experimental Copilot harness. MAF remains the default and does not import this SDK.
-copilot = [
-    "github-copilot-sdk==1.0.14",
-]
 # Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
 # runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans
 # only when another OpenTelemetry provider is already active (e.g. the Functions worker) and exports
@@ -42,8 +39,6 @@ monitor = [
     "azure-monitor-opentelemetry==1.8.8",
 ]
 dev = [
-    # Reuse the optional SDK version; dev tests never start the native runtime by default.
-    "azurefunctions-agents-runtime[copilot]",
     "ruff>=0.15.22,<1",
     "mypy>=2.1.0,<3",
     "pydantic>=2.13.4,<3",

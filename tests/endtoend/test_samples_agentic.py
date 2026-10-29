@@ -1,8 +1,8 @@
 """End-to-end *agentic* tests: exercise a real LLM through a booted sample app.
 
 Unlike the startup smoke tests in ``test_samples_start.py``, these drive the
-full stack — Functions host, builtin chat endpoint, MAF runner, session history
-provider, and a **live model provider** — and assert the agent actually produces
+full stack — Functions host, builtin chat endpoint, selected harness, session
+storage, and a **live model provider** — and assert the agent actually produces
 a coherent, instruction-following response.
 
 Provider configuration:

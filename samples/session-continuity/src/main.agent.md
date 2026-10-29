@@ -1,5 +1,5 @@
 ---
-name: Copilot preview
+name: Session continuity
 description: A minimal local native-session and custom-tool example.
 builtin_endpoints:
   chat_api: true
@@ -9,7 +9,7 @@ builtin_endpoints:
 trigger:
   type: http_trigger
   args:
-    route: preview
+    route: receipt
     methods: [POST]
     http_auth: anonymous
 mcp: false
