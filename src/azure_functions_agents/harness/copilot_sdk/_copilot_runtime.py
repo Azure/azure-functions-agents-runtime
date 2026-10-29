@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import os
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from enum import StrEnum
 from functools import cache, partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from threading import RLock
 from time import perf_counter
 from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 from uuid import uuid4
@@ -185,6 +188,119 @@ class _TimingOutcome(StrEnum):
     CANCELLED = "cancelled"
 
 
+class _SDKTimingKind(StrEnum):
+    PHASE = "phase"
+    CUMULATIVE = "cumulative"
+    OVERLAPPING = "overlapping"
+
+
+# Exact private SDK messages, not a prefix match or a stable SDK API.
+_SDK_TIMINGS = {
+    "CopilotClient._start_cli_server subprocess spawned": ("subprocess_spawn", _SDKTimingKind.PHASE),
+    "CopilotClient._verify_protocol_version protocol handshake complete": ("protocol_handshake", _SDKTimingKind.PHASE),
+    "CopilotClient._connect_to_server transport setup complete": ("transport_connect", _SDKTimingKind.PHASE),
+    "CopilotClient.start transport setup complete": ("start_transport", _SDKTimingKind.CUMULATIVE),
+    "CopilotClient.start protocol verification complete": ("start_protocol", _SDKTimingKind.CUMULATIVE),
+    "CopilotClient.start session filesystem setup complete": ("session_filesystem", _SDKTimingKind.PHASE),
+    "CopilotClient.start complete": ("start_total", _SDKTimingKind.CUMULATIVE),
+    "CopilotClient.create_session local setup complete": ("create_local", _SDKTimingKind.OVERLAPPING),
+    "CopilotClient.create_session session creation request completed successfully": ("create_rpc", _SDKTimingKind.OVERLAPPING),
+    "CopilotClient.create_session complete": ("create_total", _SDKTimingKind.OVERLAPPING),
+    "CopilotClient.resume_session local setup complete": ("resume_local", _SDKTimingKind.OVERLAPPING),
+    "CopilotClient.resume_session session resume request completed successfully": ("resume_rpc", _SDKTimingKind.OVERLAPPING),
+    "CopilotClient.resume_session complete": ("resume_total", _SDKTimingKind.OVERLAPPING),
+    "CopilotClient.stop runtime shutdown complete": ("shutdown", _SDKTimingKind.PHASE),
+}
+
+
+class _SDKTimingFilter(logging.Filter):
+    """Project safe SDK timings before suppressing newly enabled diagnostics."""
+
+    def __init__(self, previous_level: int) -> None:
+        super().__init__()
+        self.previous_level = previous_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "copilot.client":
+            if record.name.startswith("copilot.client."):
+                return record.levelno != logging.DEBUG and record.levelno >= self.previous_level
+            return True
+        if record.levelno != logging.DEBUG:
+            return record.levelno >= self.previous_level
+        # Diagnostics, including host logging failures, cannot break SDK operations.
+        with suppress(Exception):
+            self._forward(record)
+        return False
+
+    def _forward(self, record: logging.LogRecord) -> None:
+        if record.name != "copilot.client" or type(record.msg) is not str or record.args:
+            return
+        timing = _SDK_TIMINGS.get(record.msg)
+        elapsed = record.__dict__.get("elapsed_ms")
+        if timing is None or type(elapsed) not in (int, float):
+            return
+        elapsed = cast(int | float, elapsed)
+        if elapsed < 0 or not math.isfinite(elapsed):
+            return
+        phase, kind = timing
+        logger.info(
+            "Copilot SDK timing: phase=%s timing_kind=%s elapsed_ms=%.3f process_id=%s",
+            phase, kind.value, elapsed, os.getpid(),
+            extra={
+                "phase": phase,
+                "timing_kind": kind.value,
+                "elapsed_ms": elapsed,
+                "process_id": os.getpid(),
+            },
+        )
+
+
+_SDK_TIMING_LOCK = RLock()
+_sdk_timing_users = 0
+_sdk_timing_filter: _SDKTimingFilter | None = None
+_sdk_timing_handlers: list[logging.Handler] = []
+_sdk_previous_level = logging.NOTSET
+
+
+def _acquire_sdk_timings() -> None:
+    global _sdk_timing_users, _sdk_timing_filter, _sdk_previous_level
+    with _SDK_TIMING_LOCK:
+        if _sdk_timing_users == 0:
+            sdk_logger = logging.getLogger("copilot.client")
+            _sdk_previous_level = sdk_logger.level
+            _sdk_timing_filter = _SDKTimingFilter(sdk_logger.getEffectiveLevel())
+            # A source-logger filter runs before both local and ancestor handlers.
+            sdk_logger.addFilter(_sdk_timing_filter)
+            # Descendant records bypass ancestor logger filters, but not handler filters.
+            ancestor: logging.Logger | None = sdk_logger
+            while ancestor is not None:
+                for handler in ancestor.handlers:
+                    if handler not in _sdk_timing_handlers:
+                        handler.addFilter(_sdk_timing_filter)
+                        _sdk_timing_handlers.append(handler)
+                if not ancestor.propagate:
+                    break
+                ancestor = ancestor.parent
+            sdk_logger.setLevel(logging.DEBUG)
+        _sdk_timing_users += 1
+
+
+def _release_sdk_timings() -> None:
+    global _sdk_timing_users, _sdk_timing_filter
+    with _SDK_TIMING_LOCK:
+        _sdk_timing_users -= 1
+        if _sdk_timing_users == 0:
+            sdk_logger = logging.getLogger("copilot.client")
+            if sdk_logger.level == logging.DEBUG:
+                sdk_logger.setLevel(_sdk_previous_level)
+            if _sdk_timing_filter is not None:
+                sdk_logger.removeFilter(_sdk_timing_filter)
+                for handler in _sdk_timing_handlers:
+                    handler.removeFilter(_sdk_timing_filter)
+            _sdk_timing_handlers.clear()
+            _sdk_timing_filter = None
+
+
 class CopilotRuntime:
     """One SDK-managed stdio client owned by one identity-distinct app binding."""
 
@@ -200,6 +316,7 @@ class CopilotRuntime:
         self._close_callback = self.close
         self._close_requested = False
         self._timing_id = uuid4().hex
+        self._sdk_timings_acquired = False
 
     @contextmanager
     def _timing(self, stage: _StartupStage) -> Iterator[None]:
@@ -245,6 +362,10 @@ class CopilotRuntime:
         )
 
     def _register_resources(self) -> None:
+        with _SDK_TIMING_LOCK:
+            if not self._sdk_timings_acquired:
+                _acquire_sdk_timings()
+                self._sdk_timings_acquired = True
         _harness_lifecycle._register_shutdown(self._close_callback)
 
     def _should_release_runtime(self) -> bool:
@@ -290,9 +411,10 @@ class CopilotRuntime:
         )
 
     async def _construct_and_start_client(self) -> CopilotClient:
-        with self._timing(_StartupStage.CONSTRUCT):
-            client = await asyncio.to_thread(self._build_client)
+        client: CopilotClient | None = None
         try:
+            with self._timing(_StartupStage.CONSTRUCT):
+                client = await asyncio.to_thread(self._build_client)
             async with self._start_lock:
                 if self._close_requested:
                     raise asyncio.CancelledError
@@ -305,10 +427,11 @@ class CopilotRuntime:
             logger.info("Agent harness ready: harness=copilot transport=stdio")
             return client
         except BaseException:
-            try:
-                await self._stop_client(client, timeout=_CLEANUP_TIMEOUT_SECONDS)
-            except BaseException:
-                logger.error("Copilot native startup cleanup failed.")
+            if client is not None:
+                try:
+                    await self._stop_client(client, timeout=_CLEANUP_TIMEOUT_SECONDS)
+                except BaseException:
+                    logger.error("Copilot native startup cleanup failed.")
             raise
         finally:
             release_runtime = False
@@ -344,6 +467,10 @@ class CopilotRuntime:
         await asyncio.wait_for(credential.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
 
     def _release_runtime(self) -> None:
+        with _SDK_TIMING_LOCK:
+            if self._sdk_timings_acquired:
+                _release_sdk_timings()
+                self._sdk_timings_acquired = False
         with self._harness._resources.guard:
             if self._runner.runtime is self:
                 self._runner.runtime = None

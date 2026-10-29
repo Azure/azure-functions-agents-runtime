@@ -124,7 +124,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/harness/copilot_sdk/_copilot_capabilities.py` | Maps SDK-neutral capabilities into source-qualified availability, remote MCP configuration, individual approved skill directories/disabled names, and MCP-only/scoped-helper permissions. | Copilot capability projection |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_tool_calls.py` | Invocation-local native/custom tool-call arbitration, wrapper spans with explicit host context, matched native-only timed spans, and incomplete-telemetry diagnostics. Deduplicates wrapper records, preserves actual success/failure evidence, and redacts protected native headers without exporting envelopes. No result-origin restrictions. | `CopilotToolCalls`, `tool_result_text()` |
 | `azure_functions_agents/_skill_policy.py` | SDK-free default-deny helper policy. Most-specific canonical discovered-root ownership permits only approved skill resources and narrow literal script invocations; excluded roots remain ownership metadata. Not an OS sandbox or skill-origin attestation. | `SkillPolicy` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_runtime.py` | Lazy SDK stdio client and shared credential owner cached on the concrete Copilot runner. Owns the asynchronous startup lock and stable acquired-resource close callback. Bounded shutdown releases the runner's owner reference without changing selection or runner identity. No global owner map or deferred retry registry. | `CopilotRuntime`, `get_runtime()` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_runtime.py` | Lazy SDK stdio client and shared credential owner cached on the concrete Copilot runner. Owns the asynchronous startup lock, stable acquired-resource close callback, and selective process-scoped SDK timing log filter. Bounded shutdown releases the runner's owner reference without changing selection or runner identity. No global owner map or deferred retry registry. | `CopilotRuntime`, `get_runtime()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_fs.py` | Actual SDK `SessionFsProvider` implementation for opaque files, with one route-based backend factory selection, callback serialization/deadlines, text conversion, SDK-shaped errors, and read-only projection of approved physical skill files. | `CopilotSessionFs`, `SessionFileBackend`, `open_session_fs()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_paths.py` | Selected Windows/POSIX callback path policies and independently selected physical-host policy; exact workspace mapping, lexical containment and local platform rules. Windows writes retain the host's binary-mode flag when available. | `SessionPathPolicy`, `select_session_path_policy()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_local.py`, `_copilot_session_blob.py` | Ordinary byte filesystem operations and flat-Blob filesystem adaptation, structurally conforming to the shared backend Protocol. Local birthtime uses the filesystem's creation timestamp when available, otherwise metadata-change time. No native-file interpretation or storage format changes. | `LocalSessionFileBackend`, `BlobSessionFileBackend` |
@@ -409,9 +409,47 @@ waiting caller; shared-task records inherit the initiating caller's trace.
 Caller cancellation does not cancel shielded startup. These are nested timing
 envelopes, not additive spans or proof of a cold process/cache. No prompt,
 credential, SDK exception detail, or filesystem path is included. This internal
-diagnostic does not enable native SDK logging, change caches, or time individual
-download-body, hash/extract, native loader, session/catalog, host queue, or
-client-network stages. Existing request/ready telemetry bounds the wider interval.
+diagnostic does not enable native SDK logging or change caches. Existing
+request/ready telemetry bounds the wider interval.
+
+While acquired Copilot owners exist, one reference-counted source-logger filter
+selectively projects existing Python SDK `copilot.client` DEBUG timing diagnostics
+as `Copilot SDK timing` INFO records through the shared runtime logger and its
+existing host logging/OpenTelemetry export pipeline. No second exporter or distro
+is installed; remote ingestion has not been proven. The filter is installed before
+enabling DEBUG and suppresses **all** source DEBUG records before local or ancestor
+handlers see them, including unknown messages. The same namespace-scoped filter
+also guards existing local/ancestor handlers against descendant records that
+bypass ancestor logger filters; unrelated application logs pass unchanged.
+Existing handlers, filters,
+propagation, and disabled state are retained; non-DEBUG records retain the previous
+effective threshold. The last owner's release restores the original explicit level
+(unless another caller changed it) and removes only this filter from the logger
+and guarded handlers. Repeated acquisition
+and multiple owners do not install duplicate filters. Existing SDK warnings/errors
+are not sanitized or reformatted by this timing adapter.
+
+The projection uses an exact private-message allowlist, not formatted SDK text.
+It copies only a fixed `phase`, `timing_kind`, finite nonnegative numeric
+`elapsed_ms`, and Python `process_id`, also rendered in the message. Session IDs,
+paths, URLs, payloads, counts, exception/stack details, and other SDK extras are
+not copied. Unknown or malformed timing records are ignored without changing
+SDK behavior. SDK message strings are not a stable API; SDK changes may therefore
+silently reduce timing coverage. SDK records are process-scoped: no runtime owner
+or request ID is assigned. Any ambient host trace correlation is not proof of
+ownership, especially across SDK background tasks or multiple owners.
+
+Allowlisted timings cover `subprocess_spawn` (Popen only, **not readiness**),
+`transport_connect`, `protocol_handshake`, `session_filesystem`, and `shutdown`
+as `phase` timings. `start_transport`, `start_protocol`, and `start_total` are
+`cumulative` milestones sharing the SDK start clock. Create/resume `*_local`,
+`*_rpc`, and `*_total` are `overlapping` envelopes, not independent components.
+All durations reuse SDK measurements, not new runtime clocks. Do not sum these
+records, or add them to the enclosing runtime startup timings. There is still no
+full provisioning breakdown: CLI cache decisions, full response-body download,
+checksum, extraction, publication, native loader, catalog, host queue, and
+client-network stages remain unmeasured. Native logging and native OTel remain
+disabled; no SDK upgrade or provisioning behavior change is involved.
 
 Unexpected native startup, create/resume, and turn failures propagate as the
 original Python exception, retaining traceback and causality like MAF. The

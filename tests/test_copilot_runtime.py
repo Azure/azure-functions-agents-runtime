@@ -1119,6 +1119,218 @@ def test_unselected_binding_cannot_acquire_an_owner(tmp_path):
     assert binding._resources.runner is None
 
 
+@pytest.fixture
+def sdk_timing_logger(monkeypatch):
+    sdk_logger = logging.Logger("copilot.client", logging.WARNING)
+    sdk_logger.parent = logging.getLogger()
+    monkeypatch.setattr(
+        runtime, "logging", SimpleNamespace(DEBUG=logging.DEBUG, getLogger=lambda _: sdk_logger)
+    )
+    monkeypatch.setattr(runtime, "_sdk_timing_users", 0)
+    monkeypatch.setattr(runtime, "_sdk_timing_filter", None)
+    monkeypatch.setattr(runtime, "_sdk_timing_handlers", [])
+    yield sdk_logger
+    assert runtime._sdk_timing_users == 0
+
+
+@pytest.mark.parametrize(("message", "phase", "kind"), [
+    ("CopilotClient._start_cli_server subprocess spawned", "subprocess_spawn", "phase"),
+    ("CopilotClient._verify_protocol_version protocol handshake complete", "protocol_handshake", "phase"),
+    ("CopilotClient._connect_to_server transport setup complete", "transport_connect", "phase"),
+    ("CopilotClient.start transport setup complete", "start_transport", "cumulative"),
+    ("CopilotClient.start protocol verification complete", "start_protocol", "cumulative"),
+    ("CopilotClient.start session filesystem setup complete", "session_filesystem", "phase"),
+    ("CopilotClient.start complete", "start_total", "cumulative"),
+    ("CopilotClient.create_session local setup complete", "create_local", "overlapping"),
+    ("CopilotClient.create_session session creation request completed successfully", "create_rpc", "overlapping"),
+    ("CopilotClient.create_session complete", "create_total", "overlapping"),
+    ("CopilotClient.resume_session local setup complete", "resume_local", "overlapping"),
+    ("CopilotClient.resume_session session resume request completed successfully", "resume_rpc", "overlapping"),
+    ("CopilotClient.resume_session complete", "resume_total", "overlapping"),
+    ("CopilotClient.stop runtime shutdown complete", "shutdown", "phase"),
+])
+def test_sdk_timing_exact_allowlist_is_content_free(
+    sdk_timing_logger, caplog, message, phase, kind
+):
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
+    runtime._acquire_sdk_timings()
+    try:
+        # Same shape as copilot._diagnostics.log_timing, including untrusted extras.
+        sdk_timing_logger.debug(
+            message,
+            extra={"elapsed_ms": 12.5, "session_id": "private", "url": "private",
+                   "tools_count": 3, "headers": "private", "prompt": "private"},
+            exc_info=(ValueError, ValueError("private"), None),
+            stack_info=True,
+        )
+    finally:
+        runtime._release_sdk_timings()
+    records = [r for r in caplog.records if r.msg.startswith("Copilot SDK timing:")]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.INFO
+    assert (record.phase, record.timing_kind, record.elapsed_ms) == (phase, kind, 12.5)
+    assert record.process_id == os.getpid()
+    assert record.exc_info is None and record.stack_info is None
+    assert not {"session_id", "url", "headers", "prompt", "tools_count",
+                "runtime_id", "operation_id"} & record.__dict__.keys()
+    assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize("elapsed", [
+    None, "12", True, -1, float("nan"), float("inf"), -float("inf"), 10 ** 400, {},
+])
+def test_sdk_timing_ignores_invalid_elapsed(sdk_timing_logger, caplog, elapsed):
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
+    runtime._acquire_sdk_timings()
+    try:
+        sdk_timing_logger.debug("CopilotClient.start complete", extra={"elapsed_ms": elapsed})
+    finally:
+        runtime._release_sdk_timings()
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("level", [logging.NOTSET, logging.DEBUG, logging.INFO, logging.ERROR])
+def test_sdk_timing_isolates_debug_and_restores_logging(sdk_timing_logger, caplog, level):
+    sdk_timing_logger.setLevel(level)
+    original_filter = logging.Filter()
+    sdk_timing_logger.addFilter(original_filter)
+    local_handler = Mock(spec=logging.Handler, level=logging.DEBUG)
+    sdk_timing_logger.addHandler(local_handler)
+    old_handlers = list(sdk_timing_logger.handlers)
+    old_propagate, old_disabled = sdk_timing_logger.propagate, sdk_timing_logger.disabled
+    caplog.set_level(logging.DEBUG)
+    runtime._acquire_sdk_timings()
+    runtime._acquire_sdk_timings()
+    try:
+        sdk_timing_logger.debug("private arbitrary diagnostic")
+        sdk_timing_logger.debug("CopilotClient.start complete changed", extra={"elapsed_ms": 1})
+        sdk_timing_logger.debug("CopilotClient.start complete %s", "private", extra={"elapsed_ms": 1})
+        sdk_timing_logger.debug({"private": "message"}, extra={"elapsed_ms": 1})
+        runtime._release_sdk_timings()
+        sdk_timing_logger.debug("CopilotClient.start complete", extra={"elapsed_ms": 0})
+        forwarded = [r for r in caplog.records if r.msg.startswith("Copilot SDK timing:")]
+        assert len(forwarded) == 1
+        assert forwarded[0].elapsed_ms == 0
+        assert all(r.name != "copilot.client" for r in caplog.records)
+        local_handler.handle.assert_not_called()
+    finally:
+        runtime._release_sdk_timings()
+    assert sdk_timing_logger.level == level
+    assert sdk_timing_logger.filters == [original_filter]
+    assert sdk_timing_logger.handlers == old_handlers
+    assert (sdk_timing_logger.propagate, sdk_timing_logger.disabled) == (
+        old_propagate, old_disabled
+    )
+
+
+def test_sdk_timing_preserves_non_debug_threshold_and_later_settings(sdk_timing_logger, caplog):
+    caplog.set_level(logging.DEBUG)
+    runtime._acquire_sdk_timings()
+    try:
+        sdk_timing_logger.info("previously disabled")
+        sdk_timing_logger.warning("existing warning")
+        sdk_timing_logger.setLevel(logging.ERROR)
+    finally:
+        runtime._release_sdk_timings()
+    assert [r.getMessage() for r in caplog.records] == ["existing warning"]
+    assert sdk_timing_logger.level == logging.ERROR
+
+
+def test_sdk_timing_guards_ancestor_handlers_without_filtering_application_logs(
+    sdk_timing_logger, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    child = logging.Logger("copilot.client.child")
+    child.parent = sdk_timing_logger
+    application = logging.getLogger("sdk-timing-test.application")
+    handlers = [*sdk_timing_logger.handlers, *logging.getLogger().handlers]
+    original_filters = [(handler, list(handler.filters)) for handler in handlers]
+    runtime._acquire_sdk_timings()
+    try:
+        child.debug("private inherited diagnostic")
+        child.info("private newly enabled info")
+        application.debug("unrelated application debug")
+        child.warning("existing child warning")
+    finally:
+        runtime._release_sdk_timings()
+    assert [r.getMessage() for r in caplog.records] == [
+        "unrelated application debug", "existing child warning",
+    ]
+    assert all(handler.filters == filters for handler, filters in original_filters)
+
+
+def test_sdk_timing_host_logging_failure_is_nonfatal(sdk_timing_logger, monkeypatch):
+    runtime._acquire_sdk_timings()
+    monkeypatch.setattr(runtime.logger, "info", Mock(side_effect=RuntimeError("private")))
+    try:
+        sdk_timing_logger.debug("CopilotClient.start complete", extra={"elapsed_ms": 1})
+    finally:
+        runtime._release_sdk_timings()
+
+
+@pytest.mark.asyncio
+async def test_sdk_timing_multi_owner_lifecycle(
+    runtime_preview, sdk_timing_logger, monkeypatch, caplog
+):
+    import copilot
+
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
+    owners = [
+        runtime.get_runtime(runtime_preview),
+        runtime.get_runtime(replace(runtime_preview)),
+    ]
+
+    def factory(**_kwargs):
+        sdk_timing_logger.debug("CopilotClient.start complete", extra={"elapsed_ms": 1})
+        return _fake_client()
+
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    try:
+        await asyncio.gather(*(owner.client() for owner in owners for _ in range(3)))
+        assert runtime._sdk_timing_users == 2
+        assert len(sdk_timing_logger.filters) == 1
+        await owners[0].close()
+        await owners[0].close()
+        assert runtime._sdk_timing_users == 1
+        await owners[1].client()
+        assert len([r for r in caplog.records if r.msg.startswith("Copilot SDK timing:")]) == 2
+    finally:
+        for owner in owners:
+            await owner.close()
+    assert sdk_timing_logger.filters == []
+    assert sdk_timing_logger.level == logging.WARNING
+    await owners[0].client()
+    await owners[0].close()
+    assert sdk_timing_logger.filters == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["construct", "start"])
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_sdk_timing_releases_after_startup_failure(
+    runtime_preview, sdk_timing_logger, monkeypatch, stage, failure
+):
+    owner = runtime.get_runtime(runtime_preview)
+    client = _fake_client()
+    error = failure("private")
+    if stage == "construct":
+        monkeypatch.setattr(owner, "_build_client", Mock(side_effect=error))
+    else:
+        monkeypatch.setattr(owner, "_build_client", Mock(return_value=client))
+        client.start.side_effect = error
+    try:
+        with pytest.raises(failure) as raised:
+            await owner.client()
+        assert raised.value is error or failure is asyncio.CancelledError
+    finally:
+        await owner.close()
+    assert runtime._sdk_timing_users == 0
+    assert sdk_timing_logger.filters == []
+    assert sdk_timing_logger.level == logging.WARNING
+    assert copilot_state(runtime_preview).runtime is None
+
+
 @pytest.mark.asyncio
 async def test_concurrent_startup_shares_one_client(runtime_preview, monkeypatch, caplog):
     import copilot
