@@ -436,8 +436,10 @@ Delegates and Workflow Sub Agents retain their parent app binding and run with
 fresh UUID native identities and specialist-local instructions/model/tools.
 They do not inherit history, sandbox, workflow management, or nested delegates.
 Their SessionFs uses an isolated local ephemeral tree, never the primary Blob
-route, and cleanup removes both native session and host files. Unique leaves
-do not enter the persistent session-lock registry. Cleanup errors do not replace
+route. Cleanup disconnects the SDK session, then removes its host-owned
+SessionFs tree. The SDK's `delete_session` API does not use the SessionFs
+callback route and must not be used for these sessions. Unique leaves do not
+enter the persistent session-lock registry. Cleanup errors do not replace
 body cancellation or deadline failures; deletion failure after success is an error.
 
 SSE advertises the public session only after native create/resume and any

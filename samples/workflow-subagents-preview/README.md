@@ -19,7 +19,14 @@ Queue message
 Each PR analyst uses the fake `get_pull_request_status` and
 `get_pull_request_activity` tools plus the `pr-status-analysis` skill. The
 report writer receives only the compact analyst summaries and returns one
-responsive HTML document. The publisher writes to the exact `report_blob`
+responsive HTML document. Each summary is passed through a
+`${review_task_id.result.text}` reference in the writer's task.
+`depends_on` sets the execution order; it does not pass results.
+
+The publisher checks for a complete HTML document and links to every requested
+PR before upload. It rejects requests for more information or reports with
+missing links, so these responses do not replace an existing report.
+The publisher writes to the exact `report_blob`
 provided by the queue message with overwrite enabled, so submitting the same
 destination again updates one stable Blob instead of creating duplicates.
 
