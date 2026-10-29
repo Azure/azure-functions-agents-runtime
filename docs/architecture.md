@@ -392,6 +392,27 @@ cleanup errors. Shared code normalizes only the public `AgentResult` and
 tool-call accounting contracts; MAF usage decoding remains local to MAF, and
 Copilot result/event conversion remains local to Copilot.
 
+The Copilot runtime owner emits content-free INFO diagnostics through the shared
+logger: `Copilot startup stage started/finished` and `Copilot startup client selection`.
+Each stage records a monotonic `elapsed_ms` on completion, a `success`, `error`, or
+`cancelled` outcome, a random owner-lifetime `runtime_id`, Python `process_id`, and
+the current trace `operation_id` when available. Fields are also present in the
+message for collectors that do not retain structured logging extras. Selection
+is `new`, `join` (waiting on another caller's shared startup), or `reuse`.
+`owner_lock_wait` measures only acquisition of the client's startup guard;
+`client_acquire` includes that wait and any shared startup wait, or an immediate reuse.
+`client_construct` includes thread scheduling, workspace creation, SDK imports,
+entrypoint resolution and any synchronous SDK provisioning. `client_start` covers
+SDK start through transport/protocol/session-filesystem readiness, excluding
+failure cleanup. Construction and start run once per startup attempt, not once per
+waiting caller; shared-task records inherit the initiating caller's trace.
+Caller cancellation does not cancel shielded startup. These are nested timing
+envelopes, not additive spans or proof of a cold process/cache. No prompt,
+credential, SDK exception detail, or filesystem path is included. This internal
+diagnostic does not enable native SDK logging, change caches, or time individual
+download-body, hash/extract, native loader, session/catalog, host queue, or
+client-network stages. Existing request/ready telemetry bounds the wider interval.
+
 Unexpected native startup, create/resume, and turn failures propagate as the
 original Python exception, retaining traceback and causality like MAF. The
 Copilot execution boundary logs the exception with the operation name; shared

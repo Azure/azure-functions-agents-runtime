@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import os
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from enum import StrEnum
 from functools import cache, partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Final, Literal, cast, get_args
+from uuid import uuid4
 
 from ..._credential import build_async_credential
 from ..._logger import logger
+from ..._observability import current_operation_id
 from ...config.env import EnvVar, runtime_env_value
 from .. import _harness_lifecycle
 from .._agent_runner import get_agent_runner
@@ -160,6 +166,25 @@ _CLEANUP_TIMEOUT_SECONDS = 5
 _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 
 
+class _StartupStage(StrEnum):
+    ACQUIRE = "client_acquire"
+    LOCK_WAIT = "owner_lock_wait"
+    CONSTRUCT = "client_construct"
+    START = "client_start"
+
+
+class _ClientSelection(StrEnum):
+    NEW = "new"
+    JOIN = "join"
+    REUSE = "reuse"
+
+
+class _TimingOutcome(StrEnum):
+    SUCCESS = "success"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
 class CopilotRuntime:
     """One SDK-managed stdio client owned by one identity-distinct app binding."""
 
@@ -174,6 +199,50 @@ class CopilotRuntime:
         self._credential: AsyncTokenCredential | None = None
         self._close_callback = self.close
         self._close_requested = False
+        self._timing_id = uuid4().hex
+
+    @contextmanager
+    def _timing(self, stage: _StartupStage) -> Iterator[None]:
+        """Measure owner boundaries without recording SDK inputs or exception details."""
+        started = perf_counter()
+        operation_id = current_operation_id() or ""
+        fields = {
+            "stage": stage.value,
+            "runtime_id": self._timing_id,
+            "process_id": os.getpid(),
+            "operation_id": operation_id,
+        }
+        logger.info(
+            "Copilot startup stage started: stage=%s runtime_id=%s process_id=%s operation_id=%s",
+            stage.value, self._timing_id, fields["process_id"], operation_id,
+            extra=fields,
+        )
+        outcome = _TimingOutcome.SUCCESS
+        try:
+            yield
+        except asyncio.CancelledError:
+            outcome = _TimingOutcome.CANCELLED
+            raise
+        except BaseException:
+            outcome = _TimingOutcome.ERROR
+            raise
+        finally:
+            elapsed_ms = (perf_counter() - started) * 1000
+            logger.info(
+                "Copilot startup stage finished: stage=%s outcome=%s elapsed_ms=%.3f "
+                "runtime_id=%s process_id=%s operation_id=%s",
+                stage.value, outcome.value, elapsed_ms,
+                self._timing_id, fields["process_id"], operation_id,
+                extra={**fields, "outcome": outcome.value, "elapsed_ms": elapsed_ms},
+            )
+
+    def _log_client_selection(self, selection: _ClientSelection) -> None:
+        logger.info(
+            "Copilot startup client selection: selection=%s runtime_id=%s process_id=%s "
+            "operation_id=%s",
+            selection.value, self._timing_id, os.getpid(), current_operation_id() or "",
+            extra={"selection": selection.value, "runtime_id": self._timing_id},
+        )
 
     def _register_resources(self) -> None:
         _harness_lifecycle._register_shutdown(self._close_callback)
@@ -221,12 +290,14 @@ class CopilotRuntime:
         )
 
     async def _construct_and_start_client(self) -> CopilotClient:
-        client = await asyncio.to_thread(self._build_client)
+        with self._timing(_StartupStage.CONSTRUCT):
+            client = await asyncio.to_thread(self._build_client)
         try:
             async with self._start_lock:
                 if self._close_requested:
                     raise asyncio.CancelledError
-            await asyncio.wait_for(client.start(), timeout=_START_TIMEOUT_SECONDS)
+            with self._timing(_StartupStage.START):
+                await asyncio.wait_for(client.start(), timeout=_START_TIMEOUT_SECONDS)
             async with self._start_lock:
                 if self._close_requested:
                     raise asyncio.CancelledError
@@ -249,16 +320,25 @@ class CopilotRuntime:
                 self._release_runtime()
 
     async def client(self) -> CopilotClient:
-        async with self._start_lock:
-            if self._client is not None:
-                return self._client
-            task = self._client_task
-            if task is None:
-                self._close_requested = False
-                self._register_resources()
-                task = asyncio.create_task(self._construct_and_start_client())
-                self._client_task = task
-        return await asyncio.shield(task)
+        with self._timing(_StartupStage.ACQUIRE):
+            with self._timing(_StartupStage.LOCK_WAIT):
+                await self._start_lock.acquire()
+            try:
+                if self._client is not None:
+                    self._log_client_selection(_ClientSelection.REUSE)
+                    return self._client
+                task = self._client_task
+                if task is None:
+                    self._log_client_selection(_ClientSelection.NEW)
+                    self._close_requested = False
+                    self._register_resources()
+                    task = asyncio.create_task(self._construct_and_start_client())
+                    self._client_task = task
+                else:
+                    self._log_client_selection(_ClientSelection.JOIN)
+            finally:
+                self._start_lock.release()
+            return await asyncio.shield(task)
 
     async def _close_credential(self, credential: AsyncTokenCredential) -> None:
         await asyncio.wait_for(credential.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)

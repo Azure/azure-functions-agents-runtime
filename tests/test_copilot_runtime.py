@@ -1120,7 +1120,7 @@ def test_unselected_binding_cannot_acquire_an_owner(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_startup_shares_one_client(runtime_preview, monkeypatch):
+async def test_concurrent_startup_shares_one_client(runtime_preview, monkeypatch, caplog):
     import copilot
 
     started, release = asyncio.Event(), asyncio.Event()
@@ -1133,6 +1133,7 @@ async def test_concurrent_startup_shares_one_client(runtime_preview, monkeypatch
     client.start.side_effect = start
     factory = Mock(return_value=client)
     monkeypatch.setattr(copilot, "CopilotClient", factory)
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
     owner = runtime.get_runtime(runtime_preview)
     requests = [asyncio.create_task(owner.client()) for _ in range(12)]
     try:
@@ -1141,6 +1142,24 @@ async def test_concurrent_startup_shares_one_client(runtime_preview, monkeypatch
         assert all(result is client for result in await asyncio.gather(*requests))
         factory.assert_called_once()
         client.start.assert_awaited_once()
+        assert await owner.client() is client
+        selections = [
+            record.selection for record in caplog.records
+            if record.msg.startswith("Copilot startup client selection:")
+        ]
+        assert selections.count("new") == 1
+        assert selections.count("join") == 11
+        assert selections.count("reuse") == 1
+        finished = [
+            record for record in caplog.records
+            if record.msg.startswith("Copilot startup stage finished:")
+        ]
+        assert sum(record.stage == "client_construct" for record in finished) == 1
+        assert sum(record.stage == "client_start" for record in finished) == 1
+        assert sum(record.stage == "client_acquire" for record in finished) == 13
+        assert all(record.outcome == "success" for record in finished)
+        assert {record.runtime_id for record in finished} == {owner._timing_id}
+        assert {record.process_id for record in finished} == {os.getpid()}
     finally:
         release.set()
         await owner.close()
@@ -1182,7 +1201,9 @@ async def test_blocking_constructor_runs_off_the_event_loop(runtime_preview, mon
 
 
 @pytest.mark.asyncio
-async def test_constructor_cancellation_reuses_one_late_client(runtime_preview, monkeypatch):
+async def test_constructor_cancellation_reuses_one_late_client(
+    runtime_preview, monkeypatch, caplog
+):
     import copilot
 
     client = _fake_client()
@@ -1197,6 +1218,7 @@ async def test_constructor_cancellation_reuses_one_late_client(runtime_preview, 
 
     factory.side_effect = blocking_factory
     monkeypatch.setattr(copilot, "CopilotClient", factory)
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
     owner = runtime.get_runtime(runtime_preview)
     first = asyncio.create_task(owner.client())
     try:
@@ -1210,8 +1232,120 @@ async def test_constructor_cancellation_reuses_one_late_client(runtime_preview, 
         assert await owner.client() is client
         factory.assert_called_once()
         client.start.assert_awaited_once()
+        outcomes = [
+            (record.stage, record.outcome) for record in caplog.records
+            if record.msg.startswith("Copilot startup stage finished:")
+        ]
+        assert ("client_acquire", "cancelled") in outcomes
+        assert ("client_construct", "success") in outcomes
+        assert ("client_start", "success") in outcomes
     finally:
         release.set()
+        await owner.close()
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError, asyncio.CancelledError])
+def test_startup_timing_is_monotonic_content_free_and_preserves_errors(
+    runtime_preview, monkeypatch, caplog, failure
+):
+    owner = runtime.get_runtime(runtime_preview)
+    clock = iter([100.0, 100.125])
+    monkeypatch.setattr(runtime, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(runtime, "current_operation_id", lambda: "a" * 32)
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
+    secret = "sensitive-prompt-token-and-path"
+    error = failure(secret) if failure is not None else None
+
+    def measure():
+        with owner._timing(runtime._StartupStage.CONSTRUCT):
+            if error is not None:
+                raise error
+
+    if error is None:
+        measure()
+    else:
+        with pytest.raises(failure) as raised:
+            measure()
+        assert raised.value is error
+    records = [
+        record for record in caplog.records
+        if record.msg.startswith("Copilot startup stage")
+    ]
+    assert len(records) == 2
+    assert records[1].elapsed_ms == 125
+    expected = "success" if error is None else (
+        "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+    )
+    assert records[1].outcome == expected
+    assert all(record.operation_id == "a" * 32 for record in records)
+    assert all(record.exc_info is None for record in records)
+    assert secret not in caplog.text
+    assert str(owner.native_root) not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_logs_constructor_failure_without_details(
+    runtime_preview, monkeypatch, caplog
+):
+    owner = runtime.get_runtime(runtime_preview)
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
+    error = RuntimeError("sensitive-constructor-detail")
+    monkeypatch.setattr(owner, "_build_client", Mock(side_effect=error))
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            await owner.client()
+        assert raised.value is error
+        outcomes = [
+            (record.stage, record.outcome) for record in caplog.records
+            if record.msg.startswith("Copilot startup stage finished:")
+        ]
+        assert ("client_construct", "error") in outcomes
+        assert ("client_acquire", "error") in outcomes
+        assert not any(stage == "client_start" for stage, _ in outcomes)
+        assert str(error) not in caplog.text
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_lock_wait_timing_excludes_construction_and_records_cancellation(
+    runtime_preview, monkeypatch, caplog
+):
+    owner = runtime.get_runtime(runtime_preview)
+    now = [0.0]
+    monkeypatch.setattr(runtime, "perf_counter", lambda: now[0])
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
+    owner._client = _fake_client()
+    await owner._start_lock.acquire()
+    request = asyncio.create_task(owner.client())
+    try:
+        await asyncio.sleep(0)
+        now[0] = 0.250
+        owner._start_lock.release()
+        assert await request is owner._client
+        lock_records = [
+            record for record in caplog.records
+            if record.msg.startswith("Copilot startup stage finished:")
+            and record.stage == "owner_lock_wait"
+        ]
+        assert len(lock_records) == 1
+        assert lock_records[0].elapsed_ms == 250
+        assert lock_records[0].outcome == "success"
+        await owner._start_lock.acquire()
+        cancelled = asyncio.create_task(owner.client())
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert owner._start_lock.locked()
+        assert any(
+            record.stage == "owner_lock_wait" and record.outcome == "cancelled"
+            for record in caplog.records
+            if record.msg.startswith("Copilot startup stage finished:")
+        )
+    finally:
+        if owner._start_lock.locked():
+            owner._start_lock.release()
         await owner.close()
 
 
@@ -1251,7 +1385,9 @@ async def test_shutdown_waits_for_late_constructor_cleanup_without_duplicate_own
 
 
 @pytest.mark.asyncio
-async def test_failed_start_cleanup_drops_the_failed_handle(runtime_preview, monkeypatch):
+async def test_failed_start_cleanup_drops_the_failed_handle(
+    runtime_preview, monkeypatch, caplog
+):
     import copilot
 
     client = _fake_client()
@@ -1260,6 +1396,7 @@ async def test_failed_start_cleanup_drops_the_failed_handle(runtime_preview, mon
     client.force_stop.side_effect = RuntimeError("force failed")
     factory = Mock(return_value=client)
     monkeypatch.setattr(copilot, "CopilotClient", factory)
+    caplog.set_level(logging.INFO, logger=runtime.logger.name)
     owner = runtime.get_runtime(runtime_preview)
     with pytest.raises(RuntimeError, match="startup failed"):
         await owner.client()
@@ -1269,6 +1406,14 @@ async def test_failed_start_cleanup_drops_the_failed_handle(runtime_preview, mon
     assert copilot_state(runtime_preview).runtime is None
     assert not lifecycle._SHUTDOWN_CALLBACKS
     factory.assert_called_once()
+    outcomes = [
+        (record.stage, record.outcome) for record in caplog.records
+        if record.msg.startswith("Copilot startup stage finished:")
+    ]
+    assert ("client_construct", "success") in outcomes
+    assert ("client_start", "error") in outcomes
+    assert ("client_acquire", "error") in outcomes
+    assert "startup failed" not in caplog.text
 
 
 @pytest.mark.asyncio
