@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "azurefunctions-agents-runtime"
 dynamic = ["version"]
-description = "A markdown-first programming model for building AI agents on Azure Functions with GitHub Copilot SDK and Microsoft Agent Framework."
+description = "A markdown-first programming model for building AI agents on Azure Functions with the GitHub Copilot SDK."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.13"
@@ -28,8 +28,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Compatibility alias for existing `azurefunctions-agents-runtime[copilot]` installs.
-copilot = []
 # Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
 # runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans
 # only when another OpenTelemetry provider is already active (e.g. the Functions worker) and exports

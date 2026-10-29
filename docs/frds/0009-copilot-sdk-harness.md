@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-21
+updated: 2026-10-29
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -15,12 +15,12 @@ branch: null
 
 ## 1. Summary
 
-Add an internal GitHub Copilot SDK execution path without changing the runtime's
-markdown authoring model, Azure Functions registration surfaces, capability
-filters, or workflow ownership. Microsoft Agent Framework (MAF) remains the
-default production harness. Copilot is a bounded, once-per-app preview selected
-only by `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`; it never enables per-agent
-selection, mixed-harness roles, or fallback after selection.
+Use the GitHub Copilot SDK as the default internal execution path without
+changing the runtime's markdown authoring model, Azure Functions registration
+surfaces, capability filters, or workflow ownership. Microsoft Agent Framework
+(MAF) remains an internal compatibility path. The runtime binds one path per
+app; this does not create a public selector, per-agent selection, mixed-harness
+roles, or fallback after binding.
 
 The design goal is architectural separation, not a public harness plug-in model.
 Discovery, merge, validation, and registration remain SDK-neutral. Selected
@@ -37,12 +37,12 @@ as create.
 ## 2. Motivation / problem
 
 The runtime already owns discovery, configuration, capability policy, endpoint
-registration, workflow policy, and system-tool boundaries. MAF currently also
-owns the agent loop, tool adaptation, chat-client construction, history, and
-streaming behavior. Supporting a Copilot path therefore requires more than
-swapping `ClientManager`: the execution boundary, capability adaptation,
-session/persistence model, and native event handling must all move behind a
-selected internal harness boundary.
+registration, workflow policy, and system-tool boundaries. Before this feature,
+MAF also owned the agent loop, tool adaptation, chat-client construction,
+history, and streaming behavior. Supporting a Copilot path therefore requires
+more than swapping `ClientManager`: the execution boundary, capability
+adaptation, session/persistence model, and native event handling must all move
+behind a selected internal harness boundary.
 
 The runtime must make that change without:
 
@@ -59,13 +59,14 @@ The runtime must make that change without:
 
 - Preserve the existing discover -> translate -> register -> execute pipeline,
   with `ResolvedAgent` and `AgentCapabilities` remaining authoritative.
-- Keep MAF as the default path; make Copilot an explicit app-level preview.
+- Make Copilot the default internal path while preserving MAF as an internal
+  compatibility path.
 - Use immutable SDK-neutral descriptors for runtime-owned tools, MCP servers,
   and skill roots, with SDK construction deferred to the selected runner.
 - Preserve user-supplied tools without rejecting their SDK origin; let the
   selected SDK and ordinary execution determine compatibility.
 - Preserve current authoring and role contracts where supported, and reject
-  unsupported Copilot preview behavior explicitly.
+  unsupported Copilot behavior explicitly.
 - Keep Copilot session persistence as a thin SessionFs boundary: the SDK owns
   session contents, continuation, compaction, and recovery semantics.
 
@@ -81,14 +82,15 @@ The runtime must make that change without:
 
 ## 4. Proposed design
 
-### 4.1 App-level harness selection
+### 4.1 Internal app-level binding
 
-`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only selector:
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is an internal compatibility selector,
+not a public authoring or user option:
 
-| Value | Selected harness |
+| Value | Bound harness |
 | --- | --- |
-| Unset, `false`, `0` | MAF |
-| `true`, `1` | Copilot preview |
+| Unset, `true`, `1` | Copilot |
+| `false`, `0` | MAF compatibility path |
 | Any other value, including an empty string | Explicit configuration error |
 
 Selection happens once per app construction and produces a frozen internal
@@ -247,7 +249,7 @@ Store Copilot files under:
 not invent a second identity layer. Session ID validation and path containment
 rules stay shared.
 
-The Copilot preview supports local and Azure Functions execution using the
+The Copilot path supports local and Azure Functions execution using the
 existing registration surfaces and storage selection. Local HTTP SSE, declared
 delegates, Workflow Sub Agents,
 Dynamic Workflow management, configured MCP servers, and approved project
@@ -266,7 +268,7 @@ cancels only the in-flight turn, aborts it, and leaves the shared native client
 usable for later requests. Resume uses SDK-owned continuation without host-side
 history scans and rejects live abort/interruption signals observed before
 returning a final reply. The SDK still owns opaque file formats, compaction,
-and recovery. Unsupported capabilities still fail explicitly when the preview
+and recovery. Unsupported capabilities still fail explicitly when the adapter
 cannot preserve their semantics. Valid non-empty
 `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` and
 `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` values are captured once in the
@@ -389,16 +391,16 @@ concurrency limitations and have no new recovery guarantee.
 - Cleanup preserves the original execution or cancellation failure over later
   disconnect, filesystem-close, transport-stop, or credential-cleanup errors.
 
-### 4.8 Compatibility and preview limits
+### 4.8 Compatibility and limits
 
-Copilot remains a bounded preview that shares the runtime's authoring,
+Copilot remains a bounded internal path that shares the runtime's authoring,
 registration, and policy surfaces while keeping SDK-specific execution local to
 the selected harness.
 
 Current supported direction:
 
 - same authoring/config surfaces as MAF;
-- once-per-app preview selection;
+- once-per-app binding;
 - direct-role execution with runtime tool/MCP/skill descriptors and user-supplied tools;
 - SDK-owned session files behind SessionFs; and
 - no silent weakening of policy or validation.
@@ -408,7 +410,7 @@ IDs select create only on confirmed storage absence, otherwise SDK resume.
 This is not fallback after a resume error and does not add history replay,
 storage recovery, distributed coordination, or an SDK dependency change.
 
-Still outside this FRD's supported preview contract:
+Still outside this FRD's supported contract:
 
 - per-agent harness selection or mixed-harness execution in one app;
 - host-owned skill metadata/catalog behavior;
@@ -501,7 +503,7 @@ amendments explicitly identify the behavior they supersede.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Harness selection boundary | per-agent selection / app-level binding | Resolve once per app with `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`; MAF stays default, Copilot stays preview, and there is no runtime fallback after selection. | Human (larohra) | 2026-09-28 |
+| 1 | Harness selection boundary | per-agent selection / app-level binding | Resolve once per app with `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`; MAF stays default, Copilot stays a bounded path, and there is no runtime fallback after selection. | Human (larohra) | 2026-09-28 |
 | 2 | Runtime containment model | public plug-in framework / internal harness boundary | Keep public authoring and runner surfaces stable; move SDK-specific execution, auth timing, and persistence behind internal adapters only. | Human (larohra) | 2026-09-28 |
 | 3 | Capability contract | harness objects in discovery/registration / SDK-neutral descriptors | Use immutable tool, MCP, and skill descriptors through discovery, merge, validation, registration, and `HarnessRequest`; map them only at the selected adapter boundary. | Human (larohra) | 2026-10-01 |
 | 4 | Skill ownership | host metadata/catalog / SDK-owned loading and advertising | Discovery is path-only. The host does not parse `SKILL.md` or maintain a manual catalog; SDKs own metadata validation, advertising, and instruction loading. | Human (larohra) | 2026-10-06 |
@@ -596,7 +598,7 @@ The amendment below was approved by larohra on 2026-10-16.
 | Lifecycle/errors | Verify request cleanup ordering and that execution/cancellation failures remain authoritative over later disconnect, filesystem, transport, or credential cleanup errors. |
 | Debug UI/history | Verify live chat/streaming, supplied-ID open-or-create and native continuation, display the no-transcript-restore notice, preserve MAF transcript replay, and surface native resume failures without retry-as-create. |
 | Non-HTTP entrypoints | Exercise each existing binding serializer and shared-handler contract offline; separately qualify each trigger on a real Functions host with actual binding delivery before marking it supported. Resource-blocked triggers remain unqualified, not unsupported. |
-| Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, supplied-ID open-or-create, and errors without retry-as-create or replacement sessions. Real-host transport and system-key auth qualification remains separate. |
+| Inbound built-in MCP | Verify bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, supplied-ID open-or-create, and errors without retry-as-create or replacement sessions. Real-host transport and system-key auth qualification remains separate. |
 | Harness cleanup | Verify resource-free runner creation/qualification, per-binding and clone isolation, concurrent runner caching, selected-harness-only provider/warning/observability/history ownership, legacy compaction warning/default behavior, public shutdown, and failed-turn session IDs on HTTP, chat, and SSE. |
 | Copilot telemetry | Cover direct/SSE, delegates, workflow leaves, non-HTTP and UI ingress; usage deduplication/accounting, tool ownership and ordering, incomplete timing, cancellation/error cleanup, both privacy modes, and unchanged MAF behavior. |
 | Semantic invocation ownership | Assert exactly one Copilot `invoke_agent` per actual execution, correct outer/tool/delegate parent IDs and trace IDs, direct runner behavior without an outer span, concurrent isolation, and no extra MAF semantic invocation. |
@@ -628,12 +630,11 @@ The amendment below was approved by larohra on 2026-10-16.
 - The cleanup amendment removes public custom-client injection, documents the
   legacy compaction warning, and updates shutdown and failed-turn session-ID
   behavior across the runtime docs.
-- `README.md` and operational docs may describe the bounded preview and storage
-  namespace, but should defer detailed operational behavior to dedicated preview
-  documentation rather than expanding this FRD.
-- `docs/observability.md` and `docs/copilot-preview-operations.md` document
-  telemetry semantics, limits, privacy, and operator setup; align
-  `README.md`, `docs/index.md`, and `docs/getting-started.md` if preview
+- `README.md` may describe the native storage namespace while
+  `docs/runtime-operations.md` owns provider, storage, qualification, inspection,
+  and cleanup guidance.
+- `docs/observability.md` documents telemetry semantics, limits, and privacy;
+  align `README.md`, `docs/index.md`, and `docs/getting-started.md` if
   observability expectations change.
 
 ## 8. Status & sign-off
@@ -689,31 +690,31 @@ The amendment below was approved by larohra on 2026-10-16.
 
 **Addendum status: Finalized.** The 2026-10-29 issue request explicitly directed
 implementation of the Copilot SDK as the default harness and is the human
-sign-off for this amendment. This addendum supersedes only earlier statements
-that MAF is selected when the app-level selector is unset.
+sign-off for this amendment. It supersedes the outdated default assertions in
+historical Decisions 1 and 30 and Decision 1's original preview classification.
+Those append-only rows remain in place, and all their other boundaries remain
+intact.
 
-`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` remains the only harness selector. An
-unset value selects Copilot, as do `true` and `1`. Explicit `false` or `0`
-selects MAF. Empty, whitespace-only, and other values remain configuration
-errors. Selection is still captured once per app; there is no per-agent
-selection, mixed-harness app, execution-time reread, or automatic fallback.
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` remains an internal compatibility
+selector, not a public authoring or user option. An unset value selects Copilot,
+as do `true` and `1`; `false` or `0` preserve the internal MAF compatibility
+path. Empty, whitespace-only, and other values remain configuration errors.
+Selection is still captured once per app; there is no per-agent selection,
+mixed-harness app, execution-time reread, or automatic fallback.
 
 The Copilot SDK is part of the standard runtime installation. Because Copilot
-qualification requires an explicit or auto-detected provider and resolves the
-effective model during app construction, every upgraded app that leaves the
-selector unset changes harness and may now fail startup until it has
-Copilot-compatible provider settings. An explicitly configured model is not
-required; model resolution falls back to `gpt-4o-mini`. Apps that must retain
-MAF set the selector to `false` or `0`.
+execution requires an explicit or auto-detected provider and resolves the
+effective model during app construction, an upgraded app may fail startup until
+it has compatible provider settings. An explicitly configured model is not
+required; model resolution falls back to `gpt-4o-mini`.
 
 The harnesses retain separate persistence formats and namespaces. Existing MAF
 history is not migrated or projected into Copilot sessions. Changing the
-default also does not qualify any existing unqualified Functions-host,
-provider-auth, storage, restart, native helper, or cross-worker scenario.
-Those limits remain exactly as documented by this FRD and the operations guide.
+default does not alter the existing Functions-host, provider-auth, storage,
+restart, native-helper, or cross-worker contracts documented by this FRD.
 
 ### Default-harness addendum decision
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
-| 38 | Default harness and migration boundary | keep MAF default / make Copilot default with explicit MAF opt-out / remove MAF | Unset, `true`, and `1` select Copilot; `false` and `0` select MAF; include the SDK in the standard install; preserve once-per-app selection, no fallback, existing qualification limits, and separate non-migrated history | Human (explicit issue request) | 2026-10-29 |
+| 38 | Default harness and migration boundary | keep MAF default / make Copilot default while preserving internal compatibility / remove MAF | Make Copilot the default and include its SDK in the standard install; keep the selector internal; preserve once-per-app binding, no fallback, existing runtime contracts, and separate non-migrated history | Human (explicit issue request) | 2026-10-29 |

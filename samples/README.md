@@ -31,10 +31,10 @@ Development tooling samples:
 	evaluation against its local or staging chat endpoint, with deterministic tool/output graders,
 	repeated trials, and JUnit output.
 
-For the **default Copilot harness preview walkthrough**, use
-[`copilot-preview`](copilot-preview/README.md). Its pinned setup and two-turn
-receipt verifier exercise a real Functions-host restart; it is not an `azd up`
-deployment sample and does not require Azurite.
+For the **session-continuity walkthrough**, use
+[`session-continuity`](session-continuity/README.md). Its pinned setup and
+two-turn receipt verifier exercise a real Functions-host restart; it is not an
+`azd up` deployment sample and does not require Azurite.
 
 ## Run Locally (optional)
 

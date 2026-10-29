@@ -1,8 +1,8 @@
 # Dynamic workflows (experimental v1)
 
-The default app-level Copilot harness supports the same five management tools,
-per-agent policy authorization, Workflow Sub Agent Activities, configured MCP
-servers, and approved authored skills in this preview. Each
+The runtime supports the same five management tools, per-agent policy
+authorization, Workflow Sub Agent Activities, configured MCP servers, and
+approved authored skills. Each
 leaf gets a fresh native session that is deleted after use. Workflow-enabled
 direct roles receive the packaged `data-driven-workflows` skill through the
 same native skill-directory path as approved authored skills; the host keeps a

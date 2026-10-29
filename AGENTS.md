@@ -6,8 +6,7 @@ changes so features stay aligned with the architecture and each other.
 
 - **What this project is:** a markdown-first programming model that turns an
   agent project (`*.agent.md` + config) into an `azure.functions.FunctionApp`,
-  using the GitHub Copilot SDK by default with Microsoft Agent Framework (MAF)
-  available as an explicit app-level opt-out.
+  backed by an internal app-level execution runtime.
 - **Design source of truth:** [`docs/architecture.md`](docs/architecture.md).
   This file governs *process*; that file governs *design*. Keep both in sync.
 
@@ -146,14 +145,10 @@ Grounded in `pyproject.toml` and current code:
 - **Pydantic v2** for all config models (`config/schema.py`). When a field +
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
-- **Copilot is the default harness.** An unset
-  `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` selects the bounded Copilot preview;
-  `false` or `0` explicitly selects MAF
-  ([sample and limits](samples/copilot-preview/README.md)). Keep harness dispatch
-  behind that once-per-app boundary; no per-agent selectors, mixed-harness roles,
-  or automatic fallback. The default does not expand Copilot's documented
-  qualification. The legacy `runtime:` frontmatter field stays ignored (one-time
-  warning).
+- **Runtime selection is internal.** Do not expose backend selection as an
+  authoring or user option. Keep dispatch behind the existing once-per-app
+  boundary; no per-agent selectors, mixed-backend roles, or automatic fallback.
+  The legacy `runtime:` frontmatter field stays ignored (one-time warning).
 - **Logging** goes through the shared `azure_functions_agents._logger.logger`.
 - **Respect the pipeline boundaries** (architecture.md §2): discovery is
   read-only; registration is the only Azure-aware stage; the runner executes

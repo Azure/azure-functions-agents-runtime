@@ -2,7 +2,7 @@
 
 > **Public preview.** The features described here are available for preview use and may change before general availability.
 
-A markdown-first programming model for building AI agents on Azure Functions, using the GitHub Copilot SDK by default with [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework) available as an explicit opt-out.
+A markdown-first programming model for building AI agents on Azure Functions, powered by the GitHub Copilot SDK.
 
 📖 **Full documentation:** [azure.github.io/azure-functions-agents-runtime](https://azure.github.io/azure-functions-agents-runtime/)
 
@@ -33,19 +33,14 @@ Add it to your function app's `requirements.txt`:
 azurefunctions-agents-runtime
 ```
 
-The standard installation includes the GitHub Copilot SDK. Copilot is selected
-when `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is unset, `true`, or `1`; set it to
-`false` or `0` to use MAF for the whole app. Selection happens once at startup,
-with no per-agent selector or fallback. At startup, Copilot requires a valid
-explicit or auto-detected provider and resolves the effective model. An
-explicitly configured model is not required because model selection falls back
-to `gpt-4o-mini`. Its documented
-[host qualification limits](docs/copilot-preview-operations.md#qualification-scope)
-still apply, and switching from MAF does not migrate MAF conversation history.
+The standard installation includes the GitHub Copilot SDK. At startup, the
+runtime requires a valid explicit or auto-detected provider and resolves the
+effective model. An explicitly configured model is not required because model
+selection falls back to `gpt-4o-mini`.
 
 ## Model Provider Configuration
 
-The selected harness supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
+The runtime supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
@@ -56,6 +51,9 @@ The selected harness supports Microsoft Foundry, Azure OpenAI, and OpenAI as inf
 If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
 
 Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > runtime fallback (`gpt-4o-mini`).
+
+See [Runtime operations](docs/runtime-operations.md) for provider startup,
+storage selection, session inspection, qualification scope, and safe cleanup.
 
 ## Quick Start
 
@@ -207,9 +205,9 @@ and [evaluation sample](samples/agent-evaluation/).
 
 ### Agent configuration
 
-By default, agents execute through the GitHub Copilot SDK. Optional
-global defaults and recursive per-agent overrides configure model output limits. Harness-specific
-conversation compaction stays on each SDK's native default behavior.
+Agents execute through the GitHub Copilot SDK. Optional global defaults and
+recursive per-agent overrides configure model output limits. Conversation
+compaction stays on the SDK's native default behavior.
 
 ```yaml
 # agents.config.yaml
@@ -220,9 +218,8 @@ agent_configuration:
 Agents recursively inherit global `agent_configuration` values. Per-agent values override individual
 leaves, while explicit `null` clears inherited values. Legacy
 `agent_framework.compaction.max_context_window_tokens` configuration emits a warning and is ignored;
-remove it to use the selected harness's native compaction default. On the Copilot
-preview path, `max_output_tokens` is passed through as the SDK provider's
-request-local native output cap. See
+remove it to use the runtime's native compaction default. `max_output_tokens` is
+passed through as the SDK provider's request-local native output cap. See
 [`docs/front-matter-spec.md#agent_configuration`](docs/front-matter-spec.md#agent_configuration).
 
 #### Securing endpoints
@@ -339,7 +336,7 @@ response_example: |        # optional — agent returns structured JSON matching
 Agent instructions in markdown...
 ```
 
-> **Note**: Earlier preview releases supported a `runtime: copilot|maf` frontmatter field. Harness selection is now app-wide through `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`; the frontmatter field is ignored with a one-time warning per agent file. Remove it from your `.agent.md` files.
+> **Note**: The legacy `runtime:` frontmatter field is ignored with a one-time warning per agent file. Remove it from your `.agent.md` files.
 
 ### Multiple functions from markdown
 
@@ -481,11 +478,11 @@ def reverse_string(text: str) -> str:
 
 The runtime's ordinary `@tool` produces an SDK-free descriptor. Functions can be
 sync or async; signature types and Pydantic schemas supply input validation, and
-the selected harness adapts the descriptor to its SDK. Tools return ordinary
-Python values. Discovery selects one tool per module: a runtime descriptor
-first, then named callable objects with public `name`/`description`, then the
-first local public function. Imported functions, classes, unrelated globals,
-and workflow-only declarations are not automatically exposed.
+the runtime adapts the descriptor to the SDK. Tools return ordinary Python
+values. Discovery selects one tool per module: a runtime descriptor first, then
+named callable objects with public `name`/`description`, then the first local
+public function. Imported functions, classes, unrelated globals, and
+workflow-only declarations are not automatically exposed.
 
 The convenience `@tool` accepts only `name`, `description`, `schema`, and
 `approval_mode`; unexpected keyword arguments raise the normal Python
@@ -628,61 +625,34 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`tools`** — optional exact-name allowlist. Omitted or any list containing `"*"` allows all tools; `[]` allows none; other lists allow only the named tools. Patterns such as `"get_*"` are not supported.
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
 
-MCP tools are the supported capability; MCP prompts are not surfaced. The MAF
-adapter skips prompt loading for connector-backed servers that reject
-`prompts/list`. Copilot uses normal native SDK connection and tool loading.
-Per-agent [`mcp: false` / `mcp.exclude`](docs/front-matter-spec.md#mcp) can further
-narrow the selected servers.
+MCP tools are the supported capability; MCP prompts are not surfaced. The
+runtime uses native SDK connection and tool loading. Per-agent
+[`mcp: false` / `mcp.exclude`](docs/front-matter-spec.md#mcp) can further narrow
+the selected servers.
 
 By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
 
-On the default Copilot preview path, fresh MCP headers are supplied at native session
-create/resume between completed turns, not refreshed mid-turn. This is not full
-MAF auth parity. See the [MCP and scoped skills boundary](docs/copilot-preview-operations.md#mcp-and-scoped-skills)
-for noninteractive approvals, auth precedence, and unqualified scenarios.
+Fresh MCP headers are supplied at native session create/resume between completed
+turns, not refreshed mid-turn. Configured MCP requests remain noninteractive,
+and generated authorization takes precedence over static `Authorization`.
 
 > **Note**: Entries without a `url`, with unresolved placeholders in `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 
 ## Session storage
 
-The selected harness uses the existing Functions storage configuration.
+The runtime uses the existing Functions storage configuration.
 `AzureWebJobsStorage` (connection string) takes precedence over
 `AzureWebJobsStorage__blobServiceUri` (Entra authentication). Either setting
 selects Azure Blob Storage, including during local development with Azurite.
 Local files are selected only when neither is configured; configured Blob
 auth, network or configuration failures surface without a local fallback.
 
-On the MAF opt-out path, multi-turn conversations are persisted as JSON
-Lines, one record per message:
-
-- **Deployed apps (recommended).** When `AzureWebJobsStorage` is configured —
-  as either a connection string or the identity-based
-  `AzureWebJobsStorage__blobServiceUri` setting that `azd` provisions —
-  history is written to **Azure Blob Storage** via the runtime's
-  `BlobHistoryProvider`. One Append Blob per agent/session pair is stored under
-  `agent-sessions/{agent_slug}/{session_id}.jsonl` inside the
-  `azure-functions-agents` container (override with
-  `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER`). No file share, no storage
-  account key, no mount path; the same identity that the function app
-  already uses for `AzureWebJobsStorage` reads and writes sessions. In
-  multi-identity Function Apps, storage honors
-  `AzureWebJobsStorage__clientId` before `AZURE_CLIENT_ID` to select the
-  intended managed identity.
-- **Local dev files.** When neither `AzureWebJobsStorage` nor
-  `AzureWebJobsStorage__blobServiceUri` is set, history falls back to MAF's
-  `FileHistoryProvider` writing to
-  `{AZURE_FUNCTIONS_AGENTS_SESSION_DIR}/agent-sessions/{agent_slug}/{session_id}.jsonl`,
-  defaulting to `~/.azure-functions-agents/agent-sessions/`.
-
-Copilot session files use a separate namespace:
+Session files use the namespace
 `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`. Here `agent_id`
 is the shared trimmed, lower-case `WEBSITE_SITE_NAME` plus canonical agent slug,
 or `local/main` when the site name is blank or unset. Files are opaque
 to the host; their contents, continuation, recovery and compaction belong to
-the SDK. This separate namespace applies to the default internal Copilot preview. The
-MAF opt-out path keeps its `agent-sessions/` history layout. History is not
-migrated between harnesses. Only the selected harness's persistence adapter is
-initialized or closed, with no opposite-harness history probes.
+the SDK.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
 The same caller-visible session id may be reused across agents for correlation, but each agent's

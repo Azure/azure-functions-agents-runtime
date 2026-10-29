@@ -76,7 +76,7 @@ from azure_functions_agents.registration.capabilities import build_capabilities
 from tests._harness_helpers import copilot_state, make_copilot_harness
 from tests.test_copilot_execution import _fake_client
 
-SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
+SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "session-continuity" / "src"
 
 
 @pytest.fixture

@@ -43,11 +43,8 @@ For capabilities (MCP, skills, tools):
 1. **Auto-discovered** — MCP servers from `mcp.json`, plus skills and tools from their directories
 2. **Filtered per-agent** using exclude lists in agent front matter
 
-The default [Copilot preview](copilot-preview-operations.md#mcp-and-scoped-skills)
-uses the same MCP and skill authoring/filter fields; it adds no per-agent harness
-selector or new skill configuration keys. Its execution and qualification limits
-remain bounded. Set `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=false` for the MAF
-opt-out path.
+MCP and skill authoring use the same per-agent filters shown below. There is no
+per-agent runtime selector or additional skill configuration surface.
 
 ### Quick Reference: Required vs Optional
 
@@ -278,9 +275,8 @@ delegation, or a Workflow Sub Agent grant.
 #### `agent_configuration`
 - **Type:** `object | null`
 - **Typical location:** Global defaults in `agents.config.yaml`; optional recursive overrides in agent front matter
-- **Default:** Empty configuration; the Copilot SDK is the default harness
-- **Description:** Configures the model output limit. Harness-specific conversation compaction uses each SDK's
-  native defaults and is not configured through this public object.
+- **Default:** Empty configuration
+- **Description:** Configures the model output limit. Conversation compaction uses the SDK's native defaults and is not configured through this public object.
 
 ```yaml
 # agents.config.yaml
@@ -299,28 +295,20 @@ only their own resolved global-plus-agent configuration, never a coordinator's o
 
 `max_output_tokens` is a positive integer. Environment substitution runs before schema parsing.
 The legacy `agent_framework.compaction.max_context_window_tokens` field is no longer supported:
-the runtime warns and ignores it, and the selected harness uses its native compaction defaults.
+the runtime warns and ignores it, and the SDK uses its native compaction defaults.
 
-On the MAF opt-out path, execution applies whenever an agent runs directly,
-as a chat-time delegated specialist, or as a Workflow Sub Agent. Direct runs
-retain authoritative full Blob/File history while compaction
-bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
-executions with no nested delegation or persistent history.
-
-On the default Copilot path, the runtime uses the SDK's native compaction
-defaults. Configured `max_output_tokens` is passed through on that
-path as the Copilot provider's per-request native output-token cap. The runtime does not add a
-second host-owned truncation layer; the selected SDK/provider remains authoritative for enforcement.
+The runtime uses the SDK's native compaction defaults. Configured
+`max_output_tokens` is passed through as the provider's per-request native
+output-token cap. The runtime does not add a second host-owned truncation layer;
+the SDK/provider remains authoritative for enforcement.
 
 Session storage is not an `agent_configuration` or front-matter setting.
-The selected harness uses the existing `AzureWebJobsStorage` connection string
+The runtime uses the existing `AzureWebJobsStorage` connection string
 or `AzureWebJobsStorage__blobServiceUri` to select Blob; local files are used
 only when neither is configured. Configured Blob failures do not fall back to
-disk. MAF keeps its history provider, while Copilot supplies thin `SessionFs`
-callbacks for opaque SDK-owned files. The SDK owns continuation, recovery,
-compaction and format compatibility; the host does not interpret those files.
-Only the selected harness's persistence adapter is initialized, used and closed.
-See [`copilot-preview-operations.md`](copilot-preview-operations.md).
+disk. Thin `SessionFs` callbacks persist opaque SDK-owned files. The SDK owns
+continuation, recovery, compaction and format compatibility; the host does not
+interpret those files.
 
 Existing top-level `model` and `timeout` fields remain unchanged.
 
@@ -923,15 +911,16 @@ filters tools within one server; it is distinct from the frontmatter
 **Note:** `mcp.exclude` entries must match server names discovered from `mcp.json`.
 For transports, headers, and Entra auth, see the repository's
 [MCP Server Configuration](https://github.com/Azure/azure-functions-agents-runtime#mcp-server-configuration).
-The Copilot preview keeps these selections, with the
-[between-turn auth and approval boundary](copilot-preview-operations.md#mcp-and-scoped-skills).
+The runtime keeps these selections and refreshes authentication when a native
+session is created or resumed between completed turns. See
+[MCP configuration and auth](runtime-operations.md#mcp-configuration-and-auth).
 
 ---
 
 #### `skills`
 - **Type:** `object` or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skill filtering configuration. Shared discovery searches `skills/` through two child directory levels and stops at each directory containing `SKILL.md`. Grouping folders are supported; nested `SKILL.md` documents below a skill root belong to that skill rather than becoming independently selectable skills. Exclusions match directory basenames. Both harnesses receive the same filtered paths; the selected SDK reads and validates skill metadata and owns instruction loading and resource/script mechanisms. The MAF opt-out adapter uses `SkillsProvider`; the default Copilot preview uses native skills and scoped helpers. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the `SKILL.md` format. MAF requires its authored `name` to match the containing directory name.
+- **Description:** Skill filtering configuration. Shared discovery searches `skills/` through two child directory levels and stops at each directory containing `SKILL.md`. Grouping folders are supported; nested `SKILL.md` documents below a skill root belong to that skill rather than becoming independently selectable skills. Exclusions match directory basenames. The SDK reads and validates skill metadata and owns instruction loading and resource/script mechanisms.
 
 Discovery does not parse skill frontmatter, advertise authored descriptions, or
 confirm that a candidate will load. Invalid metadata and duplicate-name handling
@@ -1002,7 +991,7 @@ skills: false
 
 **Note:** All discovered skill directory candidates are available to agents by default. Use `exclude` to filter them before forwarding paths to the selected SDK.
 
-**Copilot preview boundary:** Only individual approved skill directories and
+**Native skill boundary:** Only individual approved skill directories and
 names are exposed. A resource or script target belongs to the most-specific
 canonical discovered skill root containing it, and that owning skill must be
 approved. Separately supplied overlapping roots keep independent ownership:
@@ -1012,10 +1001,10 @@ Implicit nested documents are part of their containing skill, not extra grants.
 project-code reads or shell commands.
 
 Approved literal script invocations run trusted deployment-owned code with host
-privileges, not an OS sandbox. See
-[supported native script forms](copilot-preview-operations.md#supported-native-script-forms).
-MAF retains its existing nested resource recursion; Copilot's stronger subtree
-policy does not fix the MAF nested-exclusion gap or establish MAF script parity.
+privileges, not an OS sandbox. Approved targets are absolute `.py` or `.sh`
+files beneath the owning skill's `scripts/` directory, invoked with `python`,
+`python3`, or `bash` and literal arguments only. See
+[supported native script forms](runtime-operations.md#supported-native-script-forms).
 
 ---
 

@@ -91,13 +91,10 @@ uv build
 
 The official E2E job runs the unchanged suite
 `python -m pytest -m e2e tests/endtoend -v` in four lanes: Python 3.13/3.14
-crossed with explicit MAF
-(`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=false`) and default Copilot (selector
-unset).
+crossed with both internal execution implementations.
 
-Before running that suite locally, set the selector to `false` for the MAF lane
-or unset it for the default Copilot lane, then rebuild the shared Function-app
-dependency tree:
+Before running that suite locally, rebuild the shared Function-app dependency
+tree:
 
 ```bash
 python eng/scripts/install_e2e_dependencies.py

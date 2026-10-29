@@ -490,7 +490,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.22,<1" },
     { name = "types-jsonschema", marker = "extra == 'dev'", specifier = ">=4.26.0.20260518,<5" },
 ]
-provides-extras = ["copilot", "monitor", "dev", "docs"]
+provides-extras = ["monitor", "dev", "docs"]
 
 [[package]]
 name = "azurefunctions-extensions-base"

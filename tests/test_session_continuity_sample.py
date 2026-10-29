@@ -1,4 +1,4 @@
-"""The preview verifier must not require customer-managed native-runtime settings."""
+"""The session verifier must not require customer-managed native-runtime settings."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from azure_functions_agents.harness import _harness_binding as _harness
 
 
 def _load_verifier():
-    source = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "verify.py"
-    spec = importlib.util.spec_from_file_location("copilot_preview_verify", source)
+    source = Path(__file__).resolve().parents[1] / "samples" / "session-continuity" / "verify.py"
+    spec = importlib.util.spec_from_file_location("session_continuity_verify", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -192,7 +192,13 @@ def test_azure_restart_verifier_does_not_require_an_openai_key(
 
 
 def test_sample_entrypoint_uses_functions_script_root(monkeypatch: Any, tmp_path: Path) -> None:
-    source = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src" / "function_app.py"
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "samples"
+        / "session-continuity"
+        / "src"
+        / "function_app.py"
+    )
     monkeypatch.setattr(paths, "_app_root", None)
     monkeypatch.setattr(_harness, "_HARNESSES", {})
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_APP_ROOT", raising=False)
@@ -205,7 +211,7 @@ def test_sample_entrypoint_uses_functions_script_root(monkeypatch: Any, tmp_path
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("WEBSITE_INSTANCE_ID", raising=False)
     monkeypatch.delenv("FUNCTIONS_WORKER_PROCESS_COUNT", raising=False)
-    spec = importlib.util.spec_from_file_location("copilot_preview_function_app", source)
+    spec = importlib.util.spec_from_file_location("session_continuity_function_app", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

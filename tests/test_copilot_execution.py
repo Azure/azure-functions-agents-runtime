@@ -65,7 +65,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import Copil
 from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 from tests._harness_helpers import copilot_state, make_copilot_harness
 
-SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
+SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "session-continuity" / "src"
 
 
 @pytest.fixture
