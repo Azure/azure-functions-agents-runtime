@@ -67,6 +67,15 @@ status and body. Sessions persist across worker restarts.
 
 ## Authoring
 
+**Agent-only tool** in a separate `OrderTools.cs` class; no trigger or HTTP endpoint:
+
+```csharp
+[AgentTool("lookup_order", "Look up an order's payment and item status by orderId.")]
+public object LookupOrder(string orderId) => ...
+```
+
+**Function + tool** with both entry paths:
+
 ```csharp
 [Function("ShippingQuote")]
 [AgentTool("calculate_shipping_http", "Calculate shipping.",
@@ -74,8 +83,8 @@ status and body. Sessions persist across worker restarts.
 public Task<HttpResponseData> ShippingQuoteAsync(...)
 ```
 
-Register the function type once. The runtime generates the tool schema from
-the DTO and invokes the same handler.
+Register the tool instance or function type once. The runtime generates the tool
+schema from method parameters or the DTO and invokes the C# handler.
 
 ## What the demo demonstrates
 

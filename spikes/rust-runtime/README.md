@@ -55,6 +55,42 @@ curl /api/shipping/quote
   -> actual Functions host HTTP binding -> ShippingQuote -> same shipping logic
 ```
 
+## Agent-only tools
+
+[`OrderTools.cs`](dotnet/HostedSkills.Spike/OrderTools.cs) demonstrates a tool-only
+class. `LookupOrder` needs only `[AgentTool]`: no `[Function]`, trigger, or HTTP
+request/response types.
+
+```csharp
+public sealed class OrderTools
+{
+    [AgentTool("lookup_order", "Look up an order's payment and item status by orderId.")]
+    public object LookupOrder(string orderId) => new
+    {
+        orderId,
+        customer = "Ada Lovelace",
+        status = "PAID",
+        totalUsd = 149.99
+    };
+}
+```
+
+`Program.cs` registers the class in DI with `services.AddSingleton<OrderTools>()`
+and passes the resolved instance to `registry.RegisterFromObject(tools)`. The
+registry generates the schema from the method parameters and invokes that
+instance when the agent calls `lookup_order`. No Functions endpoint is created;
+unattributed helpers such as `CalculateShipping` are not exposed as agent tools.
+
+Try it through the agent with either mock or configured Foundry inference:
+
+```bash
+curl --fail-with-body -sS http://localhost:7071/api/support \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Call lookup_order for orderId ORD-900","sessionId":"tool-only-demo"}'
+```
+
+The response's `result.tool_calls_made` records `lookup_order` when invoked.
+
 ## One function, two entry paths
 
 The sample's shipping function carries both method attributes. Attribute order
