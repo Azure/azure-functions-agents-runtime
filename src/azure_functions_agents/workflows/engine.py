@@ -35,6 +35,7 @@ from durabletask.task import (
     CancellableTask,
     OrchestrationContext,
     Task,
+    TaskCancelledError,
     TaskFailedError,
     when_all,
     when_any,
@@ -404,7 +405,13 @@ def _await_continuation_wave(
 def _cancel_timer_task(task: Task[Any]) -> None:
     timer_task = cast(CancellableTask[Any], task)
     if not timer_task.is_complete:
-        timer_task.cancel()
+        try:
+            timer_task.cancel()
+        except TaskCancelledError:
+            # A losing when_all can read the canceled timer during notification.
+            if not timer_task.is_cancelled:
+                raise
+            logger.debug("workflow timer cancellation reached its task group")
 
 
 def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:

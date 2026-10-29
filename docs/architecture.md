@@ -256,6 +256,11 @@ The `_compose_function_app()` docstring in `src/azure_functions_agents/app.py:_c
 
 ### Where the registration stage hands off to execution
 
+Workflow cancellation cancels pending timers through a shared engine helper.
+The helper handles `TaskCancelledError` from the losing task group only if the
+timer is canceled. Other cancellation errors propagate. Both workflow
+schedulers preserve the cancellation result and discard uncommitted wave results.
+
 Registration builds closures capturing filtered immutable `AgentCapabilities`, the frozen `AgentCatalog`, and one bound `AppHarness`. Public runner entry points validate identities and establish deadlines before calling the cached concrete runner directly. Each selected runner uses the single SDK-free request factory with its bound app root: default MAF flows through `harness/agent_framework/_maf_runner.py` into `_maf_execution.py`; explicit Copilot flows through `harness/copilot_sdk/_copilot_runner.py` into `_copilot_execution.py`. Event calls carry approved skills, the full ownership catalog, display and execution-surface telemetry, and omitted-versus-explicit session state. `run_agent_events()` converts the shared SSE vocabulary to typed events for hosted skills. Explicit close or cancellation propagates through each adapter via `aclosing`; callers that break public async iteration early must close it for deterministic release. Unsupported preview operations still fail before native/provider acquisition. Non-HTTP trigger serialization and HTTP body handling retain their existing contracts.
 
 `config/merge.py` recursively combines global and per-agent portable

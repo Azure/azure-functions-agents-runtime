@@ -692,6 +692,10 @@ For workflows started by the updated runtime, an ordinary wave waits for
 task failure is reported only after every child finishes, including retries and
 timers. Cancellation can win before the group finishes, even after a child has
 failed. Returned terminal failures are still processed after the wave.
+When cancellation wins, the runtime cancels pending timers. A canceled timer
+can cause the losing group to raise `TaskCancelledError`. The runtime handles
+that exception only after timer cancellation succeeds. Other errors still
+propagate.
 
 The runtime stores this selection as the internal `wave_wait_mode: "all"` input.
 Existing instances without that field keep the earlier per-task wait and

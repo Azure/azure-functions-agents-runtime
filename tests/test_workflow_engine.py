@@ -13,7 +13,13 @@ from typing import Any
 import pytest
 from durabletask.internal import helpers as history_helpers
 from durabletask.serialization import JsonDataConverter
-from durabletask.task import CompletableTask, TaskFailedError, WhenAllTask
+from durabletask.task import (
+    CompletableTask,
+    TaskCancelledError,
+    TaskFailedError,
+    TimerTask,
+    WhenAllTask,
+)
 from durabletask.worker import _OrchestrationExecutor, _Registry
 
 from azure_functions_agents._function_tool import WorkflowTool
@@ -908,6 +914,66 @@ def test_cancel_can_win_after_a_grouped_child_fails(dynamic: bool) -> None:
     assert stopped.value.value["results"] == ({"source": {"items": [1]}} if dynamic else {})
     context.pending[1].complete({"result": "late"})
     assert race.result is context.cancel_task
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("timer_count", [1, 2])
+@pytest.mark.parametrize("outcome", ["success", "failure", "durable_failure"])
+def test_grouped_wave_cancels_native_timers_after_child_completion(
+    monkeypatch, dynamic: bool, timer_count: int, outcome: str,
+) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    timers: list[TimerTask] = []
+
+    def create_timer(_deadline):
+        timer = TimerTask()
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(context, "create_timer", create_timer, raising=False)
+    context.current_utc_datetime = datetime(2026, 1, 1, tzinfo=UTC)
+    context._input["tasks"].extend(
+        {
+            "id": f"pause_{index}",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT5M",
+            "depends_on": ["source"] if dynamic else [],
+        }
+        for index in range(timer_count)
+    )
+    generator, race = _pending_wave(context)
+    for task in context.pending:
+        if outcome == "durable_failure":
+            task.fail("probe failed", RuntimeError("probe failed"))
+        elif outcome == "failure":
+            task.complete(_failure("probe"))
+        else:
+            task.complete({"result": "done"})
+    assert not race.is_complete
+    context.cancel_task.complete("stop")
+
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(race.result)
+    output = stopped.value.value
+    assert output["canceled"] is True
+    assert output["reason"] == "stop"
+    assert output["results"] == ({"source": {"items": [1]}} if dynamic else {})
+    assert len(timers) == timer_count
+    assert all(timer.is_cancelled for timer in timers)
+    assert race.result is context.cancel_task
+
+
+@pytest.mark.parametrize("error_type", [TaskCancelledError, RuntimeError])
+def test_timer_cancellation_preserves_cancel_handler_errors(error_type) -> None:
+    timer = TimerTask()
+
+    def fail():
+        raise error_type("cancel handler failed")
+
+    timer.set_cancel_handler(fail)
+    with pytest.raises(error_type, match="cancel handler failed"):
+        engine._cancel_timer_task(timer)
+    assert not timer.is_cancelled
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
