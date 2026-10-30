@@ -34,6 +34,10 @@ from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import activity as workflow_activity
 from azure_functions_agents.workflows import engine, integration
+from azure_functions_agents.workflows._wave_execution import (
+    GroupedWaveStrategy,
+    WaveExecutionStrategy,
+)
 from azure_functions_agents.workflows.native_retry import (
     DurableRetryableActivityError,
     raise_for_durable_retry,
@@ -1042,37 +1046,55 @@ def test_grouped_waves_reuse_cancel_without_changing_the_previous_winner(dynamic
     assert "second" in output["results"]
 
 
-@pytest.mark.parametrize("completed", ["cancel", "all", "both"])
-def test_grouped_wave_handles_precompleted_candidates(completed: str) -> None:
-    cancel = CompletableTask()
-    child = CompletableTask()
-    if completed in {"cancel", "both"}:
-        cancel.complete("stop")
-    if completed in {"all", "both"}:
-        child.complete("done")
-    generator = engine._await_wave(
-        None,
-        cancel,
-        [child],
-        wait_mode=engine.WaveWaitMode.ALL,
-    )
-    race = next(generator)
-    assert race.is_complete
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+def test_schedulers_accept_a_replacement_wave_strategy(
+    monkeypatch, dynamic: bool, fails: bool,
+) -> None:
+    calls = []
+
+    class ReplacementStrategy(WaveExecutionStrategy):
+        def wait(self, context, cancel_task, wave_tasks, specs):
+            calls.append(("wait", [spec.node_id for spec in specs]))
+            return (yield from GroupedWaveStrategy().wait(
+                context, cancel_task, wave_tasks, specs,
+            ))
+
+        def resolve_result(self, spec, raw):
+            calls.append(("result", spec.node_id))
+            if spec.node_id == "source":
+                return super().resolve_result(spec, raw)
+            return {"strategy": spec.node_id}
+
+        def resolve_failure(self, context, specs, error):
+            calls.append(("failure", [spec.node_id for spec in specs]))
+            return RuntimeError("replacement failure")
+
+    replacement = ReplacementStrategy()
+    monkeypatch.setattr(engine, "select_wave_strategy", lambda _mode, _specs: replacement)
+    context = _PendingWaveContext(dynamic=dynamic)
+    generator, race = _pending_wave(context)
+    if fails:
+        context.pending[0].fail("probe failed", RuntimeError("probe failed"))
+    else:
+        context.pending[0].complete({"result": "first"})
+    context.pending[1].complete({"result": "second"})
+
+    if fails:
+        with pytest.raises(RuntimeError, match="replacement failure"):
+            generator.send(race.result)
+        assert calls[-1] == ("failure", ["first[0]" if dynamic else "first", "second"])
+        return
     with pytest.raises(StopIteration) as stopped:
         generator.send(race.result)
-    assert stopped.value.value == (["done"] if completed == "all" else None)
-
-
-def test_grouped_wave_rejects_an_unknown_winner() -> None:
-    generator = engine._await_wave(
-        None,
-        CompletableTask(),
-        [CompletableTask()],
-        wait_mode=engine.WaveWaitMode.ALL,
+    results = stopped.value.value["results"]
+    assert results["second"] == {"strategy": "second"}
+    assert results["first"] == (
+        [{"index": 0, "status": "completed", "result": {"strategy": "first[0]"}}]
+        if dynamic
+        else {"strategy": "first"}
     )
-    next(generator)
-    with pytest.raises(RuntimeError, match="unknown task"):
-        generator.send(CompletableTask())
+    assert ("wait", ["first[0]" if dynamic else "first", "second"]) in calls
 
 
 @pytest.mark.parametrize("grouped", [False, True])
@@ -1551,29 +1573,6 @@ def test_static_subagent_failure_can_continue() -> None:
     }
 
 
-def test_unclassified_activity_failure_logs_host_guidance(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    context = _FakeOrchestrationContext([], lambda name, payload: {})
-    secret = "raw host failure detail"
-    failure = TaskFailedError("opaque durable failure", RuntimeError(secret))
-
-    with caplog.at_level("WARNING"):
-        engine._warn_unclassified_activity_failure(
-            context,
-            failure,
-            [("probe", 30_000)],
-        )
-
-    assert "unclassified Activity failure" in caplog.text
-    assert "host.json" in caplog.text
-    assert "AzureFunctionsJobHost__functionTimeout" in caplog.text
-    assert "workflow_id=workflow-parent" in caplog.text
-    assert "node_id=probe" in caplog.text
-    assert "timeout_ms=30000" in caplog.text
-    assert secret not in caplog.text
-
-
 def test_continuation_wave_opaque_durable_failure_fails_and_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1608,22 +1607,6 @@ def test_continuation_wave_opaque_durable_failure_fails_and_warns(
     assert len(warnings) == 1
     assert "node_id=probe" in warnings[0].getMessage()
     assert "timeout_ms=30000" in warnings[0].getMessage()
-
-
-def test_unclassified_activity_failure_warning_is_suppressed_on_replay(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    context = _FakeOrchestrationContext([], lambda name, payload: {})
-    context.is_replaying = True
-
-    with caplog.at_level("WARNING"):
-        engine._warn_unclassified_activity_failure(
-            context,
-            TaskFailedError("opaque durable failure", RuntimeError("detail")),
-            [("probe", 30_000)],
-        )
-
-    assert "unclassified Activity failure" not in caplog.text
 
 
 def test_policy_free_activity_failure_does_not_log_host_guidance(

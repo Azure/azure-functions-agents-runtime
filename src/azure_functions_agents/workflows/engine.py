@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any, Literal, NotRequired, TypedDict, cast
@@ -36,9 +36,6 @@ from durabletask.task import (
     OrchestrationContext,
     Task,
     TaskCancelledError,
-    TaskFailedError,
-    when_all,
-    when_any,
 )
 
 from azure_functions_agents._logger import logger
@@ -47,16 +44,15 @@ from azure_functions_agents.registration.catalog import AgentCatalog
 from azure_functions_agents.runner import run_leaf_agent_task
 
 from . import registry
+from ._wave_execution import WaveExecutionStrategy, WaveTaskSpec, select_wave_strategy
 from .activity import (
-    ActivityFailure,
     authorization_outcome,
     handler_contract_outcome,
     invoke_handler,
     invoke_policy_handler,
-    validate_activity_result,
     validate_policy_activity_input,
 )
-from .native_retry import create_durable_retry_policy, decode_durable_retry_failure
+from .native_retry import create_durable_retry_policy
 from .schema import (
     ECHO_TOOL_NAME,
     MAX_NODES,
@@ -217,191 +213,6 @@ def _call_task_activity(
     )
 
 
-def _unwrap_activity_result(node_id: str, *, policy_aware: bool, raw: Any) -> Any:
-    """Return a task result, raising the sanitized failure for policy-aware tasks."""
-    if not policy_aware:
-        return raw["result"]
-    succeeded, outcome = validate_activity_result(node_id, raw)
-    if succeeded:
-        return outcome
-    raise RuntimeError(f"task {node_id!r}: {outcome['error']} ({outcome['error_code']})")
-
-
-_CONTINUABLE_FAILURE_KINDS = frozenset({
-    "handler_transient",
-    "handler_terminal",
-    "execution_unknown",
-})
-
-
-def _resolve_continuation_failure(
-    node_id: str,
-    *,
-    continue_on_error: bool,
-    failure: ActivityFailure,
-) -> dict[str, Any]:
-    """Return a bounded continued failure, or raise the task failure."""
-    if continue_on_error and failure["kind"] in _CONTINUABLE_FAILURE_KINDS:
-        return {
-            "failed": True,
-            "error_code": failure["error_code"],
-            "error": failure["error"],
-            "kind": failure["kind"],
-        }
-    raise RuntimeError(
-        f"task {node_id!r}: {failure['error']} ({failure['error_code']})"
-    )
-
-
-def _decode_wave_failure(node_ids: list[str], error: BaseException) -> BaseException:
-    """Replace an exhausted native-retry failure with its sanitized cause.
-
-    Durable reports one failure for the whole wave, so the sanitized payload is
-    matched back to its node by id. Node order is deterministic, and the decode
-    is a pure function of persisted data, so replay is unaffected.
-    """
-    for node_id in node_ids:
-        failure = decode_durable_retry_failure(node_id, error)
-        if failure is not None:
-            return RuntimeError(
-                f"task {node_id!r}: {failure['error']} ({failure['error_code']})"
-            )
-    return error
-
-
-def _warn_unclassified_activity_failure(
-    context: OrchestrationContext,
-    error: BaseException,
-    candidates: list[tuple[str, int | None]],
-) -> None:
-    """Warn about an opaque Activity failure without changing its cause."""
-    if (
-        not candidates
-        or not isinstance(error, TaskFailedError)
-        or context.is_replaying
-    ):
-        return
-    node_id: str | None = None
-    timeout_ms: int | None = None
-    if len(candidates) == 1:
-        node_id, timeout_ms = candidates[0]
-    logger.warning(
-        "The workflow received an unclassified Activity failure. A host timeout "
-        "or worker restart may have interrupted the Activity. Check Azure Functions "
-        "host logs and Application Insights, if enabled. Compare the effective "
-        "functionTimeout setting in host.json or AzureFunctionsJobHost__functionTimeout "
-        "with the task timeout. workflow_id=%s node_id=%s timeout_ms=%s",
-        context.instance_id,
-        node_id or "<unknown>",
-        timeout_ms if timeout_ms is not None else "<unknown>",
-    )
-
-
-def _await_wave(
-    context: OrchestrationContext,
-    cancel_task: Task[Any],
-    wave_tasks: list[Task[Any]],
-    *,
-    wait_mode: WaveWaitMode | None = None,
-) -> Generator[Task[Any], Task[Any], list[Any] | None]:
-    """Wait for a wave with the behavior selected by its stored input."""
-    if wait_mode is WaveWaitMode.ALL:
-        if not wave_tasks:
-            return []
-        all_task = when_all(wave_tasks)
-        winner = yield when_any([cancel_task, all_task])
-        if winner is cancel_task:
-            return None
-        if winner is not all_task:
-            raise RuntimeError("workflow task selection returned an unknown task")
-        return all_task.result
-
-    outcomes: dict[int, Any] = {}
-    pending = list(range(len(wave_tasks)))
-    while pending:
-        winner = yield when_any(
-            [cancel_task, *(wave_tasks[index] for index in pending)]
-        )
-        if winner is cancel_task:
-            return None
-        completed = next(
-            (index for index in pending if wave_tasks[index] is winner),
-            None,
-        )
-        if completed is None:
-            raise RuntimeError("workflow task selection returned an unknown task")
-        pending.remove(completed)
-        outcomes[completed] = wave_tasks[completed].result
-    return [outcomes[index] for index in range(len(wave_tasks))]
-
-
-def _await_continuation_wave(
-    context: OrchestrationContext,
-    cancel_task: Task[Any],
-    wave_tasks: list[Task[Any]],
-    wave_specs: Sequence[Mapping[str, Any]],
-) -> Generator[Task[Any], Task[Any], list[Any] | None]:
-    """Process each completed instance when one task enables continuation."""
-    outcomes: dict[int, Any] = {}
-    pending = list(range(len(wave_tasks)))
-    while pending:
-        winner = yield when_any(
-            [cancel_task, *(wave_tasks[index] for index in pending)]
-        )
-        if winner is cancel_task:
-            return None
-        completed = next(
-            (index for index in pending if wave_tasks[index] is winner),
-            None,
-        )
-        if completed is None:
-            raise RuntimeError("workflow task selection returned an unknown task")
-        pending.remove(completed)
-        spec = wave_specs[completed]
-        if spec["type"] == WAIT_TASK_TYPE:
-            outcomes[completed] = wave_tasks[completed].result
-            continue
-
-        node_id = str(spec["id"])
-        policy_aware = bool(spec.get("policy_aware"))
-        try:
-            raw = wave_tasks[completed].result
-        except Exception as exc:
-            failure = (
-                decode_durable_retry_failure(node_id, exc)
-                if policy_aware
-                else None
-            )
-            if failure is None:
-                if policy_aware:
-                    _warn_unclassified_activity_failure(
-                        context,
-                        exc,
-                        [(node_id, spec.get("timeout_ms"))],
-                    )
-                raise
-            outcomes[completed] = _resolve_continuation_failure(
-                node_id,
-                continue_on_error=bool(spec.get("continue_on_error")),
-                failure=failure,
-            )
-            continue
-
-        if not policy_aware:
-            outcomes[completed] = raw["result"]
-            continue
-        succeeded, outcome = validate_activity_result(node_id, raw)
-        if succeeded:
-            outcomes[completed] = outcome
-            continue
-        outcomes[completed] = _resolve_continuation_failure(
-            node_id,
-            continue_on_error=bool(spec.get("continue_on_error")),
-            failure=outcome,
-        )
-    return [outcomes[index] for index in range(len(wave_tasks))]
-
-
 def _cancel_timer_task(task: Task[Any]) -> None:
     timer_task = cast(CancellableTask[Any], task)
     if not timer_task.is_complete:
@@ -460,7 +271,7 @@ def _run_static_workflow(
             )
 
         wave = ready[:MAX_PARALLELISM]
-        wave_specs: list[dict[str, Any]] = []
+        wave_specs: list[WaveTaskSpec] = []
         wave_tasks: list[Task[Any]] = []
         for tid in wave:
             task = by_id[tid]
@@ -488,13 +299,12 @@ def _run_static_workflow(
                         tags={"durabletask.displayName": task["tool"]},
                     )
                 )
-                wave_specs.append({
-                    "id": tid,
-                    "type": TOOL_TASK_TYPE,
-                    "policy_aware": _persisted_execution(task) is not None,
-                    "continue_on_error": _persisted_continue_on_error(task),
-                    "timeout_ms": _persisted_timeout_ms(task),
-                })
+                wave_specs.append(WaveTaskSpec(
+                    node_id=tid,
+                    policy_aware=_persisted_execution(task) is not None,
+                    continue_on_error=_persisted_continue_on_error(task),
+                    timeout_ms=_persisted_timeout_ms(task),
+                ))
             elif task["type"] == SUB_AGENT_TASK_TYPE:
                 try:
                     resolved_task = resolve_template_value(task["task"], results)
@@ -521,23 +331,16 @@ def _run_static_workflow(
                         tags={"durabletask.displayName": task["agent"]},
                     )
                 )
-                wave_specs.append({
-                    "id": tid,
-                    "type": SUB_AGENT_TASK_TYPE,
-                    "policy_aware": _persisted_execution(task) is not None,
-                    "continue_on_error": _persisted_continue_on_error(task),
-                    "timeout_ms": _persisted_timeout_ms(task),
-                })
+                wave_specs.append(WaveTaskSpec(
+                    node_id=tid,
+                    policy_aware=_persisted_execution(task) is not None,
+                    continue_on_error=_persisted_continue_on_error(task),
+                    timeout_ms=_persisted_timeout_ms(task),
+                ))
             elif task["type"] == WAIT_TASK_TYPE:
                 deadline = _wait_deadline(context, task)
                 wave_tasks.append(context.create_timer(deadline))
-                wave_specs.append(
-                    {
-                        "id": tid,
-                        "type": WAIT_TASK_TYPE,
-                        "deadline": deadline.isoformat(),
-                    }
-                )
+                wave_specs.append(WaveTaskSpec(node_id=tid, deadline=deadline.isoformat()))
             else:
                 raise RuntimeError(
                     f"task {tid!r}: unsupported task type {task['type']!r}"
@@ -546,46 +349,19 @@ def _run_static_workflow(
         context.set_custom_status(
             f"{len(results)}/{total} tasks done, running={','.join(wave)}"
         )
-        continuation_wave = any(
-            bool(spec.get("continue_on_error")) for spec in wave_specs
-        )
+        strategy = select_wave_strategy(wait_mode, wave_specs)
         wave_failure: BaseException | None = None
         wave_results: list[Any] | None = None
         try:
-            if continuation_wave:
-                wave_results = yield from _await_continuation_wave(
-                    context,
-                    cancel_task,
-                    wave_tasks,
-                    wave_specs,
-                )
-            else:
-                wave_results = yield from _await_wave(
-                    context,
-                    cancel_task,
-                    wave_tasks,
-                    wait_mode=wait_mode,
-                )
+            wave_results = yield from strategy.wait(
+                context, cancel_task, wave_tasks, wave_specs,
+            )
         except Exception as exc:
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
-                if spec["type"] == WAIT_TASK_TYPE:
+                if spec.deadline is not None:
                     _cancel_timer_task(wave_task)
-            if continuation_wave:
-                raise
-            decoded = _decode_wave_failure(
-                [spec["id"] for spec in wave_specs if spec.get("policy_aware")],
-                exc,
-            )
+            decoded = strategy.resolve_failure(context, wave_specs, exc)
             if decoded is exc:
-                _warn_unclassified_activity_failure(
-                    context,
-                    exc,
-                    [
-                        (spec["id"], spec.get("timeout_ms"))
-                        for spec in wave_specs
-                        if spec.get("policy_aware")
-                    ],
-                )
                 raise
             wave_failure = decoded
         if wave_failure is not None:
@@ -593,7 +369,7 @@ def _run_static_workflow(
         if wave_results is None:
             reason = cancel_task.result
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
-                if spec["type"] == WAIT_TASK_TYPE:
+                if spec.deadline is not None:
                     _cancel_timer_task(wave_task)
             context.set_custom_status(
                 f"canceled at {len(results)}/{total} tasks done"
@@ -613,19 +389,8 @@ def _run_static_workflow(
             }
 
         for spec, raw in zip(wave_specs, wave_results, strict=True):
-            tid = spec["id"]
-            if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
-                results[tid] = (
-                    raw
-                    if continuation_wave
-                    else _unwrap_activity_result(
-                        tid,
-                        policy_aware=bool(spec.get("policy_aware")),
-                        raw=raw,
-                    )
-                )
-            else:
-                results[tid] = {"waited_until": spec["deadline"]}
+            tid = spec.node_id
+            results[tid] = strategy.resolve_result(spec, raw)
             remaining.discard(tid)
 
         running_id = ""
@@ -1227,20 +992,11 @@ def _apply_dynamic_wave_results(
     wave: list[_MaterializedInstance],
     wave_results: list[Any],
     *,
-    continuation_wave: bool,
+    strategy: WaveExecutionStrategy,
+    specs: list[WaveTaskSpec],
 ) -> None:
-    for instance, raw in zip(wave, wave_results, strict=True):
-        if instance.get("kind") == "timer":
-            instance["result"] = {"waited_until": instance["deadline"]}
-        elif continuation_wave:
-            instance["result"] = raw
-        else:
-            instance["result"] = _unwrap_activity_result(
-                instance["instance_id"],
-                policy_aware=_persisted_execution(state.by_id[instance["logical_id"]])
-                is not None,
-                raw=raw,
-            )
+    for instance, spec, raw in zip(wave, specs, wave_results, strict=True):
+        instance["result"] = strategy.resolve_result(spec, raw)
         instance["state"] = "completed"
         if instance["index"] is None:
             logical_id = instance["logical_id"]
@@ -1282,77 +1038,33 @@ def _run_dynamic_workflow(
         wave_tasks = _dispatch_dynamic_wave(context, state, wave)
         _publish_dynamic_status(context, state)
         wave_specs = [
-            {
-                "id": instance["instance_id"],
-                "type": (
-                    WAIT_TASK_TYPE
-                    if instance.get("kind") == "timer"
-                    else state.by_id[instance["logical_id"]]["type"]
-                ),
-                "policy_aware": _persisted_execution(
+            WaveTaskSpec(
+                node_id=instance["instance_id"],
+                deadline=instance["deadline"] if instance["kind"] == "timer" else None,
+                policy_aware=_persisted_execution(
                     state.by_id[instance["logical_id"]]
                 )
                 is not None,
-                "continue_on_error": _persisted_continue_on_error(
+                continue_on_error=_persisted_continue_on_error(
                     state.by_id[instance["logical_id"]]
                 ),
-                "timeout_ms": _persisted_timeout_ms(
+                timeout_ms=_persisted_timeout_ms(
                     state.by_id[instance["logical_id"]]
                 ),
-            }
+            )
             for instance in wave
         ]
-        continuation_wave = any(
-            bool(spec.get("continue_on_error")) for spec in wave_specs
-        )
+        strategy = select_wave_strategy(wait_mode, wave_specs)
         wave_failure: BaseException | None = None
         wave_results: list[Any] | None = None
         try:
-            if continuation_wave:
-                wave_results = yield from _await_continuation_wave(
-                    context,
-                    cancel_task,
-                    wave_tasks,
-                    wave_specs,
-                )
-            else:
-                wave_results = yield from _await_wave(
-                    context,
-                    cancel_task,
-                    wave_tasks,
-                    wait_mode=wait_mode,
-                )
+            wave_results = yield from strategy.wait(
+                context, cancel_task, wave_tasks, wave_specs,
+            )
         except Exception as exc:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
-            if continuation_wave:
-                raise
-            decoded = _decode_wave_failure(
-                [
-                    instance["instance_id"]
-                    for instance in wave
-                    if _persisted_execution(state.by_id[instance["logical_id"]]) is not None
-                ],
-                exc,
-            )
+            decoded = strategy.resolve_failure(context, wave_specs, exc)
             if decoded is exc:
-                _warn_unclassified_activity_failure(
-                    context,
-                    exc,
-                    [
-                        (
-                            instance["instance_id"],
-                            _persisted_timeout_ms(
-                                state.by_id[instance["logical_id"]]
-                            ),
-                        )
-                        for instance in wave
-                        if instance["kind"] == "activity"
-                        and _persisted_execution(
-                            state.by_id[instance["logical_id"]]
-                        )
-                        is not None
-                    ],
-                )
                 raise
             wave_failure = decoded
         if wave_failure is not None:
@@ -1380,7 +1092,8 @@ def _run_dynamic_workflow(
                 state,
                 wave,
                 wave_results,
-                continuation_wave=continuation_wave,
+                strategy=strategy,
+                specs=wave_specs,
             )
         except BaseException:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
