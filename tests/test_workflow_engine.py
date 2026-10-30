@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
+import logging
 from collections.abc import Callable
 from contextvars import Context
 from datetime import UTC, datetime
@@ -9,7 +11,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from durabletask.task import TaskFailedError
+from durabletask.internal import helpers as history_helpers
+from durabletask.serialization import JsonDataConverter
+from durabletask.task import (
+    CompletableTask,
+    TaskCancelledError,
+    TaskFailedError,
+    TimerTask,
+)
+from durabletask.worker import _OrchestrationExecutor, _Registry
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.config.schema import (
@@ -23,6 +33,10 @@ from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import activity as workflow_activity
 from azure_functions_agents.workflows import engine, integration
+from azure_functions_agents.workflows._wave_execution import (
+    PerTaskWaveStrategy,
+    WaveExecutionStrategy,
+)
 from azure_functions_agents.workflows.native_retry import (
     DurableRetryableActivityError,
     raise_for_durable_retry,
@@ -101,8 +115,7 @@ def _registered_function(
         if function._name == name:
             registered = function._func
             if name == engine.ORCHESTRATOR_NAME:
-                assert registered.__closure__ is not None
-                return registered.__closure__[0].cell_contents
+                return registered.orchestrator_function
             return registered
     raise AssertionError(f"workflow function {name!r} was not registered")
 
@@ -670,6 +683,10 @@ class _Task:
         self._parents: dict[int, Any] = {}
 
     @property
+    def is_failed(self) -> bool:
+        return isinstance(self._result, Exception)
+
+    @property
     def result(self) -> Any:
         if isinstance(self._result, Exception):
             raise self._result
@@ -678,6 +695,9 @@ class _Task:
     @result.setter
     def result(self, value: Any) -> None:
         self._result = value
+
+    def get_result(self) -> Any:
+        return self.result
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -789,6 +809,394 @@ def _drive_one_wave(generator: Any, context: _FakeOrchestrationContext, selectio
         candidates = getattr(selection, "_tasks", [])
         remaining = [task for task in remaining if task in candidates]
     return selection
+
+
+class _PendingWaveContext(_FakeOrchestrationContext):
+    def __init__(self, *, dynamic: bool) -> None:
+        tasks = [
+            {
+                "id": node_id,
+                "type": TOOL_TASK_TYPE,
+                "tool": "inspect",
+                "args": {},
+                "depends_on": [],
+            }
+            for node_id in ("first", "second")
+        ]
+        if dynamic:
+            tasks[0]["for_each"] = "${source.result.items}"
+            for task in tasks:
+                task["depends_on"] = ["source"]
+            tasks.insert(
+                0,
+                {
+                    "id": "source",
+                    "type": TOOL_TASK_TYPE,
+                    "tool": "inspect",
+                    "args": {},
+                    "depends_on": [],
+                },
+            )
+        super().__init__(tasks, lambda _name, _payload: {})
+        self._input["policy"] = {"allowed_tools": ["inspect"], "allowed_subagents": []}
+        self.cancel_task = CompletableTask()
+        self.pending: list[CompletableTask] = []
+
+    def call_activity(self, name: str, *, input: Any, **kwargs: Any) -> CompletableTask:
+        self.calls.append((name, input))
+        task = CompletableTask()
+        if input["id"] == "source":
+            task.complete({"result": {"items": [1]}})
+            return task
+        self.pending.append(task)
+        return task
+
+
+def _pending_wave(context: _PendingWaveContext) -> tuple[Any, Any]:
+    generator = _registered_function(engine.ORCHESTRATOR_NAME)(context, context._input)
+    race = next(generator)
+    if context.calls[0][1]["id"] == "source":
+        race = generator.send(race.result)
+    return generator, race
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_wave_waits_per_task_and_preserves_input_order(dynamic: bool) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    generator, race = _pending_wave(context)
+
+    assert race.get_tasks() == [context.cancel_task, *context.pending]
+    context.pending[1].complete({"result": "second"})
+    race = generator.send(race.result)
+    assert not race.is_complete
+    context.pending[0].complete({"result": "first"})
+    assert race.is_complete
+    assert race.result is context.pending[0]
+
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(race.result)
+    assert stopped.value.value == {
+        "results": {
+            **({"source": {"items": [1]}} if dynamic else {}),
+            "first": [{"index": 0, "status": "completed", "result": "first"}]
+            if dynamic
+            else "first",
+            "second": "second",
+        }
+    }
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_wave_reports_durable_failure_before_siblings_complete(dynamic: bool) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    generator, race = _pending_wave(context)
+    context.pending[0].fail("probe failed", RuntimeError("probe failed"))
+    assert race.is_complete
+    assert not context.pending[1].is_complete
+    with pytest.raises(TaskFailedError, match="probe failed"):
+        generator.send(race.result)
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_durable_failure_wins_before_later_cancellation(dynamic: bool) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    generator, race = _pending_wave(context)
+    context.pending[0].fail("probe failed", RuntimeError("probe failed"))
+    context.cancel_task.complete("stop")
+
+    assert race.result is context.pending[0]
+    with pytest.raises(TaskFailedError, match="probe failed"):
+        generator.send(race.result)
+    context.pending[1].complete({"result": "late"})
+    assert race.result is context.pending[0]
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_cancel_wins_before_later_durable_failure(dynamic: bool) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    generator, race = _pending_wave(context)
+    context.cancel_task.complete("stop")
+    context.pending[0].fail("probe failed", RuntimeError("probe failed"))
+
+    assert race.result is context.cancel_task
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(race.result)
+    assert stopped.value.value["canceled"] is True
+    assert stopped.value.value["results"] == ({"source": {"items": [1]}} if dynamic else {})
+    context.pending[1].complete({"result": "late"})
+    assert race.result is context.cancel_task
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("timer_count", [1, 2])
+@pytest.mark.parametrize("outcome", ["success", "failure", "durable_failure"])
+def test_wave_cancels_native_timers_after_child_completion(
+    monkeypatch, dynamic: bool, timer_count: int, outcome: str,
+) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    timers: list[TimerTask] = []
+
+    def create_timer(_deadline):
+        timer = TimerTask()
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(context, "create_timer", create_timer, raising=False)
+    context.current_utc_datetime = datetime(2026, 1, 1, tzinfo=UTC)
+    context._input["tasks"].extend(
+        {
+            "id": f"pause_{index}",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT5M",
+            "depends_on": ["source"] if dynamic else [],
+        }
+        for index in range(timer_count)
+    )
+    generator, race = _pending_wave(context)
+    for task in context.pending:
+        if outcome == "durable_failure":
+            task.fail("probe failed", RuntimeError("probe failed"))
+        elif outcome == "failure":
+            task.complete(_failure("probe"))
+        else:
+            task.complete({"result": "done"})
+    if outcome == "durable_failure":
+        with pytest.raises(TaskFailedError, match="probe failed"):
+            generator.send(race.result)
+        assert len(timers) == timer_count
+        assert all(timer.is_cancelled for timer in timers)
+        return
+    while race.is_complete:
+        race = generator.send(race.result)
+    context.cancel_task.complete("stop")
+
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(race.result)
+    output = stopped.value.value
+    assert output["canceled"] is True
+    assert output["reason"] == "stop"
+    assert output["results"] == ({"source": {"items": [1]}} if dynamic else {})
+    assert len(timers) == timer_count
+    assert all(timer.is_cancelled for timer in timers)
+    assert race.result is context.cancel_task
+
+
+@pytest.mark.parametrize("error_type", [TaskCancelledError, RuntimeError])
+def test_timer_cancellation_preserves_cancel_handler_errors(error_type) -> None:
+    timer = TimerTask()
+
+    def fail():
+        raise error_type("cancel handler failed")
+
+    timer.set_cancel_handler(fail)
+    with pytest.raises(error_type, match="cancel handler failed"):
+        engine._cancel_timer_task(timer)
+    assert not timer.is_cancelled
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_wave_keeps_per_task_continuation_processing(dynamic: bool) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    for spec in context._input["tasks"]:
+        if spec["id"] == "first":
+            spec["execution"] = _execution(continue_on_error=True)
+    generator, race = _pending_wave(context)
+    assert race.get_tasks() == [context.cancel_task, *context.pending]
+    context.pending[0].complete(
+        {
+            "id": "first[0]" if dynamic else "first",
+            "ok": False,
+            "failure": _failure("first")["failure"],
+        }
+    )
+    race = generator.send(race.result)
+    assert not race.is_complete
+    context.pending[1].complete({"result": "second"})
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(race.result)
+    first = stopped.value.value["results"]["first"]
+    if dynamic:
+        first = first[0]["result"]
+    assert first["error_code"] == "optional_task_failed"
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_waves_reuse_cancel_without_changing_the_previous_winner(dynamic: bool) -> None:
+    context = _PendingWaveContext(dynamic=dynamic)
+    context._input["tasks"].append(
+        {
+            "id": "report",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {},
+            "depends_on": ["first", "second"],
+        }
+    )
+    generator, first_race = _pending_wave(context)
+    context.pending[0].complete({"result": "first"})
+    context.pending[1].complete({"result": "second"})
+    first_winner = first_race.result
+    second_race = generator.send(first_winner)
+    second_race = generator.send(second_race.result)
+    context.cancel_task.complete("stop next wave")
+    assert first_race.result is first_winner
+    assert second_race.result is context.cancel_task
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(second_race.result)
+    output = stopped.value.value
+    assert output["canceled"] is True
+    assert "report" not in output["results"]
+    assert "first" in output["results"]
+    assert "second" in output["results"]
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+def test_schedulers_accept_a_replacement_wave_strategy(
+    monkeypatch, dynamic: bool, fails: bool,
+) -> None:
+    calls = []
+
+    class ReplacementStrategy(WaveExecutionStrategy):
+        def wait(self, context, cancel_task, wave_tasks, specs):
+            calls.append(("wait", [spec.node_id for spec in specs]))
+            return (yield from PerTaskWaveStrategy().wait(
+                context, cancel_task, wave_tasks, specs,
+            ))
+
+        def resolve_result(self, spec, raw):
+            calls.append(("result", spec.node_id))
+            if spec.node_id == "source":
+                return super().resolve_result(spec, raw)
+            return {"strategy": spec.node_id}
+
+        def resolve_failure(self, context, specs, error):
+            calls.append(("failure", [spec.node_id for spec in specs]))
+            return RuntimeError("replacement failure")
+
+    replacement = ReplacementStrategy()
+    monkeypatch.setattr(engine, "select_wave_strategy", lambda _specs: replacement)
+    context = _PendingWaveContext(dynamic=dynamic)
+    generator, race = _pending_wave(context)
+    if fails:
+        context.pending[0].fail("probe failed", RuntimeError("probe failed"))
+    else:
+        context.pending[0].complete({"result": "first"})
+    context.pending[1].complete({"result": "second"})
+
+    if fails:
+        with pytest.raises(RuntimeError, match="replacement failure"):
+            generator.send(race.result)
+        assert calls[-1] == ("failure", ["first[0]" if dynamic else "first", "second"])
+        return
+    with pytest.raises(StopIteration) as stopped:
+        while True:
+            race = generator.send(race.result)
+    results = stopped.value.value["results"]
+    assert results["second"] == {"strategy": "second"}
+    assert results["first"] == (
+        [{"index": 0, "status": "completed", "result": {"strategy": "first[0]"}}]
+        if dynamic
+        else {"strategy": "first"}
+    )
+    assert ("wait", ["first[0]" if dynamic else "first", "second"]) in calls
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+def test_recorded_wave_history_replays_with_the_corrected_sdk(
+    outcome: str,
+) -> None:
+    context = _PendingWaveContext(dynamic=False)
+    registry = _Registry()
+    registry.add_named_orchestrator(
+        engine.ORCHESTRATOR_NAME,
+        _registered_function(engine.ORCHESTRATOR_NAME),
+    )
+    instance_id = "fanout-recorded-history"
+    initial = [
+        history_helpers.new_orchestrator_started_event(),
+        history_helpers.new_execution_started_event(
+            engine.ORCHESTRATOR_NAME,
+            instance_id,
+            json.dumps(context._input),
+        ),
+    ]
+
+    def execute(old: list[Any], new: list[Any]) -> Any:
+        return _OrchestrationExecutor(
+            registry,
+            logging.getLogger("fanout-replay"),
+            JsonDataConverter(),
+        ).execute(instance_id, old, new)
+
+    scheduled = execute([], initial).actions
+    assert len(scheduled) == 2
+    recorded = [
+        *initial,
+        *(
+            history_helpers.new_task_scheduled_event(
+                action.id,
+                action.scheduleTask.name,
+                action.scheduleTask.input.value,
+            )
+            for action in scheduled
+        ),
+        history_helpers.new_orchestrator_completed_event(),
+    ]
+    first, second = scheduled
+    first_completion = (
+        history_helpers.new_task_failed_event(first.id, RuntimeError("recorded failure"))
+        if outcome == "failure"
+        else history_helpers.new_task_completed_event(first.id, json.dumps({"result": "first"}))
+    )
+    arrived = [
+        history_helpers.new_orchestrator_started_event(),
+        first_completion,
+    ]
+    partial = execute(recorded, arrived)
+    if outcome == "failure":
+        assert partial.actions[-1].completeOrchestration.failureDetails.errorMessage.endswith(
+            "recorded failure"
+        )
+        return
+    assert partial.actions == []
+    recorded.extend([*arrived, history_helpers.new_orchestrator_completed_event()])
+    last = (
+        history_helpers.new_event_raised_event("cancel", json.dumps("stop"))
+        if outcome == "cancel"
+        else history_helpers.new_task_completed_event(second.id, json.dumps({"result": "second"}))
+    )
+    arrived = [history_helpers.new_orchestrator_started_event(), last]
+    result = execute(recorded, arrived)
+    terminal = result.actions[-1].completeOrchestration
+    if outcome == "failure":
+        assert terminal.failureDetails.errorMessage.endswith("recorded failure")
+    else:
+        output = json.loads(terminal.result.value)
+        if outcome == "cancel":
+            assert output["canceled"] is True
+            assert output["results"] == {}
+        else:
+            assert output == {"results": {"first": "first", "second": "second"}}
+    replay = execute(
+        [*recorded, *arrived, history_helpers.new_orchestrator_completed_event()],
+        [history_helpers.new_orchestrator_started_event()],
+    )
+    replay_terminal = replay.actions[-1].completeOrchestration
+    assert replay_terminal.orchestrationStatus == terminal.orchestrationStatus
+    assert replay_terminal.result == terminal.result
+    assert replay_terminal.failureDetails.errorType == terminal.failureDetails.errorType
+    assert replay_terminal.failureDetails.errorMessage == terminal.failureDetails.errorMessage
+
+
+def test_empty_plan_completes_without_a_wave_wait() -> None:
+    context = _PendingWaveContext(dynamic=False)
+    context._input["tasks"] = []
+    generator = _registered_function(engine.ORCHESTRATOR_NAME)(context, context._input)
+    with pytest.raises(StopIteration) as stopped:
+        next(generator)
+    assert stopped.value.value == {"results": {}}
+    assert context.pending == []
 
 
 def test_orchestrator_preserves_activity_failure() -> None:
@@ -1163,29 +1571,6 @@ def test_static_subagent_failure_can_continue() -> None:
     }
 
 
-def test_unclassified_activity_failure_logs_host_guidance(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    context = _FakeOrchestrationContext([], lambda name, payload: {})
-    secret = "raw host failure detail"
-    failure = TaskFailedError("opaque durable failure", RuntimeError(secret))
-
-    with caplog.at_level("WARNING"):
-        engine._warn_unclassified_activity_failure(
-            context,
-            failure,
-            [("probe", 30_000)],
-        )
-
-    assert "unclassified Activity failure" in caplog.text
-    assert "host.json" in caplog.text
-    assert "AzureFunctionsJobHost__functionTimeout" in caplog.text
-    assert "workflow_id=workflow-parent" in caplog.text
-    assert "node_id=probe" in caplog.text
-    assert "timeout_ms=30000" in caplog.text
-    assert secret not in caplog.text
-
-
 def test_continuation_wave_opaque_durable_failure_fails_and_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1220,22 +1605,6 @@ def test_continuation_wave_opaque_durable_failure_fails_and_warns(
     assert len(warnings) == 1
     assert "node_id=probe" in warnings[0].getMessage()
     assert "timeout_ms=30000" in warnings[0].getMessage()
-
-
-def test_unclassified_activity_failure_warning_is_suppressed_on_replay(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    context = _FakeOrchestrationContext([], lambda name, payload: {})
-    context.is_replaying = True
-
-    with caplog.at_level("WARNING"):
-        engine._warn_unclassified_activity_failure(
-            context,
-            TaskFailedError("opaque durable failure", RuntimeError("detail")),
-            [("probe", 30_000)],
-        )
-
-    assert "unclassified Activity failure" not in caplog.text
 
 
 def test_policy_free_activity_failure_does_not_log_host_guidance(

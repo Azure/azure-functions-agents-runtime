@@ -125,18 +125,29 @@ async def test_direct_invocation_summary_includes_recovered_delegate_errors(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "timeout", "disconnect"])
 async def test_sse_semantic_invocation_tracks_actual_execution_lifecycle(
-    preview, native, invocation_spans, outcome,
+    preview, native, invocation_spans, monkeypatch, outcome,
 ):
     _, exporter = invocation_spans
     session = native.create_session.return_value
+    timeouts: list[asyncio.Timeout] = []
+    original_timeout_at = asyncio.timeout_at
+
+    def capture_timeout(deadline):
+        timeout = original_timeout_at(deadline)
+        timeouts.append(timeout)
+        return timeout
+
+    monkeypatch.setattr(_copilot_execution.asyncio, "timeout_at", capture_timeout)
     if outcome != "success":
         async def wait(**_kwargs):
+            if outcome == "timeout":
+                timeouts[0].reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
 
         session.send_and_wait.side_effect = wait
     stream = copilot_state(preview).run_agent_stream(
         "hello", session_is_new=True, agent_name="main",
-        deadline=asyncio.get_running_loop().time() + (0.05 if outcome == "timeout" else 5),
+        deadline=asyncio.get_running_loop().time() + 10,
     )
     events = []
     try:
@@ -165,6 +176,9 @@ async def test_sse_semantic_invocation_tracks_actual_execution_lifecycle(
         "cancelled" if outcome == "disconnect" else "error" if outcome == "timeout" else "success"
     )
     assert invocation.status.status_code.name == ("ERROR" if outcome == "timeout" else "UNSET")
+    if outcome == "timeout":
+        session.send_and_wait.assert_awaited_once()
+        assert timeouts[0].expired()
     if outcome != "disconnect":
         assert events[-1]["type"] == ("error" if outcome == "timeout" else "done")
     session.on.assert_called_once()

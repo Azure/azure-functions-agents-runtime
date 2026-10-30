@@ -27,6 +27,8 @@ chat UI to start and observe an independent workflow.
 
 Development tooling samples:
 
+- [workflow-fanout-review](workflow-fanout-review/) - local release-review
+  scenarios for DTS fan-out, ordered collection results, failure, and cancellation.
 - [agent-evaluation](agent-evaluation/) — runnable receipt-agent Function App plus a native Vally
 	evaluation against its local or staging chat endpoint, with deterministic tool/output graders,
 	repeated trials, and JUnit output.

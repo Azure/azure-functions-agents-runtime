@@ -11,7 +11,8 @@ license = {text = "MIT"}
 requires-python = ">=3.13"
 dependencies = [
     "azure-functions>=2.1.0,<3",
-    "azure-functions-durable==2.0.0b2",
+    "azure-functions-durable==2.0.0rc3",
+    "durabletask==1.12.0",
     # Keep this trio exact: foundry 1.10.4 imports an OpenAI module absent from 1.10.2.
     "agent-framework-core==1.13.0",
     "agent-framework-openai==1.10.2",
@@ -45,7 +46,8 @@ dev = [
     # Reuse the optional SDK version; dev tests never start the native runtime by default.
     "azurefunctions-agents-runtime[copilot]",
     "ruff>=0.15.22,<1",
-    "mypy>=2.1.0,<3",
+    # Older mypy releases crash on the Durable SDK's shared composite types.
+    "mypy>=2.4.0,<3",
     "pydantic>=2.13.4,<3",
     "pytest>=9.0.3,<10",
     "types-jsonschema>=4.26.0.20260518,<5",
