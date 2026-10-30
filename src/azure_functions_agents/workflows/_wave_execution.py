@@ -7,13 +7,12 @@ from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from durabletask.task import OrchestrationContext, Task, TaskFailedError, when_all, when_any
+from durabletask.task import OrchestrationContext, Task, TaskFailedError, when_any
 
 from azure_functions_agents._logger import logger
 
 from .activity import ActivityFailure, validate_activity_result
 from .native_retry import decode_durable_retry_failure
-from .schema import WaveWaitMode
 
 type WaveWait = Generator[Task[Any], Task[Any], list[Any] | None]
 
@@ -106,26 +105,7 @@ class WaveExecutionStrategy(ABC):
         return error
 
 
-class GroupedWaveStrategy(WaveExecutionStrategy):
-    def wait(
-        self,
-        context: OrchestrationContext,
-        cancel_task: Task[Any],
-        wave_tasks: list[Task[Any]],
-        specs: Sequence[WaveTaskSpec],
-    ) -> WaveWait:
-        if not wave_tasks:
-            return []
-        all_task = when_all(wave_tasks)
-        winner = yield when_any([cancel_task, all_task])
-        if winner is cancel_task:
-            return None
-        if winner is not all_task:
-            raise RuntimeError("workflow task selection returned an unknown task")
-        return all_task.result
-
-
-class LegacyWaveStrategy(WaveExecutionStrategy):
+class PerTaskWaveStrategy(WaveExecutionStrategy):
     def wait(
         self,
         context: OrchestrationContext,
@@ -184,7 +164,7 @@ def _resolve_continuation_failure(
     )
 
 
-class ContinuationWaveStrategy(LegacyWaveStrategy):
+class ContinuationWaveStrategy(PerTaskWaveStrategy):
     def _read_completed(
         self,
         context: OrchestrationContext,
@@ -229,17 +209,13 @@ class ContinuationWaveStrategy(LegacyWaveStrategy):
         return error
 
 
-_ORDINARY_STRATEGIES: dict[WaveWaitMode | None, WaveExecutionStrategy] = {
-    None: LegacyWaveStrategy(),
-    WaveWaitMode.ALL: GroupedWaveStrategy(),
-}
+_PER_TASK_STRATEGY = PerTaskWaveStrategy()
 _CONTINUATION_STRATEGY = ContinuationWaveStrategy()
 
 
 def select_wave_strategy(
-    wait_mode: WaveWaitMode | None,
     specs: Sequence[WaveTaskSpec],
 ) -> WaveExecutionStrategy:
     if any(spec.continue_on_error for spec in specs):
         return _CONTINUATION_STRATEGY
-    return _ORDINARY_STRATEGIES[wait_mode]
+    return _PER_TASK_STRATEGY

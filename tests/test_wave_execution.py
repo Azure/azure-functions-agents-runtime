@@ -7,28 +7,19 @@ from durabletask.task import CompletableTask, TaskFailedError
 
 from azure_functions_agents.workflows._wave_execution import (
     ContinuationWaveStrategy,
-    GroupedWaveStrategy,
-    LegacyWaveStrategy,
+    PerTaskWaveStrategy,
     WaveTaskSpec,
     select_wave_strategy,
 )
-from azure_functions_agents.workflows.schema import WaveWaitMode
 
-STRATEGIES = [GroupedWaveStrategy, LegacyWaveStrategy, ContinuationWaveStrategy]
+STRATEGIES = [PerTaskWaveStrategy, ContinuationWaveStrategy]
 
 
-@pytest.mark.parametrize("mode", [None, WaveWaitMode.ALL])
 @pytest.mark.parametrize("continuation", [False, True])
-def test_strategy_selection_uses_stored_policy(mode, continuation):
+def test_strategy_selection_uses_stored_policy(continuation):
     specs = [WaveTaskSpec("first"), WaveTaskSpec("second", continue_on_error=continuation)]
-    strategy = select_wave_strategy(mode, specs)
-    expected = (
-        ContinuationWaveStrategy
-        if continuation
-        else GroupedWaveStrategy
-        if mode is WaveWaitMode.ALL
-        else LegacyWaveStrategy
-    )
+    strategy = select_wave_strategy(specs)
+    expected = ContinuationWaveStrategy if continuation else PerTaskWaveStrategy
     assert type(strategy) is expected
 
 
@@ -49,11 +40,8 @@ def test_each_strategy_preserves_result_order(strategy_type):
     generator = strategy.wait(None, cancel, [first, second], specs)
     race = next(generator)
     second.complete({"result": "second"})
-    if strategy_type is GroupedWaveStrategy:
-        assert not race.is_complete
-    else:
-        race = generator.send(race.result)
-        assert not race.is_complete
+    race = generator.send(race.result)
+    assert not race.is_complete
     first.complete({"result": "first"})
     with pytest.raises(StopIteration) as stopped:
         generator.send(race.result)
@@ -63,20 +51,26 @@ def test_each_strategy_preserves_result_order(strategy_type):
     ] == ["first", "second"]
 
 
-@pytest.mark.parametrize("completed", ["cancel", "all", "both"])
-def test_grouped_wave_handles_precompleted_candidates(completed):
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
+@pytest.mark.parametrize("completed", ["cancel", "child", "both"])
+def test_each_strategy_handles_precompleted_candidates(strategy_type, completed):
     cancel = CompletableTask()
     child = CompletableTask()
     if completed in {"cancel", "both"}:
         cancel.complete("stop")
-    if completed in {"all", "both"}:
-        child.complete("done")
-    generator = GroupedWaveStrategy().wait(None, cancel, [child], [WaveTaskSpec("child")])
+    if completed in {"child", "both"}:
+        child.complete({"result": "done"})
+    strategy = strategy_type()
+    spec = WaveTaskSpec("child")
+    generator = strategy.wait(None, cancel, [child], [spec])
     race = next(generator)
     assert race.is_complete
     with pytest.raises(StopIteration) as stopped:
         generator.send(race.result)
-    assert stopped.value.value == (["done"] if completed == "all" else None)
+    if completed == "child":
+        assert strategy.resolve_result(spec, stopped.value.value[0]) == "done"
+    else:
+        assert stopped.value.value is None
 
 
 @pytest.mark.parametrize("strategy_type", STRATEGIES)
@@ -89,9 +83,8 @@ def test_each_strategy_rejects_an_unknown_winner(strategy_type):
         generator.send(CompletableTask())
 
 
-@pytest.mark.parametrize("strategy_type", [GroupedWaveStrategy, LegacyWaveStrategy])
-def test_ordinary_strategy_defers_terminal_result_failure(strategy_type):
-    strategy = strategy_type()
+def test_ordinary_strategy_defers_terminal_result_failure():
+    strategy = PerTaskWaveStrategy()
     first, second = CompletableTask(), CompletableTask()
     specs = [WaveTaskSpec("first", policy_aware=True), WaveTaskSpec("second")]
     generator = strategy.wait(None, CompletableTask(), [first, second], specs)
@@ -106,8 +99,7 @@ def test_ordinary_strategy_defers_terminal_result_failure(strategy_type):
             "retryable": False,
         },
     })
-    if strategy_type is LegacyWaveStrategy:
-        race = generator.send(race.result)
+    race = generator.send(race.result)
     assert not race.is_complete
     second.complete({"result": "second"})
     with pytest.raises(StopIteration) as stopped:
@@ -131,15 +123,14 @@ def test_continuation_keeps_an_already_resolved_business_result():
     assert strategy.resolve_failure(SimpleNamespace(), [], error) is error
 
 
-@pytest.mark.parametrize("strategy_type", [GroupedWaveStrategy, LegacyWaveStrategy])
-def test_unclassified_activity_failure_logs_host_guidance(strategy_type, caplog):
+def test_unclassified_activity_failure_logs_host_guidance(caplog):
     context = SimpleNamespace(instance_id="workflow-parent", is_replaying=False)
     secret = "raw host failure detail"
     failure = TaskFailedError("opaque durable failure", RuntimeError(secret))
     specs = [WaveTaskSpec("probe", policy_aware=True, timeout_ms=30_000)]
 
     with caplog.at_level("WARNING"):
-        assert strategy_type().resolve_failure(context, specs, failure) is failure
+        assert PerTaskWaveStrategy().resolve_failure(context, specs, failure) is failure
 
     assert "unclassified Activity failure" in caplog.text
     assert "host.json" in caplog.text
@@ -150,15 +141,14 @@ def test_unclassified_activity_failure_logs_host_guidance(strategy_type, caplog)
     assert secret not in caplog.text
 
 
-@pytest.mark.parametrize("strategy_type", [GroupedWaveStrategy, LegacyWaveStrategy])
 def test_unclassified_activity_failure_warning_is_suppressed_on_replay(
-    strategy_type, caplog,
+    caplog,
 ):
     context = SimpleNamespace(instance_id="workflow-parent", is_replaying=True)
     failure = TaskFailedError("opaque durable failure", RuntimeError("detail"))
 
     with caplog.at_level("WARNING"):
-        assert strategy_type().resolve_failure(
+        assert PerTaskWaveStrategy().resolve_failure(
             context, [WaveTaskSpec("probe", policy_aware=True, timeout_ms=30_000)], failure,
         ) is failure
 
@@ -174,7 +164,23 @@ def test_failure_warning_does_not_count_timers(caplog):
     ]
 
     with caplog.at_level("WARNING"):
-        assert GroupedWaveStrategy().resolve_failure(context, specs, failure) is failure
+        assert PerTaskWaveStrategy().resolve_failure(context, specs, failure) is failure
 
     assert "node_id=probe" in caplog.text
     assert "timeout_ms=30000" in caplog.text
+
+
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
+def test_durable_failure_preserves_its_cause_without_waiting_for_siblings(strategy_type):
+    first, second = CompletableTask(), CompletableTask()
+    generator = strategy_type().wait(
+        None, CompletableTask(), [first, second], [WaveTaskSpec("first"), WaveTaskSpec("second")],
+    )
+    race = next(generator)
+    first.fail("probe failed", RuntimeError("probe failed"))
+
+    with pytest.raises(TaskFailedError) as raised:
+        generator.send(race.result)
+
+    assert raised.value is first.get_exception()
+    assert not second.is_complete

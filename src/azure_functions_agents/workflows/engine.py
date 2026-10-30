@@ -63,7 +63,6 @@ from .schema import (
     WAIT_TASK_TYPE,
     EffectiveWorkflowTaskExecution,
     TemplateResolutionError,
-    WaveWaitMode,
     WorkflowCondition,
     WorkflowPayload,
     WorkflowPlanPolicy,
@@ -243,10 +242,8 @@ def _run_static_workflow(
     context: OrchestrationContext,
     payload: WorkflowPayload,
     tasks: list[WorkflowTaskInput],
-    *,
-    wait_mode: WaveWaitMode | None,
 ) -> Any:
-    """Execute a static plan with the stored wave wait mode."""
+    """Execute a static plan with per-task wave waiting."""
     by_id: dict[str, WorkflowTaskInput] = {t["id"]: t for t in tasks}
     deps: dict[str, set[str]] = {
         t["id"]: set(t.get("depends_on") or []) for t in tasks
@@ -349,7 +346,7 @@ def _run_static_workflow(
         context.set_custom_status(
             f"{len(results)}/{total} tasks done, running={','.join(wave)}"
         )
-        strategy = select_wave_strategy(wait_mode, wave_specs)
+        strategy = select_wave_strategy(wave_specs)
         wave_failure: BaseException | None = None
         wave_results: list[Any] | None = None
         try:
@@ -1008,8 +1005,6 @@ def _run_dynamic_workflow(
     context: OrchestrationContext,
     payload: WorkflowPayload,
     tasks: list[WorkflowTaskInput],
-    *,
-    wait_mode: WaveWaitMode | None,
 ) -> Any:
     """Execute a data-driven plan with deterministic phase helpers."""
     state = _new_dynamic_workflow_state(payload, tasks)
@@ -1054,7 +1049,7 @@ def _run_dynamic_workflow(
             )
             for instance in wave
         ]
-        strategy = select_wave_strategy(wait_mode, wave_specs)
+        strategy = select_wave_strategy(wave_specs)
         wave_failure: BaseException | None = None
         wave_results: list[Any] | None = None
         try:
@@ -1367,7 +1362,7 @@ def register_workflows(
         context: OrchestrationContext,
         raw_payload: WorkflowPayload | None,
     ) -> Any:
-        """Execute a static or data-driven plan with stored wait behavior.
+        """Execute a static or data-driven plan with per-task wave waiting.
 
         Both schedulers use deterministic task order, stored input, and Durable
         time. Activities own external work.
@@ -1379,24 +1374,10 @@ def register_workflows(
             }
         else:
             payload = raw_payload
-        wait_mode: WaveWaitMode | None = None
-        if "wave_wait_mode" in payload:
-            try:
-                wait_mode = WaveWaitMode(payload["wave_wait_mode"])
-            except ValueError as exc:
-                raise ValueError("unsupported workflow wave_wait_mode") from exc
         tasks = list(payload.get("tasks", []))
         if _plan_is_dynamic(tasks):
-            return (
-                yield from _run_dynamic_workflow(
-                    context, payload, tasks, wait_mode=wait_mode,
-                )
-            )
-        return (
-            yield from _run_static_workflow(
-                context, payload, tasks, wait_mode=wait_mode,
-            )
-        )
+            return (yield from _run_dynamic_workflow(context, payload, tasks))
+        return (yield from _run_static_workflow(context, payload, tasks))
 
     app.register_blueprint(bp)
 

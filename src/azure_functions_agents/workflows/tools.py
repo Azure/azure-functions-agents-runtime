@@ -43,7 +43,6 @@ from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
 from .schema import (
     EffectiveWorkflowTaskExecution,
     PlanValidationError,
-    WaveWaitMode,
     WorkflowPlanPolicy,
     WorkflowTaskExecution,
     plan_to_activity_inputs,
@@ -520,7 +519,6 @@ async def start_workflow(
             instance_id=instance_id,
             input={
                 "tasks": plan_to_activity_inputs(plan, effective_policies),
-                "wave_wait_mode": WaveWaitMode.ALL.value,
                 "workflow_agent_slug": session.workflow_agent_slug,
                 "workflow_agent": workflow_agent,
                 "policy": {

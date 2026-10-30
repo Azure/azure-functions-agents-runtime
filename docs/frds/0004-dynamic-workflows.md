@@ -377,33 +377,21 @@ for together. The current scheduler raises Durable exceptions during that wait.
 It processes returned terminal failure outcomes only after the wave completes.
 These are different failure paths; do not change both to immediate failure.
 
-**DTS fan-out groups.** New ordinary waves in both schedulers use
-`when_any([cancel_task, when_all(wave_tasks)])`. This lets DTS show a standard
-Fan-out group without changes to task plans, Activity names, or display labels.
-The runtime adds the internal `wave_wait_mode: "all"` field to the orchestration
-input that Durable stores in its execution history. This is the default for new
-instances, not a user or model option. An absent field keeps the earlier wait
-for existing instances; unsupported values fail before dispatch.
-
-A grouped wave waits for every child, including retries and timers, before it
-reports a Durable task failure. Cancellation can win before the group finishes,
-even after a child fails. Returned terminal failure results are processed only
-after a successful group wait. Preserve result order and commit no partial wave
+**Wave execution.** Both schedulers wait for individual tasks and race pending
+tasks against cancellation. Keep the existing failure cause, result-application
+order, and cancellation order. Preserve result order and commit no partial wave
 results. When cancellation wins, cancel pending timers and restore the pending
 wave while keeping results from earlier waves. Do not force-stop running Activities.
-Empty plans and skipped collections must finish without waiting on an empty group.
-
-For an ordinary wave without the stored mode, keep the earlier wait,
-failure cause, result-application order, and cancellation order. Do not add the
-field to an existing instance during replay. The SDK upgrade also affects replay;
-the field does not isolate those SDK changes.
+Empty plans and skipped collections must finish without a wave wait.
+There is no stored or public wait-mode selector. DTS display groups do not
+select runtime wait behavior. The SDK upgrade can still affect replay of
+existing nested composite tasks.
 
 Only a wave with at least one persisted `continue_on_error: true` uses the new
 per-instance processing path. In that path, record a failure and keep waiting
 only if the failed instance permits continuation and its failure kind permits
 it. Raise all other failures immediately, without waiting for unrelated tasks or
 timers. Share this decision logic between the static and dynamic schedulers.
-This path takes priority over the grouped wait and keeps its earlier DTS display.
 Select it from persisted input, not current tool declarations.
 If cancellation is selected, restore the wave and discard its recorded outcomes,
 as in the current cancellation path.
@@ -1390,6 +1378,7 @@ results remain unchanged.
 | 103 | Timeout sample delivery | Add a separate timeout sample / extend the retry sample | Extend `workflow-retry-policy` with a carrier task whose decorator timeout overrides a longer plan timeout while the plan retry remains active. This gives one runnable app for retry success, timeout retry, and timeout exhaustion without duplicate Functions setup | Agent | 2026-09-16 |
 | 104 | Final review delivery | Keep two stacked review PRs / combine completed slices in one final review PR | Combine the completed timeout and continuation slices in one final review PR. The implementation stayed in two commits during development and passed separate implementation and testing reviews. This replaces the review boundary in Decision 97; the product scope and separate status/UI slice do not change | Human (TsuyoshiUshio), Agent | 2026-09-16 |
 | 105 | Ordinary-wave fan-out groups | Replace all waits / select from stored input | Use nested all-task waits for new ordinary waves and store the internal `wave_wait_mode: "all"` field. An absent field keeps the earlier wait. Grouped Durable failures wait for all children; cancellation can win during that wait. Keep per-task continuation processing | Human (TsuyoshiUshio) | 2026-10-28 |
+| 106 | Wave waiting and display | Keep grouped waits / preserve individual waits | Replace the grouped-wait contract with individual waits for all waves. Keep ordinary and continuation strategies without a wait-mode selector. DTS display groups do not require a different failure timing. Preserve existing runtime behavior while updating the SDK | Human (TsuyoshiUshio) | 2026-10-30 |
 
 ## 6. Test plan
 
@@ -1614,19 +1603,19 @@ results remain unchanged.
     instance and a pending timer still raises immediately;
   - cancellation racing a continuable failure restores the wave and discards the
     recorded failure;
-  - an ordinary wave without the stored grouped-wait mode keeps immediate Durable
+  - an ordinary wave keeps immediate Durable
     exceptions and deferred processing of returned terminal outcomes, including
     authorization failures; preserve its failure cause and result-application order;
-  - without that mode, old histories, timeout-only policies, and explicit false
+  - old histories, timeout-only policies, and explicit false
     continuation keep cancellation order when a terminal outcome arrives before
     a slow sibling;
   - exercise the same rules in both schedulers.
-- [x] DTS fan-out groups
-  - new submissions store the internal mode without a new public tool argument;
+- [x] Per-task wave execution
+  - new submissions do not store a wait-mode selector;
   - real pending SDK tasks and recorded executor histories cover ordering,
-    delayed Durable failures, cancellation, and reuse of the cancel event;
+    immediate Durable failures, cancellation, and reuse of the cancel event;
   - both schedulers cover empty waves, skipped collections, bounded expansion,
-    continuation priority, native timer cancellation, and earlier-wave results;
+    continuation processing, native timer cancellation, and earlier-wave results;
   - the release review sample covers parallel tasks, collections, failure,
     cancellation, and continuation on Storage and DTS; check the real DTS Flow view.
 - [ ] SDK replay: old timer and native-retry histories keep their continuation

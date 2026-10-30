@@ -10,7 +10,6 @@ from typing import Any
 from uuid import uuid4
 
 from azure_functions_agents.workflows.schema import (
-    WaveWaitMode,
     plan_to_activity_inputs,
     resolve_workflow_task_execution,
     validate_plan,
@@ -51,7 +50,7 @@ def scenario_plan(scenario: str) -> dict[str, Any]:
         }
         for check, delay in (("tests", 6), ("security", 2), ("deployment", 4))
     ]
-    if scenario in {"failure", "cancel", "continuation"}:
+    if scenario in {"failure", "continuation"}:
         tasks[1]["args"]["fail"] = True
     if scenario == "continuation":
         tasks[1]["execution"] = {"continue_on_error": True}
@@ -75,7 +74,7 @@ def scenario_plan(scenario: str) -> dict[str, Any]:
     return {"tasks": tasks}
 
 
-def workflow_payload(scenario: str, *, legacy: bool = False) -> dict[str, Any]:
+def workflow_payload(scenario: str) -> dict[str, Any]:
     """Use production plan validation and execution-policy translation."""
     plan = validate_plan(scenario_plan(scenario), allowed_tools=TOOLS)
     effective = {}
@@ -83,14 +82,11 @@ def workflow_payload(scenario: str, *, legacy: bool = False) -> dict[str, Any]:
         execution = resolve_workflow_task_execution(task)
         if execution is not None:
             effective[task.id] = execution
-    payload = {
+    return {
         "tasks": plan_to_activity_inputs(plan, effective),
         "workflow_agent_slug": "main",
         "policy": {"allowed_tools": sorted(TOOLS), "allowed_subagents": []},
     }
-    if not legacy:
-        payload["wave_wait_mode"] = WaveWaitMode.ALL.value
-    return payload
 
 
 def request_json(url: str, payload: Any = None, *, method: str = "GET") -> Any:
@@ -105,14 +101,14 @@ def request_json(url: str, payload: Any = None, *, method: str = "GET") -> Any:
         return json.loads(data) if data else None
 
 
-def run_scenario(base_url: str, scenario: str, *, legacy: bool = False) -> dict[str, Any]:
+def run_scenario(base_url: str, scenario: str) -> dict[str, Any]:
     """Submit one plan and assert its terminal result."""
-    workflow_id = f"fanout-{scenario}-{'legacy' if legacy else 'all'}-{uuid4().hex}"
+    workflow_id = f"fanout-{scenario}-{uuid4().hex}"
     root = f"{base_url.rstrip('/')}/runtime/webhooks/durabletask"
     instance = f"{root}/instances/{workflow_id}"
     request_json(
         f"{root}/orchestrators/agents_workflow_orchestrator/{workflow_id}",
-        workflow_payload(scenario, legacy=legacy),
+        workflow_payload(scenario),
         method="POST",
     )
     print(f"{scenario}: {workflow_id}", flush=True)
@@ -129,12 +125,8 @@ def run_scenario(base_url: str, scenario: str, *, legacy: bool = False) -> dict[
         time.sleep(0.5)
     else:
         raise AssertionError(f"{workflow_id} did not finish: {status}")
-    expected = (
-        "Failed" if scenario == "failure" or (scenario == "cancel" and legacy) else "Completed"
-    )
+    expected = "Failed" if scenario == "failure" else "Completed"
     assert status["runtimeStatus"] == expected, status
-    if scenario == "failure" and not legacy:
-        assert time.monotonic() - started >= 5.5, "The failed wave did not wait for its siblings."
     output = status.get("output")
     assert output is not None or expected == "Failed", (
         "The provider did not return workflow output. Inspect the host and DTS history.",
@@ -163,12 +155,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://localhost:7071")
     parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")
-    parser.add_argument(
-        "--legacy", action="store_true", help="Omit the stored wait mode for comparison."
-    )
     args = parser.parse_args()
     for scenario in SCENARIOS if args.scenario == "all" else (args.scenario,):
-        result = run_scenario(args.base_url, scenario, legacy=args.legacy)
+        result = run_scenario(args.base_url, scenario)
         print(json.dumps(result, indent=2))
 
 

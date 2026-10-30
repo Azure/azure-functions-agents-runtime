@@ -93,12 +93,3 @@ def test_release_review_scenario(fanout_sample_host: HostHandle, scenario: str) 
     except Exception:
         print(fanout_sample_host.read_output())
         raise
-
-
-@pytest.mark.parametrize("scenario", ["parallel", "cancel"])
-def test_legacy_release_review_scenario(fanout_sample_host: HostHandle, scenario: str) -> None:
-    try:
-        verifier.run_scenario(fanout_sample_host.base_url, scenario, legacy=True)
-    except Exception:
-        print(fanout_sample_host.read_output())
-        raise

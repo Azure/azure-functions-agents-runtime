@@ -23,12 +23,17 @@ _SPEC.loader.exec_module(verifier)
 
 
 @pytest.mark.parametrize("scenario", verifier.SCENARIOS)
-def test_scenario_payloads_select_new_mode_without_changing_legacy_tasks(scenario: str) -> None:
+def test_scenario_payloads_do_not_select_a_wait_mode(scenario: str) -> None:
     payload = verifier.workflow_payload(scenario)
-    legacy = verifier.workflow_payload(scenario, legacy=True)
-    assert payload.pop("wave_wait_mode") == "all"
-    assert payload == legacy
+    assert "wave_wait_mode" not in payload
     assert payload["workflow_agent_slug"] == "main"
+
+
+def test_cancellation_plan_keeps_a_slow_task_and_timer_without_a_failure() -> None:
+    tasks = verifier.scenario_plan("cancel")["tasks"]
+    assert not any(task.get("args", {}).get("fail") for task in tasks)
+    assert next(task for task in tasks if task["id"] == "tests")["args"]["delay_seconds"] == 20
+    assert next(task for task in tasks if task["id"] == "pause")["duration"] == "PT30S"
 
 
 def test_sample_discovers_only_the_scenario_tools() -> None:

@@ -28,7 +28,6 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
-from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
@@ -412,16 +411,11 @@ class WorkflowPolicyInput(TypedDict):
     allowed_subagents: list[str]
 
 
-class WaveWaitMode(StrEnum):
-    ALL = "all"
-
-
 class WorkflowPayload(TypedDict):
     tasks: list[WorkflowTaskInput]
     workflow_agent_slug: str
     policy: NotRequired[WorkflowPolicyInput]
     workflow_agent: NotRequired[dict[str, str]]
-    wave_wait_mode: NotRequired[WaveWaitMode]
 
 
 class PlanValidationMetadata(TypedDict, total=False):

@@ -687,22 +687,20 @@ workflow as soon as that instance completes. If cancellation wins after a
 continued failure but before the wave finishes, the runtime discards all
 uncommitted wave results and restores the pending wave.
 
-For workflows started by the updated runtime, an ordinary wave waits for
-`when_all(wave_tasks)` and races that group against cancellation. A Durable
-task failure is reported only after every child finishes, including retries and
-timers. Cancellation can win before the group finishes, even after a child has
-failed. Returned terminal failures are still processed after the wave.
-When cancellation wins, the runtime cancels pending timers. A canceled timer
-can cause the losing group to raise `TaskCancelledError`. The runtime handles
-that exception only after timer cancellation succeeds. Other errors still
-propagate.
+An ordinary wave races individual pending tasks against cancellation. A Durable
+task failure is reported without waiting for the remaining tasks or timers.
+Returned terminal failures are processed after the wave, as before. When
+cancellation wins, the runtime cancels pending timers and discards uncommitted
+wave results. It does not force-stop running Activities.
 
-The runtime stores this selection as the internal `wave_wait_mode: "all"` input.
-Existing instances without that field keep the earlier per-task wait and
-failure timing. Do not add the field to an existing instance. An unsupported
-mode fails before dispatch. The mode is not a frontmatter field or a
-`fhs_start_workflow` argument. A wave with persisted continuation enabled always
-keeps per-instance processing, under either input format.
+There is no wait-mode selector. Both ordinary and continuation waves use
+individual task waits. The current local DTS Flow view can still show Fan-out
+groups because it groups nearby schedule timestamps. Those display groups do
+not select runtime behavior or guarantee an exact wave boundary.
+
+The Durable SDK update fixes parent notification for nested composite tasks.
+That fix can change replay of affected existing instances. Let those instances
+finish on the previous SDK, or keep them on a separate task hub during the upgrade.
 
 A workflow can reach Durable `Completed` when some or all tasks have continued
 failures. `Completed` means that control flow finished. It does not mean that
