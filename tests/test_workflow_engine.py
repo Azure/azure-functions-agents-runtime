@@ -101,8 +101,7 @@ def _registered_function(
         if function._name == name:
             registered = function._func
             if name == engine.ORCHESTRATOR_NAME:
-                assert registered.__closure__ is not None
-                return registered.__closure__[0].cell_contents
+                return registered.orchestrator_function
             return registered
     raise AssertionError(f"workflow function {name!r} was not registered")
 

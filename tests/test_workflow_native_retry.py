@@ -780,7 +780,7 @@ def _orchestrate(context: _RecordingContext) -> dict[str, Any]:
             "coordinator": WorkflowPlanPolicy(allowed_tools=frozenset({"publish"}))
         },
     )
-    orchestrator = app.function(engine.ORCHESTRATOR_NAME).__closure__[0].cell_contents
+    orchestrator = app.function(engine.ORCHESTRATOR_NAME).orchestrator_function
     generator = orchestrator(context, context._input)
     try:
         selection = next(generator)
