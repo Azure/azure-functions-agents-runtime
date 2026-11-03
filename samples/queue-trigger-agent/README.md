@@ -53,13 +53,17 @@ only the storage queue.
 
 3. Send a test message:
 
+   The Functions host uses Base64 decoding by default. Encode the UTF-8 message
+   before you send it with the Azure CLI:
+
    ```bash
    storage_account=$(azd env get-value AZURE_STORAGE_ACCOUNT_NAME)
+   message=$(python -c "import base64; print(base64.b64encode('Summarize this: order #42 for 3 widgets'.encode('utf-8')).decode('ascii'))")
    az storage message put \
      --account-name "$storage_account" \
      --queue-name agent-input \
      --auth-mode login \
-     --content 'Summarize this: order #42 for 3 widgets'
+     --content "$message"
    ```
 
    The signed-in principal needs the **Storage Queue Data Contributor** role on the
@@ -82,23 +86,27 @@ Copy `src/local.settings.template.json` to `src/local.settings.json`, then set
 func start
 ```
 
-In another terminal, create the local queue and add a message:
+In another terminal, create the local queue. Encode the UTF-8 message as Base64,
+then send it:
 
 ```bash
 az storage queue create \
   --name agent-input \
   --connection-string 'UseDevelopmentStorage=true'
 
+message=$(python -c "import base64; print(base64.b64encode('Summarize this: order #42 for 3 widgets'.encode('utf-8')).decode('ascii'))")
 az storage message put \
   --queue-name agent-input \
   --connection-string 'UseDevelopmentStorage=true' \
-  --content 'Summarize this: order #42 for 3 widgets'
+  --content "$message"
 ```
 
 ## What To Expect
 
 The `queue_processor` function runs once a message is available. The runtime places a
 serialized queue payload in the agent prompt instead of a Python `QueueMessage` repr.
+The host decodes Base64 before it calls the Python function. The `body_encoding`
+field describes the decoded body, not the queue transport encoding.
 For a UTF-8 message, the prompt includes data shaped like:
 
 ```json
