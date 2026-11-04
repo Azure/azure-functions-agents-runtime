@@ -843,7 +843,13 @@ async def test_workflow_tools_log_durable_exceptions_without_returning_details(
 
     text_result = await call_tool(workflow_id, session)
 
-    assert text_result == json.dumps({"error": expected_error})
+    payload = json.loads(text_result)
+    if expected_error == "failed to start workflow":
+        assert payload.pop("error_code") == "workflow_admission_check_failed"
+        assert payload.pop("operation") == "check_active_workflows"
+        assert payload.pop("start_status") == "not_started"
+        assert len(payload.pop("diagnostic_id")) == 32
+    assert payload == {"error": expected_error}
     assert _FailingDurableClient.secret not in text_result
     assert any(
         record.message.startswith(expected_log)

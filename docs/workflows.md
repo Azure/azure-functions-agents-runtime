@@ -108,9 +108,10 @@ Three concrete wins versus chaining tool calls in conversation:
 1. You enable workflows on an agent with a one-line frontmatter flag.
 2. The agent is given five built-in tools (see [Tools](#tools)).
 3. When the agent decides the work is workflow-shaped, it calls
-   `fhs_start_workflow` with a DAG of tasks. The DAG is validated and scheduled
-   as a Durable orchestration; the tool returns immediately with a
-   `workflow_id`.
+   `fhs_start_workflow` with a DAG of tasks. On success, the DAG is validated
+   and scheduled as a Durable orchestration. The tool then returns a
+   `workflow_id`. See [Workflow start failures](#workflow-start-failures)
+   when a client operation fails.
 4. The orchestration runs each task as a Durable activity (tool calls) or
    a Durable timer (waits), using `task_all` to fan out parallel tasks and
    `depends_on` edges for sequencing.
@@ -153,6 +154,57 @@ Three concrete wins versus chaining tool calls in conversation:
 The design is intentionally aligned with the
 [MCP Tasks SEP-2557 proposal](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2557);
 future direct MCP Tasks support will be a thin protocol shim.
+
+### Workflow start failures
+
+`fhs_start_workflow` confirms a submitted request only when its result contains
+`workflow_id`. That result does not mean that the workflow has completed.
+
+If the active-count check fails, the tool returns:
+
+```json
+{
+  "error": "failed to start workflow",
+  "error_code": "workflow_admission_check_failed",
+  "operation": "check_active_workflows",
+  "start_status": "not_started",
+  "diagnostic_id": "<opaque-diagnostic-id>"
+}
+```
+
+`not_started` means that this call did not call schedule. It says nothing
+about other calls. If the schedule call raises an exception, acceptance is
+unknown:
+
+```json
+{
+  "error": "failed to start workflow",
+  "error_code": "workflow_schedule_outcome_unknown",
+  "operation": "schedule_workflow",
+  "start_status": "unknown",
+  "diagnostic_id": "<opaque-diagnostic-id>",
+  "attempted_workflow_id": "<submitted-instance-id>"
+}
+```
+
+The service can accept a request before the client loses its response.
+`attempted_workflow_id` identifies that request; it does not prove that an
+instance exists. Existing agent/session authorization applies to status
+checks. A `not_found` status does not prove rejection because visibility
+can lag.
+
+There is no automatic retry, reconciliation, or duplicate prevention.
+Do not repeat an unknown schedule request, poll it automatically, or start a
+replacement without an explicit user or application action. Keep its
+attempted ID and diagnostic ID for investigation. The diagnostic ID links
+the result to logs and [operation spans](./observability.md#workflow-start-operations);
+it is not an idempotency key and does not depend on telemetry being enabled.
+Raw internal exception text does not enter these results.
+
+The existing `error` message and successful result stay unchanged. JSON
+consumers must permit the added fields. Plan validation, the active-count
+limit, and the other management tools keep their existing results.
+HTTP, SSE, MCP, and non-HTTP completion rules also stay unchanged.
 
 ## Frontmatter
 

@@ -84,6 +84,12 @@ ATTR_GEN_AI_TOOL_NAME = "gen_ai.tool.name"
 ATTR_TOOL_NAME = "af.tool.name"
 ATTR_TOOL_SOURCE = "af.tool.source"
 ATTR_TOOL_OUTCOME = "af.tool.outcome"
+ATTR_WORKFLOW_OPERATION = "af.workflow.operation"
+ATTR_WORKFLOW_DIAGNOSTIC_ID = "af.workflow.diagnostic_id"
+ATTR_WORKFLOW_AGENT_SLUG = "af.workflow.agent_slug"
+ATTR_WORKFLOW_START_STATUS = "af.workflow.start_status"
+ATTR_WORKFLOW_ERROR_CODE = "af.workflow.error_code"
+ATTR_WORKFLOW_ATTEMPTED_ID = "af.workflow.attempted_workflow_id"
 
 # Standard GenAI attributes are used only where the reported value has the same meaning.
 ATTR_GEN_AI_REQUEST_MODEL = "gen_ai.request.model"

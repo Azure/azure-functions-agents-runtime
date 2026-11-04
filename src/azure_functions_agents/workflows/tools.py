@@ -16,7 +16,10 @@ the same 404 shape as "not found".
 
 from __future__ import annotations
 
+import asyncio
 import json
+import uuid
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from azure.durable_functions import DurableFunctionsClient
@@ -24,6 +27,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from azure_functions_agents._function_tool import tool as define_tool
 from azure_functions_agents._logger import logger
+from azure_functions_agents._observability import (
+    ATTR_TOOL_OUTCOME,
+    ATTR_WORKFLOW_AGENT_SLUG,
+    ATTR_WORKFLOW_ATTEMPTED_ID,
+    ATTR_WORKFLOW_DIAGNOSTIC_ID,
+    ATTR_WORKFLOW_ERROR_CODE,
+    ATTR_WORKFLOW_OPERATION,
+    ATTR_WORKFLOW_START_STATUS,
+    FaultDomain,
+    LifecycleStage,
+    RuntimeSpan,
+    SpanOutcome,
+    start_span,
+)
 from azure_functions_agents._runtime_tool_names import (
     FHS_CANCEL_WORKFLOW_TOOL_NAME,
     FHS_GET_WORKFLOW_STATUS_TOOL_NAME,
@@ -58,6 +75,22 @@ _TERMINAL_RUNTIME_STATUSES = frozenset({
     "Terminated",
     "Canceled",
 })
+
+
+class _StartOperation(StrEnum):
+    CHECK_ACTIVE = "check_active_workflows"
+    SCHEDULE = "schedule_workflow"
+
+
+class _StartStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    UNKNOWN = "unknown"
+    SCHEDULED = "scheduled"
+
+
+class _StartErrorCode(StrEnum):
+    ADMISSION_CHECK_FAILED = "workflow_admission_check_failed"
+    SCHEDULE_OUTCOME_UNKNOWN = "workflow_schedule_outcome_unknown"
 
 
 class _ConditionSpec(BaseModel):
@@ -371,6 +404,35 @@ def _error(message: str, **extra: Any) -> str:
     return json.dumps({"error": message, **extra})
 
 
+def _start_error(
+    span: RuntimeSpan,
+    *,
+    error_code: _StartErrorCode,
+    operation: _StartOperation,
+    start_status: _StartStatus,
+    diagnostic_id: str,
+    attempted_workflow_id: str | None = None,
+) -> str:
+    span.set_attribute(ATTR_WORKFLOW_ERROR_CODE, error_code.value)
+    span.set_error(
+        "failed to start workflow",
+        fault_domain=FaultDomain.UNKNOWN,
+        error_type=error_code.value,
+    )
+    extra = (
+        {"attempted_workflow_id": attempted_workflow_id}
+        if attempted_workflow_id is not None else {}
+    )
+    return _error(
+        "failed to start workflow",
+        error_code=error_code.value,
+        operation=operation.value,
+        start_status=start_status.value,
+        diagnostic_id=diagnostic_id,
+        **extra,
+    )
+
+
 _NO_CLIENT_MESSAGE = (
     "workflow tools are not available in this request context (the enclosing "
     "chat handler did not register a Durable client for this session)"
@@ -378,6 +440,15 @@ _NO_CLIENT_MESSAGE = (
 
 _NOT_FOUND_ERROR_STATUS = 404
 
+
+WORKFLOW_START_RESULT_GUIDANCE = (
+    "Confirm a start only when the result contains workflow_id. "
+    "If start_status is not_started, this call did not submit a workflow. "
+    "If start_status is unknown, acceptance is unknown. Retain attempted_workflow_id "
+    "and diagnostic_id for investigation. Do not claim that no work started. "
+    "Do not repeat an unknown schedule request, poll its status automatically, "
+    "or start a replacement without an explicit user or application action."
+)
 
 START_WORKFLOW_DESCRIPTION = (
     "Author and launch a long-running workflow. The workflow runs as a durable "
@@ -388,7 +459,8 @@ START_WORKFLOW_DESCRIPTION = (
     "This tool is fire-and-forget: "
     "after receiving the workflow_id, end your turn promptly and do not poll "
     f"{FHS_GET_WORKFLOW_STATUS_TOOL_NAME} unless the user asks, or the chat client later injects "
-    "a <workflow-notification> envelope containing a <workflow-id> and <status>."
+    "a <workflow-notification> envelope containing a <workflow-id> and <status>. "
+    + WORKFLOW_START_RESULT_GUIDANCE
 )
 
 GET_WORKFLOW_STATUS_DESCRIPTION = (
@@ -491,21 +563,47 @@ async def start_workflow(
         session.workflow_agent_slug,
         session.session_id,
     )
+    diagnostic_id = uuid.uuid4().hex
 
-    try:
-        active_count = await count_active_session_workflows(
-            session.durable_client,
-            session.workflow_agent_slug,
-            session.session_id,
-        )
-    except Exception:
-        logger.exception(
-            "start_workflow: client.get_status_all failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
-            session.session_id,
-        )
-        return _error("failed to start workflow")
+    with start_span(
+        "workflow.start.check_active",
+        lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
+        record_exception=False,
+        attributes={
+            ATTR_WORKFLOW_OPERATION: _StartOperation.CHECK_ACTIVE.value,
+            ATTR_WORKFLOW_DIAGNOSTIC_ID: diagnostic_id,
+            ATTR_WORKFLOW_AGENT_SLUG: session.workflow_agent_slug,
+            ATTR_WORKFLOW_START_STATUS: _StartStatus.NOT_STARTED.value,
+        },
+    ) as span:
+        try:
+            active_count = await count_active_session_workflows(
+                session.durable_client,
+                session.workflow_agent_slug,
+                session.session_id,
+            )
+        except asyncio.CancelledError:
+            span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.CANCELLED)
+            raise
+        except Exception:
+            logger.exception(
+                "start_workflow: client.get_status_all failed "
+                "workflow_agent=%s session=%s diagnostic_id=%s operation=%s "
+                "error_code=%s start_status=%s",
+                session.workflow_agent_slug,
+                session.session_id,
+                diagnostic_id,
+                _StartOperation.CHECK_ACTIVE.value,
+                _StartErrorCode.ADMISSION_CHECK_FAILED.value,
+                _StartStatus.NOT_STARTED.value,
+            )
+            return _start_error(
+                span,
+                error_code=_StartErrorCode.ADMISSION_CHECK_FAILED,
+                operation=_StartOperation.CHECK_ACTIVE,
+                start_status=_StartStatus.NOT_STARTED,
+                diagnostic_id=diagnostic_id,
+            )
     if active_count >= MAX_ACTIVE_WORKFLOWS_PER_SESSION:
         return _error(
             "too many active workflows for this session",
@@ -513,31 +611,61 @@ async def start_workflow(
             limit=MAX_ACTIVE_WORKFLOWS_PER_SESSION,
         )
 
-    try:
-        returned_id = await session.durable_client.schedule_new_orchestration(
-            ORCHESTRATOR_NAME,
-            instance_id=instance_id,
-            input={
-                "tasks": plan_to_activity_inputs(plan, effective_policies),
-                "workflow_agent_slug": session.workflow_agent_slug,
-                "workflow_agent": workflow_agent,
-                "policy": {
-                    "allowed_tools": sorted(policy.allowed_tools),
-                    "allowed_subagents": sorted(policy.allowed_subagents),
+    orchestration_input = {
+        "tasks": plan_to_activity_inputs(plan, effective_policies),
+        "workflow_agent_slug": session.workflow_agent_slug,
+        "workflow_agent": workflow_agent,
+        "policy": {
+            "allowed_tools": sorted(policy.allowed_tools),
+            "allowed_subagents": sorted(policy.allowed_subagents),
+        },
+    }
+    with start_span(
+        "workflow.start.schedule",
+        lifecycle_stage=LifecycleStage.TOOL_EXECUTION,
+        record_exception=False,
+        attributes={
+            ATTR_WORKFLOW_OPERATION: _StartOperation.SCHEDULE.value,
+            ATTR_WORKFLOW_DIAGNOSTIC_ID: diagnostic_id,
+            ATTR_WORKFLOW_AGENT_SLUG: session.workflow_agent_slug,
+            ATTR_WORKFLOW_START_STATUS: _StartStatus.UNKNOWN.value,
+            ATTR_WORKFLOW_ATTEMPTED_ID: instance_id,
+        },
+    ) as span:
+        try:
+            returned_id = await session.durable_client.schedule_new_orchestration(
+                ORCHESTRATOR_NAME,
+                instance_id=instance_id,
+                input=orchestration_input,
+                tags={
+                    "durabletask.displayName": f"{session.agent_name}-orchestration"
                 },
-            },
-            tags={
-                "durabletask.displayName": f"{session.agent_name}-orchestration"
-            },
-        )
-    except Exception:
-        logger.exception(
-            "start_workflow: client.schedule_new_orchestration failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
-            session.session_id,
-        )
-        return _error("failed to start workflow")
+            )
+        except asyncio.CancelledError:
+            span.set_attribute(ATTR_TOOL_OUTCOME, SpanOutcome.CANCELLED)
+            raise
+        except Exception:
+            logger.exception(
+                "start_workflow: client.schedule_new_orchestration failed "
+                "workflow_agent=%s session=%s diagnostic_id=%s operation=%s "
+                "error_code=%s start_status=%s attempted_workflow_id=%s",
+                session.workflow_agent_slug,
+                session.session_id,
+                diagnostic_id,
+                _StartOperation.SCHEDULE.value,
+                _StartErrorCode.SCHEDULE_OUTCOME_UNKNOWN.value,
+                _StartStatus.UNKNOWN.value,
+                instance_id,
+            )
+            return _start_error(
+                span,
+                error_code=_StartErrorCode.SCHEDULE_OUTCOME_UNKNOWN,
+                operation=_StartOperation.SCHEDULE,
+                start_status=_StartStatus.UNKNOWN,
+                diagnostic_id=diagnostic_id,
+                attempted_workflow_id=instance_id,
+            )
+        span.set_attribute(ATTR_WORKFLOW_START_STATUS, _StartStatus.SCHEDULED.value)
 
     # Durable echoes back the instance ID we supplied; defend against SDK
     # drift by logging a mismatch but trusting our own value.
@@ -548,10 +676,11 @@ async def start_workflow(
             instance_id,
         )
     logger.info(
-        "workflow started: id=%s workflow_agent=%s session=%s",
+        "workflow started: id=%s workflow_agent=%s session=%s diagnostic_id=%s",
         instance_id,
         session.workflow_agent_slug,
         session.session_id,
+        diagnostic_id,
     )
     return json.dumps({"workflow_id": instance_id})
 
