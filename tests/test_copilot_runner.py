@@ -123,6 +123,65 @@ async def test_direct_invocation_summary_includes_recovered_delegate_errors(
 
 
 @pytest.mark.asyncio
+async def test_workflow_start_error_keeps_safe_sse_result_and_normal_completion(
+    preview, native, invocation_spans,
+):
+    from copilot.tools import ToolInvocation
+    from opentelemetry.trace import StatusCode
+
+    from tests.test_workflow_tools import POLICY, SECRET, TASKS, _client
+
+    _, exporter = invocation_spans
+    durable_client = _client(failure="schedule")
+    session = native.create_session.return_value
+
+    async def create(**options):
+        start = next(tool for tool in options["tools"] if tool.name == FHS_START_WORKFLOW_TOOL_NAME)
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+            tools=[SimpleNamespace(name=tool.name) for tool in options["tools"]],
+        )
+
+        async def send(**_kwargs):
+            result = await start.handler(ToolInvocation(
+                session_id="example", tool_call_id="start-1",
+                tool_name=start.name, arguments={"tasks": TASKS},
+            ))
+            assert result.result_type == "success"
+            return session.send_and_wait.return_value
+
+        session.send_and_wait.side_effect = send
+        return session
+
+    native.create_session.side_effect = create
+    try:
+        chunks = [chunk async for chunk in copilot_state(preview).run_agent_stream(
+            "Start work.", session_id="example", session_is_new=True, agent_name="agent",
+            deadline=asyncio.get_running_loop().time() + 10,
+            workflow_enabled=True, workflow_agent_slug="agent",
+            workflow_durable_client=durable_client, workflow_policy=POLICY,
+        )]
+    finally:
+        await _harness_lifecycle._shutdown_harnesses()
+
+    events = [json.loads(chunk.removeprefix("data: ").strip()) for chunk in chunks]
+    assert [event["type"] for event in events] == [
+        "tool_start", "tool_end", "delta", "done",
+    ]
+    assert json.loads(events[1]["result"])["error_code"] == "workflow_schedule_outcome_unknown"
+    assert SECRET not in "".join(chunks)
+    spans = exporter.get_finished_spans()
+    run_span = next(span for span in spans if span.name == "agent.run agent")
+    assert run_span.attributes["af.agent.outcome"] == "success"
+    assert run_span.attributes["af.agent.tool_error_count"] == 1
+    operation = next(span for span in spans if span.name == "workflow.start.schedule")
+    assert operation.status.status_code is StatusCode.ERROR
+    wrapper = next(span for span in spans if span.name == "execute_tool fhs_start_workflow")
+    assert operation.parent.span_id == wrapper.context.span_id
+    assert wrapper.attributes["af.tool.outcome"] == "success"
+    assert operation.context.trace_id == run_span.context.trace_id
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "timeout", "disconnect"])
 async def test_sse_semantic_invocation_tracks_actual_execution_lifecycle(
     preview, native, invocation_spans, outcome,

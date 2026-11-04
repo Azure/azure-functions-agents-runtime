@@ -317,6 +317,57 @@ failures explicitly and folds them into `af.agent.tool_error_count` on top of th
   a specialist's tokens are not merged into the coordinator's totals. Sum child spans or usage events
   in the backend for a combined per-request total.
 
+### Workflow start operations
+
+`fhs_start_workflow` records two client-operation spans:
+
+| Span | Operation |
+| --- | --- |
+| `workflow.start.check_active` | Check the active workflow count. |
+| `workflow.start.schedule` | Submit the schedule request. This span exists only if the call entered schedule. |
+
+These are child operations, not additional tool calls. They use the active
+trace context under the selected harness. A direct helper call without a
+parent can produce a root span.
+
+| Attribute | Meaning |
+| --- | --- |
+| `af.workflow.operation` | `check_active_workflows` or `schedule_workflow`. |
+| `af.workflow.diagnostic_id` | One UUID hex value per start call, shared by its spans and logs. A client failure result includes this value. |
+| `af.workflow.agent_slug` | Agent slug from the workflow session. |
+| `af.workflow.start_status` | `not_started`, `unknown`, or `scheduled`, at the end of this operation. |
+| `af.workflow.error_code` | `workflow_admission_check_failed` or `workflow_schedule_outcome_unknown`, on failed operations only. |
+| `af.workflow.attempted_workflow_id` | The submitted instance ID, on the schedule span only. It does not prove that the service accepted the request. |
+
+Both spans use `af.lifecycle_stage=tool_execution`. A client exception sets
+ERROR status, the fixed error code in `error.type`, and
+`af.fault_domain=unknown`. The exception alone does not identify the root
+cause. Raw exception text is not added to these spans or model-visible
+results. Existing internal exception logs keep their stack traces and gain
+the diagnostic fields.
+
+A successful count check uses `not_started` because it has not submitted
+work yet. Reaching the active-workflow limit is not a client failure, so that
+check has no ERROR status. A successful schedule uses `scheduled`.
+Cancellation propagates with `af.tool.outcome=cancelled`, without a
+dependency error code or ERROR status. Cancellation during schedule leaves
+acceptance `unknown`.
+
+**Separate operation failure from run completion.** A caught tool error does
+not fail an otherwise completed agent run or Function invocation. The model
+can recover, but the runtime does not infer recovery from model prose.
+`af.agent.outcome=success` and a successful Function request do not prove
+business success or workflow completion. The failed operation remains ERROR
+even if a later call succeeds. Monitor these operation spans in addition to
+failed requests and aggregate tool-error counts.
+
+There is no automatic start retry or duplicate prevention. Unknown acceptance
+must not be treated as a rejected request. See
+[Workflow start failures](./workflows.md#workflow-start-failures).
+The diagnostic ID is not a trace ID or an idempotency key. It is returned
+even when telemetry is disabled; span helpers then do no work. No new
+exporter or metric is needed. Do not use these IDs as metric dimensions.
+
 ### Metrics
 
 Namespace `azure_functions_agents.*`:
@@ -435,6 +486,29 @@ union AppRequests, AppDependencies, AppTraces, AppExceptions
 | project TimeGenerated, itemType, Name, Message, Success, DurationMs
 | order by TimeGenerated asc
 ```
+
+```kql
+// Failed start operations, including those under successful Function requests.
+let failedStarts = AppDependencies
+| where Name in ("workflow.start.check_active", "workflow.start.schedule")
+| where Success == false
+| project TimeGenerated, OperationId, OperationParentId, Name,
+    diagnostic_id = tostring(Properties["af.workflow.diagnostic_id"]),
+    error_code = tostring(Properties["af.workflow.error_code"]),
+    start_status = tostring(Properties["af.workflow.start_status"]),
+    attempted_workflow_id = tostring(Properties["af.workflow.attempted_workflow_id"]);
+failedStarts
+| join kind=leftouter (
+    AppRequests
+    | project OperationId, RequestId = Id, RequestSuccess = Success
+) on OperationId
+| project TimeGenerated, OperationId, RequestId, RequestSuccess, Name,
+    diagnostic_id, error_code, start_status, attempted_workflow_id
+```
+
+Filter `diagnostic_id` to the value from a failed tool result to find its
+operation. The join uses a trace ID, not a workflow ID. A trace can contain
+more than one request, so the join can produce more than one row per operation.
 
 ```kql
 // Sandbox executions that actually failed (even if the tool "succeeded")

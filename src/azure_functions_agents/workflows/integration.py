@@ -49,7 +49,7 @@ from .schema import (
     WorkflowToolExecutionPolicy,
     freeze_workflow_tool_execution_policies,
 )
-from .tools import build_workflow_tools
+from .tools import WORKFLOW_START_RESULT_GUIDANCE, build_workflow_tools
 
 type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
 
@@ -90,6 +90,8 @@ _SHARED_ADDENDUM = (
     "Do not return large raw evidence blobs, logs, "
     "or per-item lists as the final workflow output unless the request explicitly "
     "requires raw data; summarize the useful signal inside the workflow.\n\n"
+    + WORKFLOW_START_RESULT_GUIDANCE
+    + "\n\n"
 )
 
 _CHAT_NOTIFICATION_ADDENDUM = (

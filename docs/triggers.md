@@ -55,6 +55,19 @@ session ID; there is intentionally no app-wide index for finding those sessions,
 the workflow should publish its terminal result and operators should use
 Durable/DTS tooling for management.
 
+A caught workflow-start client error does not make the handler raise an
+exception. If the agent returns normally, the non-HTTP Function invocation
+still completes normally. Neither fact proves that a workflow started.
+Monitor [workflow start operation errors](./observability.md#workflow-start-operations)
+in addition to failed Function requests.
+
+The runtime does not retry these start calls automatically. A schedule
+exception can mean that the service accepted work but the response was lost.
+Queue redelivery uses a new agent session and a new workflow instance ID;
+application-added retries can thus start duplicate work. An attempted ID or
+an Activity idempotency key does not prevent duplicate workflow submission.
+Existing host rules for uncaught exceptions are unchanged.
+
 See [Trigger-started workflows](./workflows.md#trigger-started-workflows) for
 HTTP and non-HTTP completion behavior, and the
 [queue workflow sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-queue-p0-report/README.md) for a
