@@ -2,7 +2,13 @@
 
 ## Model provider configuration
 
-The runtime uses Microsoft Agent Framework by default, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
+The runtime uses the GitHub Copilot SDK and supports Microsoft Foundry, Azure
+OpenAI, and OpenAI as inference back-ends. The standard package includes the
+SDK. At app startup, the runtime requires a valid explicit or
+auto-detected provider and resolves the effective model; model resolution falls
+back to `gpt-4o-mini` when no model is explicitly configured.
+The public preview quickstart and samples use **Microsoft Foundry** as the
+primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
@@ -150,5 +156,5 @@ See the [hybrid HostedSkill sample](../samples/hybrid-hosted-skill/).
 - [Front matter reference](front-matter-reference.md) — auto-generated, plain field-by-field reference (handy for quick lookups)
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Architecture](architecture.md) — how the runtime discovers, translates, and registers agents
-- [Copilot preview operations](copilot-preview-operations.md) — separate default-off preview; this quickstart uses MAF and its existing history provider
+- [Runtime operations](runtime-operations.md) — provider startup, native session storage, qualification scope, and safe cleanup
 - The repository [README](https://github.com/Azure/azure-functions-agents-runtime#readme) also covers custom Python tools, built-in endpoint routes, and multi-agent delegation in more depth

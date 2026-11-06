@@ -460,6 +460,7 @@ dependencies = [
     { name = "azure-identity" },
     { name = "azure-storage-blob" },
     { name = "azurefunctions-extensions-http-fastapi" },
+    { name = "github-copilot-sdk" },
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "pydantic" },
@@ -467,13 +468,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-copilot = [
-    { name = "github-copilot-sdk" },
-]
 dev = [
     { name = "azure-monitor-opentelemetry" },
     { name = "azure-storage-queue" },
-    { name = "github-copilot-sdk" },
     { name = "jmespath" },
     { name = "mypy" },
     { name = "pydantic" },
@@ -504,8 +501,7 @@ requires-dist = [
     { name = "azure-storage-blob", specifier = ">=12.28.0,<13" },
     { name = "azure-storage-queue", marker = "extra == 'dev'", specifier = "==12.13.*,<13" },
     { name = "azurefunctions-extensions-http-fastapi", specifier = ">=1.0.1,<2" },
-    { name = "github-copilot-sdk", marker = "extra == 'copilot'", specifier = "==1.0.14" },
-    { name = "github-copilot-sdk", marker = "extra == 'dev'", specifier = "==1.0.14" },
+    { name = "github-copilot-sdk", specifier = "==1.0.14" },
     { name = "jmespath", marker = "extra == 'dev'", specifier = ">=1.0.1,<2" },
     { name = "jsonschema", specifier = ">=4.26.0,<5" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
@@ -520,7 +516,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.22,<1" },
     { name = "types-jsonschema", marker = "extra == 'dev'", specifier = ">=4.26.0.20260518,<5" },
 ]
-provides-extras = ["copilot", "monitor", "dev", "docs"]
+provides-extras = ["monitor", "dev", "docs"]
 
 [[package]]
 name = "azurefunctions-extensions-base"

@@ -17,7 +17,7 @@ import httpx
 def first(client: httpx.Client, path: Path) -> None:
     if path.exists():
         raise RuntimeError("Evidence file already exists; choose a new file for a new conversation.")
-    tag = "preview-" + uuid.uuid4().hex
+    tag = "session-" + uuid.uuid4().hex
     expected = "receipt-" + hashlib.sha256(tag.encode("utf-8")).hexdigest()[:24]
     response = client.post(
         "/agents/main/chat",
@@ -69,7 +69,7 @@ def negative(client: httpx.Client) -> None:
     stream = client.post("/agents/main/chatstream", json={"prompt": "Do not call a model."})
     assert stream.status_code == 501, "Unsupported streaming did not fail explicitly"
     history = client.get("/agents/main/history")
-    assert history.status_code == 501, "Preview returned a success-shaped MAF transcript"
+    assert history.status_code == 501, "History returned an unsupported success shape"
     print("PASS negative: invalid session, streaming and history fail without model calls")
 
 
@@ -77,7 +77,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:7071")
     parser.add_argument("--phase", choices=("first", "followup", "negative", "all"), default="all")
-    parser.add_argument("--evidence", type=Path, default=Path(".preview-evidence.json"))
+    parser.add_argument("--evidence", type=Path, default=Path(".session-evidence.json"))
     parser.add_argument(
         "--restart-host", action="store_true",
         help="Run all phases and restart a real local Functions host between the two turns.",
@@ -86,8 +86,6 @@ def main() -> None:
     if args.restart_host:
         if args.phase != "all":
             parser.error("--restart-host runs all phases.")
-        if os.environ.get("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "").strip().lower() not in {"true", "1"}:
-            parser.error("--restart-host requires the explicit Copilot preview flag.")
         app = Path(__file__).resolve().parent / "src"
         required = ["AZURE_FUNCTIONS_AGENTS_PROVIDER"]
         connection = os.environ.get("AzureWebJobsStorage", "").strip()

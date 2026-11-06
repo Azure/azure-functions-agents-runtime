@@ -1,8 +1,8 @@
 # Dynamic workflows (experimental v1)
 
-The app-level Copilot opt-in supports the same five management tools,
-per-agent policy authorization, Workflow Sub Agent Activities, configured MCP
-servers, and approved authored skills in this preview. Each
+The runtime supports the same five management tools, per-agent policy
+authorization, Workflow Sub Agent Activities, configured MCP servers, and
+approved authored skills. Each
 leaf gets a fresh native session that is deleted after use. Workflow-enabled
 direct roles receive the packaged `data-driven-workflows` skill through the
 same native skill-directory path as approved authored skills; the host keeps a
@@ -222,7 +222,7 @@ removes a handler another agent is allowed to use.
 ### Workflow tool authoring
 
 Workflow tasks run later inside Durable Function activities, so they use
-an explicit opt-in marker separate from normal MAF tools. Put workflow
+an explicit opt-in marker separate from normal agent tools. Put workflow
 handlers in the same `tools/` directory as normal tools and decorate each
 Durable-activity-safe handler with `@workflow_tool`:
 

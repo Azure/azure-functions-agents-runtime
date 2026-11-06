@@ -21,16 +21,20 @@ jobs:
       matrix:
         Python313Maf:
           PYTHON_VERSION: '3.13'
-          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'false'
-        Python313Copilot:
+          HARNESS_SELECTOR: 'false'
+          HARNESS_LABEL: 'MAF'
+        Python313CopilotDefault:
           PYTHON_VERSION: '3.13'
-          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'true'
+          HARNESS_SELECTOR: 'unset'
+          HARNESS_LABEL: 'Copilot default'
         Python314Maf:
           PYTHON_VERSION: '3.14'
-          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'false'
-        Python314Copilot:
+          HARNESS_SELECTOR: 'false'
+          HARNESS_LABEL: 'MAF'
+        Python314CopilotDefault:
           PYTHON_VERSION: '3.14'
-          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: 'true'
+          HARNESS_SELECTOR: 'unset'
+          HARNESS_LABEL: 'Copilot default'
 
     steps:
       - task: PipAuthenticate@1
@@ -44,12 +48,15 @@ jobs:
           python --version
         displayName: 'Check python version'
       - bash: |
+          if [ "$(HARNESS_SELECTOR)" = "unset" ]; then
+            unset AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT
+          else
+            export AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT="$(HARNESS_SELECTOR)"
+          fi
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
           python eng/scripts/install_e2e_dependencies.py
-        displayName: 'Install dependencies for $(PYTHON_VERSION) / Copilot=$(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)'
-        env:
-          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: $(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)
+        displayName: 'Install dependencies for $(PYTHON_VERSION) / $(HARNESS_LABEL)'
 
       - template: /eng/templates/install-core-tools.yml@self
 
@@ -78,17 +85,21 @@ jobs:
       # account so it can create/run agents (agents/write). See the RBAC command
       # in the PR / repo notes.
       - task: AzureCLI@2
-        displayName: 'Run E2E tests on $(PYTHON_VERSION) / Copilot=$(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)'
+        displayName: 'Run E2E tests on $(PYTHON_VERSION) / $(HARNESS_LABEL)'
         inputs:
           azureSubscription: 'saf-foundry-connection'
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
+            if [ "$(HARNESS_SELECTOR)" = "unset" ]; then
+              unset AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT
+            else
+              export AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT="$(HARNESS_SELECTOR)"
+            fi
             python -m pytest -m e2e tests/endtoend -v
         env:
           AzureWebJobsStorage: 'UseDevelopmentStorage=true'
           FUNCTIONS_WORKER_RUNTIME: 'python'
           AZURE_TOKEN_CREDENTIALS: 'dev'
-          AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT: $(AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT)
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)

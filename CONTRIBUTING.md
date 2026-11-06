@@ -91,11 +91,10 @@ uv build
 
 The official E2E job runs the unchanged suite
 `python -m pytest -m e2e tests/endtoend -v` in four lanes: Python 3.13/3.14
-crossed with `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=false/true`.
+crossed with both internal execution implementations.
 
-Before running that suite locally, set
-`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` for the lane you want and rebuild the
-shared Function-app dependency tree:
+Before running that suite locally, rebuild the shared Function-app dependency
+tree:
 
 ```bash
 python eng/scripts/install_e2e_dependencies.py

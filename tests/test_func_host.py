@@ -26,11 +26,22 @@ def test_harness_selection_accepts_expected_marker(monkeypatch, tmp_path: Path) 
     assert (
         _func_host._harness_selection_failure(
             app_dir,
-            "Agent harness selected: harness=maf\nAgent harness selected: harness=maf\n",
+            "Agent harness selected: harness=copilot\nAgent harness selected: harness=copilot\n",
             None,
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    [(None, "copilot"), ("false", "maf"), ("0", "maf"), ("true", "copilot"), ("1", "copilot")],
+)
+def test_expected_harness_matches_selector_contract(monkeypatch, selector, expected) -> None:
+    monkeypatch.delenv(_func_host.HARNESS_SELECTOR, raising=False)
+    env = {} if selector is None else {_func_host.HARNESS_SELECTOR: selector}
+
+    assert _func_host._expected_harness(env) == expected
 
 
 def test_harness_selection_rejects_conflicting_marker(tmp_path: Path) -> None:

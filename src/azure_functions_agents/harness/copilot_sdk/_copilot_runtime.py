@@ -44,8 +44,8 @@ def check_sdk_dependency() -> None:
         version(SDK_DISTRIBUTION)
     except PackageNotFoundError:
         raise CopilotPreviewError(
-            "Copilot preview requires azurefunctions-agents-runtime[copilot]. "
-            f"Install {SDK_DISTRIBUTION} through the optional extra."
+            f"Copilot requires {SDK_DISTRIBUTION}, which is included with "
+            "azurefunctions-agents-runtime. Reinstall the runtime package."
         ) from None
 
 

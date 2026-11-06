@@ -469,7 +469,7 @@ startup and instead becomes an inert catalog entry.
 | 6 | Streaming API | Typed events / text deltas / SSE strings | Yield structured `HostedSkillEvent`; retain SSE only as an HTTP adapter | Human | 2026-10-05 |
 | 7 | Reused configuration | Minimal tools only / all direct execution settings / binding overrides | Reuse model, timeout, agent configuration, filtered tools/MCP/skills, system tools, and response contract; add no overrides | Human | 2026-10-05 |
 | 8 | Internal-only agents | Require existing surface / allow inert entries / predeclare in factory | Permit endpoint-less discovered agents as fully validated inert catalog entries | Human | 2026-10-05 |
-| 9 | Version 1 advanced capabilities | Include / reject / silently omit | Reject Sub Agent delegation, Dynamic Workflows, and Copilot preview at decorator application | Human | 2026-10-05 |
+| 9 | Version 1 advanced capabilities | Include / reject / silently omit | Reject Sub Agent delegation, Dynamic Workflows, and the Copilot path at decorator application | Human | 2026-10-05 |
 | 10 | Foundry model contract | Require endpoint and explicit model / preserve runtime fallback / defer mismatch | Require the endpoint and preserve existing model precedence/default; correct docs that overstate `FOUNDRY_MODEL` as mandatory | Human | 2026-10-05 |
 | 11 | Provider validation timing | App composition / decorator application / first run | Preflight the selected HostedSkill when its decorator is applied, without constructing a client | Human | 2026-10-05 |
 | 12 | Live object lifecycle | Cache live harness object / per-app live object / facade with per-call resources | Inject a fresh facade per Function invocation and create live execution resources per method call | Agent | 2026-10-05 |
